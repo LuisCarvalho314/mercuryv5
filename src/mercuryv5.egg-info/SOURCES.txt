@@ -17,8 +17,10 @@ src/mercury/graph/__init__.py
 src/mercury/graph/core.py
 src/mercury/graph/maintenance.py
 src/mercury/graph/plot_graph.py
+src/mercury/latent/__init__.py
+src/mercury/latent/params.py
+src/mercury/latent/state.py
 src/mercury/memory/__init__.py
-src/mercury/memory/params.py
 src/mercury/memory/state.py
 src/mercury/sensory/__init__.py
 src/mercury/sensory/params.py
@@ -28,11 +30,14 @@ src/mercuryv5.egg-info/SOURCES.txt
 src/mercuryv5.egg-info/dependency_links.txt
 src/mercuryv5.egg-info/requires.txt
 src/mercuryv5.egg-info/top_level.txt
+src/utils/metrics.py
+src/utils/setup_logging.py
 tests/test_adapter.py
 tests/test_csv_loader.py
 tests/test_graph.py
 tests/test_graph_class.py
 tests/test_maintenance.py
+tests/test_memory.py
 tests/test_plot_graph.py
 tests/test_sensory.py
 tests/test_som.py

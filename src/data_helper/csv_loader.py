@@ -11,7 +11,7 @@ Array = np.ndarray
 
 @dataclass(frozen=True)
 class CSVConfig:
-    root: str = "datasets"
+    root: str = f"{Path(__file__).resolve().parent.parent.parent}/datasets"
     level: int = 13
     coords: str = "cartesian"
     timestamp: str | None = None        # "YYYYMMDDHHMMSS" or None => latest

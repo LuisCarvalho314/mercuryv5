@@ -393,7 +393,8 @@ def sensory_step_frozen(
         prior_row = _edge_action_row(g, state.prev_bmu, bmu, am=action_map)
         g = _update_edge(
             g, state.prev_bmu, bmu, prior_row, observed_row,
-            action_bmu=action_bmu, beta=0.5, gaussian_shape=cfg.gaussian_shape,
+            action_bmu=action_bmu, beta=cfg.action_lr,
+            gaussian_shape=cfg.gaussian_shape,
         )
         bmu = int(mapping[bmu])
 

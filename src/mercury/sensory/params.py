@@ -3,7 +3,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class SensoryParams:
     allow_self_loops: bool = False
-    activation_threshold: float = 0.8
+    activation_threshold: float = 0.95
     topological_neighbourhood_threshold: float = 0.6
     max_neurons: int = 50
     sensory_weighting: float = 0.8

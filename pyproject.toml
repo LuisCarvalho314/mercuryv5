@@ -13,6 +13,7 @@ dependencies = [
     "networkx>=3.5",
     "numpy>=2.3.3",
     "pytest>=8.4.2",
+    "scipy>=1.16.2",
 ]
 
 [tool.setuptools.packages.find]
