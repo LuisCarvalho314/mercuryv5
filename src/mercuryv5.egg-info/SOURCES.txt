@@ -1,5 +1,14 @@
 pyproject.toml
 src/data_helper/csv_loader.py
+src/maze_environment/LEVEL.py
+src/maze_environment/__init__.py
+src/maze_environment/agent.py
+src/maze_environment/colour_tile_levels.py
+src/maze_environment/generate_data.py
+src/maze_environment/maze_environment.py
+src/maze_environment/maze_environment_v2.py
+src/maze_environment/maze_environment_v3.py
+src/maze_environment/plots.py
 src/mercury/__init__.py
 src/mercury/action_map/__init__.py
 src/mercury/action_map/adapter.py
