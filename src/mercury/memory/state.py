@@ -15,6 +15,9 @@ class MemoryState:
     length: int                 # strip length L
     sensory_n_nodes: int        # number of sensory nodes at init time (S)
 
+    @property
+    def activations(self) -> Array:
+        return self.gs.node_features["activation"]
 
 def mem_id(s: int, t: int, length: int) -> int:
     return s * length + t
@@ -78,3 +81,4 @@ def update_memory(ms: MemoryState) -> MemoryState:
     A = g.adj.astype(np.float32, copy=False)                            # (n,n)
     g.set_node_feat("activation", act @ A)
     return MemoryState(gs=g, length=ms.length, sensory_n_nodes=ms.sensory_n_nodes)
+
