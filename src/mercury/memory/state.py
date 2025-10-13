@@ -17,7 +17,7 @@ class MemoryState:
 
     @property
     def activations(self) -> Array:
-        return self.gs.node_features["activations"]
+        return self.gs.node_features["activation"]
 
 def mem_id(s: int, t: int, length: int) -> int:
     return s * length + t
