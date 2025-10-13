@@ -22,7 +22,9 @@ class LatentState:
     prev_bmu: int | None = None
     step_idx: int = 0
 
-
+    @property
+    def mem_adj(self) -> Array:
+        return self.g.node_features["mem_adj"]
 
 def _register_features(g: Graph, mem_len: int) -> Graph:
     """
@@ -92,5 +94,58 @@ def _add_temporal_edge(g: Graph, u: int, v: int, t: int, L: int) -> Graph:
 
     g.node_features["mem_adj"][v, idx] = np.float32(1.0)
     return g
+
+
+def compute_bmu(ls: LatentState, ms: MemoryState) -> int:
+    """
+    Compute latent activations from memory, apply contender mask
+    (t0 required + consecutive 0..k timesteps), write 'activation'
+    to the graph, and return BMU index.
+    """
+    g = ls.g
+    mem_adj = g.node_features["mem_adj"]                  # (n_latent, S*L)
+    n_lat = g.n
+    mem_len = mem_adj.shape[1]
+
+    L = getattr(ms, "length", mem_len)
+    if mem_len % L != 0:
+        raise ValueError(f"mem_len={mem_len} not multiple of L={L}")
+
+    act_mem = ms.activations.astype(np.float32)           # (S*L,)
+    if act_mem.shape[0] != mem_len:
+        raise ValueError(f"ms.activations len={act_mem.shape[0]} != mem_len={mem_len}")
+
+    # Raw latent scores
+    act = act_mem @ mem_adj.T                             # (n_lat,)
+
+    # Per-timestep contributions summed over sensors
+    contrib = np.empty((n_lat, L), dtype=np.float32)
+    for t in range(L):
+        idx = np.arange(t, mem_len, L, dtype=np.int64)    # s*L + t
+        contrib[:, t] = (mem_adj[:, idx] * act_mem[idx]).sum(axis=1)
+
+    # Contender rule: must include t=0 and be a contiguous prefix 0..k
+    has_t0 = contrib[:, 0] > 0
+    M = contrib > 0
+    has_any = M.any(axis=1)
+
+    last_from_end = np.argmax(M[:, ::-1], axis=1)         # 0 if all False
+    last_idx = (L - 1) - last_from_end
+    pos = np.arange(L)
+    within_prefix = pos <= last_idx[:, None]
+    prefix_all_true = np.all(~within_prefix | M, axis=1)
+
+    contenders = has_t0 & has_any & prefix_all_true
+
+    if contenders.any():
+        masked = act.copy()
+        masked[~contenders] = -np.float32(np.inf)
+        bmu = int(np.argmax(masked))
+    else:
+        bmu = int(np.argmax(act))  # fallback
+
+    g.set_node_feat("activation", act.astype(np.float32))
+    return bmu
+
 
 
