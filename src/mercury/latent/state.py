@@ -52,6 +52,8 @@ def build_initial_graph(ms: MemoryState) -> Graph:
     for _ in range(ms.sensory_n_nodes):
         g = _add_node(g)
 
+    return g
+
 
 
 def _add_node(g: Graph) -> Graph:
