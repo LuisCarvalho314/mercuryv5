@@ -53,7 +53,7 @@ def test_add_memory_updates_only_last_nodes_and_validates_length():
     # seed baseline activations to verify non-last entries stay the same
     base = np.arange(n, dtype=A.dtype) * 0.1
     ms.gs.set_node_feat("activation", base.copy())
-    ms0 = MemoryState(ms.gs, L)
+    ms0 = MemoryState(ms.gs, L, n)
 
     # memory length must be S = n // L
     mem = np.array([10.0, 20.0, 30.0], dtype=A.dtype)  # shape (S,)

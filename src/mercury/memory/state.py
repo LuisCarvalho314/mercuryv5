@@ -12,7 +12,8 @@ Array = np.ndarray
 @dataclass(frozen=True)
 class MemoryState:
     gs: Graph
-    length: int
+    length: int                 # strip length L
+    sensory_n_nodes: int        # number of sensory nodes at init time (S)
 
 
 def mem_id(s: int, t: int, length: int) -> int:
@@ -20,6 +21,7 @@ def mem_id(s: int, t: int, length: int) -> int:
 
 
 def activations_at_t(ms: MemoryState, t: int) -> np.ndarray:
+    """Return activations at strip time t, shape (S,)."""
     L = int(ms.length)
     if not (0 <= t < L):
         raise ValueError(f"t={t} out of range [0,{L-1}]")
@@ -27,19 +29,19 @@ def activations_at_t(ms: MemoryState, t: int) -> np.ndarray:
     S = n // L
     idx = np.arange(S, dtype=np.int32) * L + t
     act = ms.gs.node_features["activation"]  # (S*L,)
-    return act[idx].copy()                   # (S,)
+    return act[idx].copy()
 
 
 def init_mem(ss: SensoryState, length: int = 5) -> MemoryState:
+    """Create S strips of length L with edges t->t-1. S = ss.gs.n."""
     L = int(length)
     if L <= 0:
         raise ValueError("length must be >= 1")
 
     g = Graph(directed=True)
-    g.register_node_feature("activation", dim=1)  # (n,)
-    S = int(ss.gs.n)
+    g.register_node_feature("activation", dim=1)
 
-    # build S strips of length L; within each strip add edges t->t-1
+    S = int(ss.gs.n)  # sensory node count
     for _ in range(S):
         base = g.add_node()
         for _ in range(1, L):
@@ -47,13 +49,11 @@ def init_mem(ss: SensoryState, length: int = 5) -> MemoryState:
         for t in range(1, L):
             g.add_edge(base + t, base + t - 1, weight=1.0)
 
-    return MemoryState(gs=g, length=L)
+    return MemoryState(gs=g, length=L, sensory_n_nodes=S)
 
 
 def add_memory(ms: MemoryState, memory: Array) -> MemoryState:
-    """Write activations into the last node of each strip.
-    memory.shape == (S,), where S = gs.n // length.
-    """
+    """Write activations into the last node of each strip. memory.shape == (S,)."""
     g, L = ms.gs, int(ms.length)
     S = g.n // L
     mem = np.ravel(np.asarray(memory, dtype=np.float32))
@@ -68,14 +68,13 @@ def add_memory(ms: MemoryState, memory: Array) -> MemoryState:
     new_act = act.copy()
     new_act[idx] = mem
     g.set_node_feat("activation", new_act)
-    return MemoryState(gs=g, length=L)
+    return MemoryState(gs=g, length=L, sensory_n_nodes=ms.sensory_n_nodes)
 
 
 def update_memory(ms: MemoryState) -> MemoryState:
-    """Shift activations along edges using a single step: act' = act @ adj."""
+    """One step shift along edges: act' = act @ adj."""
     g = ms.gs
     act = g.node_features["activation"].astype(np.float32, copy=False)  # (n,)
     A = g.adj.astype(np.float32, copy=False)                            # (n,n)
-    new_act = act @ A                                                   # (n,)
-    g.set_node_feat("activation", new_act)
-    return MemoryState(gs=g, length=ms.length)
+    g.set_node_feat("activation", act @ A)
+    return MemoryState(gs=g, length=ms.length, sensory_n_nodes=ms.sensory_n_nodes)

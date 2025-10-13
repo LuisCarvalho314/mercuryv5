@@ -80,15 +80,9 @@ def build_initial_graph(data_dim: int, n: int = 2) -> Graph:
     g = Graph(directed=True)
     _register_features(g, data_dim)
     for _ in range(n):
-        g.add_node(
-            node_feat={
-                "weight": np.zeros((data_dim,), np.float32),
-                "context": np.zeros((data_dim,), np.float32),
-                "activation": np.array(0.0, np.float32),
-            },
-            edge_defaults_for_new_node={"age": np.array([0], np.int32),
-                                        "action": np.array([0], np.int32)},
-        )
+        g = _add_node(g,
+                  np.zeros((data_dim,), dtype=np.float32),
+                  np.zeros((data_dim,), dtype=np.float32))
     g.assert_invariants()
     return g
 
