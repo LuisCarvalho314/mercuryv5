@@ -9,7 +9,9 @@ from mercury.memory.state import (
     mem_id,
     activations_at_t,
     MemoryState,
+    memory_view_at_global_timestep,  # new
 )
+
 
 # --- minimal sensory stub ---
 class _DummyGS:
@@ -120,3 +122,55 @@ def test_update_memory_matches_matmul_and_moves_back_one1():
 
     # explicit check: from t=L-1 to t=L-2 across all strips
     assert np.array_equal(activations_at_t(ms1, 1), mem)
+
+@pytest.mark.parametrize("k", [0, 1, 3])
+def test_memory_view_at_global_timestep_alignment_and_padding(k):
+    # set up deterministic memory state
+    S, L = 3, 4
+    ss = _DummySensory(S)
+    ms: MemoryState = init_mem(ss, length=L)
+
+    # assign activation pattern:
+    # strip s, timestep t -> 10*s + t
+    # so:
+    # strip 0: [0, 1, 2, 3]
+    # strip 1: [10,11,12,13]
+    # strip 2: [20,21,22,23]
+    mem_matrix = np.zeros((S, L), dtype=np.float32)
+    for s in range(S):
+        for t in range(L):
+            mem_matrix[s, t] = 10 * s + t
+    ms.gs.set_node_feat("activation", mem_matrix.reshape(S * L))
+
+    # call function under test
+    view_state = memory_view_at_global_timestep(ms, k)
+
+    # return type should be MemoryState
+    assert isinstance(view_state, MemoryState)
+
+    # metadata should be preserved
+    assert view_state.length == L
+    assert view_state.sensory_n_nodes == S
+    assert view_state.gs is ms.gs  # same graph object by design
+
+    # read back activation from returned state
+    act_flat = view_state.gs.node_features["activation"]
+    assert act_flat.shape == (S * L,)
+    act_view = act_flat.reshape(S, L)
+
+    # build expected matrix:
+    # column 0 in expected = original column k
+    # column 1 in expected = original column k+1
+    # columns past L-1 are zero
+    expected = np.zeros((S, L), dtype=np.float32)
+    remaining_cols = L - k
+    if remaining_cols > 0:
+        expected[:, :remaining_cols] = mem_matrix[:, k:]
+
+    # numeric check
+    assert np.allclose(act_view, expected), (
+        f"unexpected reindexed view for k={k}\n"
+        f"got:\n{act_view}\n"
+        f"expected:\n{expected}"
+    )
+

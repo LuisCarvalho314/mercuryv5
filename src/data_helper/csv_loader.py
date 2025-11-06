@@ -13,7 +13,7 @@ Array = np.ndarray
 class CSVConfig:
     root: str = f"{Path(__file__).resolve().parent.parent.parent}/datasets"
     level: int = 13
-    coords: str = "cartesian"
+    coords: str = "cardinal distance/range_None"
     timestamp: str | None = None        # "YYYYMMDDHHMMSS" or None => latest
     delimiter: str = ","
     dtype: np.dtype = np.float32

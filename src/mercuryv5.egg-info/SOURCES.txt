@@ -32,12 +32,3 @@ src/mercuryv5.egg-info/requires.txt
 src/mercuryv5.egg-info/top_level.txt
 src/utils/metrics.py
 src/utils/setup_logging.py
-tests/test_adapter.py
-tests/test_csv_loader.py
-tests/test_graph.py
-tests/test_graph_class.py
-tests/test_maintenance.py
-tests/test_memory.py
-tests/test_plot_graph.py
-tests/test_sensory.py
-tests/test_som.py

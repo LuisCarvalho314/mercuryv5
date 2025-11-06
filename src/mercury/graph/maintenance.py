@@ -35,56 +35,49 @@ class MaintenanceParams:
     max_age: int = 18
 
 
+from typing import Iterable
+
 def age_maintenance(
     u: int,
     v: int,
     g: Graph,
     p: HasMaxAge,
+    exclude: Optional[Iterable[int]] = None,
 ) -> Tuple[Graph, Array]:
     """
-    Age edges from node `u`, prune edges over the threshold, then drop isolated nodes.
+    Age edges from node `u`, prune old edges, drop isolated nodes.
 
-    Pipeline
-    --------
-    1) `update_ages(u, v, g)`: increment `age[u, j, :]` for all `j` with `adj[u, j] != 0`
-       except `j == v`.
-    2) `prune_old_edges(g, p)`: set `adj[i, j] = 0` and zero all `age[i, j, :]`
-       where `age[i, j, 0] >= p.max_age`.
-    3) `remove_lonely_nodes(g, exclude=v)`: remove nodes with `in_degree == 0`, keep `v`.
+    Pipeline:
+    1) update_ages(u, v, g)
+    2) prune_old_edges(g, p)
+    3) remove_lonely_nodes(g, exclude=keep_nodes)
 
-    Parameters
-    ----------
-    u : int
-        Source row index. Must satisfy `0 <= u < g.n`.
-    v : int
-        Column index to exclude from aging. Must satisfy `0 <= v < g.n`.
-    g : Graph
-        Graph with an edge feature named `"age"` of shape `(n, n, E)`, `E >= 1`.
-        The graph is modified in place.
-    p : HasMaxAge
-        Configuration with field `max_age: int`.
+    keep_nodes must be an ndarray[int32] of node indices that are immune
+    to orphan-pruning.
 
-    Returns
-    -------
-    (Graph, ndarray)
-        The same graph instance `g` after maintenance, and an `old_to_new`
-        mapping of shape `(old_n,)`, dtype `int32`. Kept nodes map to new
-        indices; removed nodes map to `-1`. If no nodes are removed, the
-        mapping is the identity `arange(n)`.
-
-    Raises
-    ------
-    AssertionError
-        If the `"age"` edge feature is missing.
-
-    Notes
-    -----
-    In-place. Suited for NumPy execution. No JAX dependency here.
+    Returns:
+        (g_after, old_to_new_mapping)
     """
     assert "age" in g.edge_features, "Graph has no 'age' edge feature"
+
     update_ages(u, v, g)
     prune_old_edges(g, p)
-    return remove_lonely_nodes(g, exclude=v)
+
+    # normalize exclude
+    if exclude is None:
+        base_keep = set()
+    elif isinstance(exclude, (int, np.integer)):
+        base_keep = {int(exclude)}
+    else:
+        base_keep = {int(x) for x in exclude}
+
+    # also force-keep v (target of the current transition)
+    base_keep.add(int(v))
+
+    keep_nodes = np.asarray(sorted(base_keep), dtype=np.int32)
+
+    return remove_lonely_nodes(g, exclude=keep_nodes)
+
 
 
 def update_ages(u: int, v: int, g: Graph) -> None:

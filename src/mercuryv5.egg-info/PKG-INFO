@@ -4,6 +4,7 @@ Version: 0.1.0
 Summary: Add your description here
 Requires-Python: >=3.13
 Requires-Dist: gymnasium>=1.2.1
+Requires-Dist: imageio>=2.37.0
 Requires-Dist: matplotlib>=3.10.7
 Requires-Dist: networkx>=3.5
 Requires-Dist: numpy>=2.3.3
