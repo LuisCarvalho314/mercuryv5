@@ -12,7 +12,8 @@ from mercury.action_map.adapter import ActionMap
 from mercury.sensory.params import SensoryParams
 from mercury.sensory.state import sensory_step, init_state, sensory_step_frozen
 from mercury.memory.state import init_mem, update_memory, add_memory, MemoryState
-from mercury.latent.state import LatentState, latent_step, init_latent_state
+from mercury.latent.state import LatentState, latent_step, init_latent_state, \
+    _remove_aliased_connections
 from mercury.latent.params import LatentParams
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +32,7 @@ state = init_state(data_dim)
 cfg = SensoryParams(activation_threshold=0.95)
 am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
 # ----- loop -----
-for t, (observation, action) in enumerate(iter_sequence(obs, act), start=1):
+for t, (observation, action) in enumerate(iter_sequence(obs, act)):
     action = np.atleast_1d(action).astype(np.float32)          # (A,)
     action_bmu, action_vector = am.step(action)                              #
     # update
@@ -76,8 +77,12 @@ for t, (observation, action) in enumerate(iter_sequence(obs, act)):
         latent_states.append(bmu)
 
     prev_bmu = state.prev_bmu
-    if t % 1000 == 0:
+    if t % 5000 == 0:
         print(t)
-
+        g = latent.g
+        for i in range(g.n):
+            removed = range(g.n)
+            g = _remove_aliased_connections(g, i, removed)
+        latent.g = g
 
 np.savetxt("latent.csv", latent_states)

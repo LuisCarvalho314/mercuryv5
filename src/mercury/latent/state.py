@@ -550,16 +550,23 @@ def latent_step(
             state.preds.append(preds)
             print(f"seen preds: {state.preds}")
             # resolve aliasing of the previous state chain using replay
-            """ remove all connections"""
+            # """ remove all connections"""
+            # for i in range(g.n):
+            #     removed = range(g.n)
+            #     g = _remove_aliased_connections(g, i, removed)
+
+            """ remove all connections to and from bmu_prev"""
+            g = _remove_aliased_connections(g, resolved_prev,range(g.n))
             for i in range(g.n):
-                removed = range(g.n)
-                g = _remove_aliased_connections(g, i, removed)
+                g = _remove_aliased_connections(g, i, resolved_prev)
+
 
             # g = _remove_aliased_connections(
             #     g,
             #     bmu_prev=int(resolved_prev),
             #     predicted_nodes=preds,
             # )
+
 
             state.g = g
 

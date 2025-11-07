@@ -298,14 +298,14 @@ for observation, action in iter_sequence(obs, act):
         draw_graph_on_axes(
             ax_latent,
             latent.g,
-            layout="kamada_kawai",
+            layout="spring_layout",
             node_color_key="activation",
             edge_width_key="weight",
             edge_color_key="action",
             with_labels=True,
             arrows=True,
             alpha=0.9,
-            positioner=positioner,
+            # positioner=positioner,
             edge_curvature=edge_curvature,
         )
         summary_latent, cur_mask_latent_now = _summarize_change(
