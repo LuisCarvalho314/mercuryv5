@@ -12,7 +12,7 @@ import time
 
 class MazeEnvironment(gym.Env):
     def __init__(self, level, plotting=False, agent_sensors=None,
-                 colour_tile_levels=True):
+                 colour_tile_levels=False):
         setup_logging()
         self.logger = logging.getLogger(self.__class__.__name__)
         if colour_tile_levels:
@@ -29,12 +29,12 @@ class MazeEnvironment(gym.Env):
 
 
     def read_level(self, level):
-        maze = np.ones((len(level), len(level[0])), dtype=np.uint8)
+        maze = np.zeros((len(level), len(level[0])), dtype=np.uint8)
         initial_agent_position = (0,0)
         for i, row in enumerate(level):
             for j, element in enumerate(row):
                 if element == "X":
-                    maze[i, j] = 0
+                    maze[i, j] = 1
                 if element == "P":
                     initial_agent_position = (i, j)
         return maze, initial_agent_position
@@ -57,25 +57,28 @@ class MazeEnvironment(gym.Env):
         # print(f"POS | {self.agent.position}")
         # print(f"ACT | {action}")
         # print(f"OBS | {self.agent.observation}")
-        self.agent_position, self.agent.action = self.agent.take_action(
+        self.agent_position, self.agent.action, collision = (
+            self.agent.take_action(
             self.maze,
-                                                        action=action)
+            action=action))
         self._get_obs()
         self.logger.debug("STEP")
         if self.plotting:
             self.visualization.update_loop(self)
-        return self.agent.observation, self.agent.action
+        return self.agent.observation, self.agent.action, bool(collision)
 
     def random_action(self):
         return random.choice(list(self.agent.action_dict.keys()))
 
 if __name__ == '__main__':
-    level = colour_levels[0]
-    agent_sensors = {"sensor": "floor"}
+    level = levels[13]
+    agent_sensors = {"sensor": "cardinal distance", "range" : None}
     env = MazeEnvironment(level, plotting=True, agent_sensors=agent_sensors)
     env.reset()
     for i in range(100):
         action = random.choice(list(env.agent.action_dict.keys()))
         obs = env.step(action)
+        print(obs)
+        time.sleep(.001)
 
 

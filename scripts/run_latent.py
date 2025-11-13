@@ -21,9 +21,9 @@ DATASETS_DIR = PROJECT_ROOT / "datasets"
 
 # ----- data -----
 # data_cfg = CSVConfig(root=str(DATASETS_DIR), level=13, coords="floor")
-data_cfg = CSVConfig(root=str(DATASETS_DIR))
+data_cfg = CSVConfig(root=str(DATASETS_DIR), level=16)
 
-obs, act = load_level_csv(data_cfg)
+obs, act, col = load_level_csv(data_cfg)
 data_dim = int(obs.shape[1])
 action_dim = int(act.shape[1]) if act.ndim == 2 else 1
 
@@ -32,7 +32,8 @@ state = init_state(data_dim)
 cfg = SensoryParams(activation_threshold=0.95)
 am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
 # ----- loop -----
-for t, (observation, action) in enumerate(iter_sequence(obs, act)):
+for t, (observation, action, collision) in enumerate(iter_sequence(obs, act,
+                                                                 col)):
     action = np.atleast_1d(action).astype(np.float32)          # (A,)
     action_bmu, action_vector = am.step(action)                              #
     # update
@@ -45,15 +46,17 @@ for t, (observation, action) in enumerate(iter_sequence(obs, act)):
 
 
 # ---- Models ----
-mem_length = 5
-mem = init_mem(state, mem_length)
+mem_length = 50
+mem = init_mem(state.gs.n, mem_length)
+mem_vec = []
 action_mem = []
 latent = init_latent_state(mem)
 latent_cfg = LatentParams()
 
 prev_bmu = None
 latent_states = []
-for t, (observation, action) in enumerate(iter_sequence(obs, act)):
+for t, (observation, action, collision) in enumerate(iter_sequence(obs, act,
+                                                                   col)):
     action = np.atleast_1d(action).astype(np.float32)          # (A,)
     action_bmu, action_vector = am.step(action)
     state = sensory_step_frozen(observation.astype(np.float32),       # update
@@ -64,15 +67,17 @@ for t, (observation, action) in enumerate(iter_sequence(obs, act)):
                          am, )
     S = state.gs.n
     if mem is None or mem.gs.n != S * mem_length:
-        mem = init_mem(state, length=mem_length)
+        mem = init_mem(state.gs.n, length=mem_length)
 
-    if prev_bmu is None or state.prev_bmu != prev_bmu:
+    if prev_bmu is None or not collision:
         s_act = np.asarray(state.gs.node_features["activation"],
                            dtype=np.float32)
         mem = update_memory(mem)
         mem = add_memory(mem, s_act)
+        mem_vec.append(s_act)
         action_mem.append(action_bmu)
-        latent, bmu = latent_step(mem, latent, action_bmu, latent_cfg, am,
+        latent, bmu = latent_step(mem, mem_vec, latent, action_bmu,
+                                  latent_cfg, am,
                                   action_mem)
         latent_states.append(bmu)
 

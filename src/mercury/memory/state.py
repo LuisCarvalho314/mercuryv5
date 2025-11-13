@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-
+from typing import List
 from mercury.graph.core import Graph
 from mercury.sensory.state import SensoryState
 
@@ -54,7 +54,7 @@ def activations_at_t(ms: MemoryState, t: int) -> np.ndarray:
 #
 #     return MemoryState(gs=g, length=L, sensory_n_nodes=S)
 
-def init_mem(ss: SensoryState, length: int = 5) -> MemoryState:
+def init_mem(n: int, length: int = 5) -> MemoryState:
     """Create S strips of length L with edges t->t+1. S = ss.gs.n."""
     strip_length = int(length)
     if strip_length <= 0:
@@ -63,7 +63,7 @@ def init_mem(ss: SensoryState, length: int = 5) -> MemoryState:
     g = Graph(directed=True)
     g.register_node_feature("activation", dim=1)
 
-    sensory_node_count = int(ss.gs.n)  # number of sensory nodes
+    sensory_node_count = n  # number of sensory nodes
     for _ in range(sensory_node_count):
         base = g.add_node()
         for _ in range(1, strip_length):
@@ -202,4 +202,86 @@ def memory_view_at_global_timestep(ms: MemoryState, k: int) -> MemoryState:
     return MemoryState(gs=g_new, length=L, sensory_n_nodes=ms.sensory_n_nodes)
 
 
+import numpy as np
+from typing import List
 
+def memory_view_at_global_timestep_external_mem(
+    ms: MemoryState,
+    k: int,
+    mem_vec: List[float] | np.ndarray,
+) -> MemoryState:
+    """
+    Re-index like memory_view_at_global_timestep, but fill columns that would be zeros
+    (i.e., columns that would require mem[:, t] with t >= L) from an external vector.
+
+    Inputs
+    ------
+    ms: MemoryState with graph size n = S*L and node feature 'activation' length S*L
+    k : int, 0 <= k < L
+    mem_vec : array-like with either shape (S, k) or flat length S*k.
+              Column 0 fills the first unknown column (new view's column L-k),
+              column 1 fills the next, etc. Extra columns are ignored; missing
+              columns are zero-padded.
+
+    Returns
+    -------
+    MemoryState bound to a fresh graph clone with reindexed 'activation'.
+    """
+    g_src = ms.gs
+    L = int(ms.length)
+    n_nodes_total = g_src.n
+    if n_nodes_total % L != 0:
+        raise ValueError(
+            f"memory graph inconsistent: g.n={n_nodes_total} not divisible by length={L}"
+        )
+    S = n_nodes_total // L
+
+    if not (0 <= k < L):
+        raise ValueError(f"k={k} out of range [0,{L-1}]")
+
+    # source memory as S×L
+    act_src_flat = g_src.node_features["activation"].astype(np.float32, copy=False)
+    mem_matrix = act_src_flat.reshape(S, L)
+
+    # base view: shift mem[:, k:] to columns 0..L-k-1
+    out_matrix = np.zeros((S, L), dtype=np.float32)
+    keep_cols = L - k
+    if keep_cols > 0:
+        out_matrix[:, :keep_cols] = mem_matrix[:, k:]
+
+    # normalize mem_vec to shape (S, ?)
+    mv = np.asarray(mem_vec, dtype=np.float32)
+    if mv.ndim == 1:
+        if mv.size % S != 0:
+            raise ValueError(
+                f"mem_vec length {mv.size} not divisible by S={S}; "
+                "expected S*k elements (flat) or (S,k) matrix"
+            )
+        mv = mv.reshape(S, mv.size // S)
+    elif mv.ndim == 2:
+        if mv.shape[0] != S:
+            raise ValueError(f"mem_vec first dim {mv.shape[0]} != S={S}")
+    else:
+        raise ValueError("mem_vec must be 1D (flat) or 2D (S, k)")
+
+    # number of unknown columns to fill = k
+    provide = min(k, mv.shape[1])
+    if provide > 0:
+        out_matrix[:, keep_cols:keep_cols + provide] = mv[:, :provide]
+    # any shortfall remains zeros by construction
+
+    # clone graph topology; register activation independently
+    g_new = Graph(directed=True)
+    g_new.register_node_feature("activation", dim=1)
+
+    for _ in range(g_src.n):
+        g_new.add_node()
+
+    A = g_src.adj
+    nz_u, nz_v = np.nonzero(A)
+    for u, v in zip(nz_u.tolist(), nz_v.tolist()):
+        g_new.add_edge(u, v, weight=A[u, v])
+
+    g_new.set_node_feat("activation", out_matrix.reshape(S * L))
+
+    return MemoryState(gs=g_new, length=L, sensory_n_nodes=ms.sensory_n_nodes)

@@ -9,7 +9,9 @@ from ..action_map.adapter import ActionMap
 from mercury.graph.core import Graph, Array
 from mercury.graph.maintenance import age_maintenance
 from .params import LatentParams
-from ..memory.state import MemoryState, mem_id, activations_at_t, memory_view_at_global_timestep
+from ..memory.state import (MemoryState, mem_id, activations_at_t,
+                            memory_view_at_global_timestep, init_mem,
+                            add_memory, update_memory)
 from ..sensory.state import SensoryState
 
 type Array = np.ndarray
@@ -339,10 +341,19 @@ def _debug_print_latent_mem_adj(g: Graph, ms: MemoryState, node_idx: int) -> Non
     desc = ", ".join([f"(sensory {u}, t={t})" for (t, u) in pairs])
     print(f"latent {node_idx} encodes {desc}")
 
+def rollback_memory_state(ms: MemoryState, mem_vec: Array, length) -> MemoryState:
+    for i in range(length):
+        ms = update_memory(ms)
+        ms = add_memory(ms, mem_vec[i])
+    return ms
+
+
+
 
 def _resolve_prev_with_memory_replay(
     state: LatentState,
     ms: MemoryState,
+    mem_vec: list,
     prev_bmu: int,
     bmu: int,
     action_mem: list[int],
@@ -355,53 +366,60 @@ def _resolve_prev_with_memory_replay(
 
 
 
+
+
     replay_state = deepcopy(state)
 
     L = int(ms.length)
-    if state.step_idx < L:
+    if state.step_idx < 2*L:
         return replay_state.g, int(prev_bmu), bmu
 
     am = list(action_mem)[-L:]              # oldest → newest
+    mem_vec = np.asarray(mem_vec[-2*L:])
+    replay_mem = init_mem(ms.sensory_n_nodes, ms.length)
+
+    replay_mem = rollback_memory_state(replay_mem, mem_vec, L)
+
     if len(am) < L:
         raise ValueError(f"action_mem length {len(am)} < L={L}")
 
 
     for i in range(L):
-        mem_view = memory_view_at_global_timestep(ms, L-i-1)
-        # action_bmu = int(am[i])
-        bmu = int(compute_bmu(replay_state, mem_view))
+        action_bmu = int(am[i])
+        bmu = int(compute_bmu(replay_state, replay_mem))
 
         if bmu == prev_bmu:
             # refine by spawning a clone extended at the first gap
             g_new, bmu_refined, created = add_temporal_edge_at_first_gap_clone(
-                replay_state.g, mem_view, bmu, preds
+                replay_state.g, replay_mem, bmu, preds
             )
             _debug_print_latent_mem_adj(g_new, ms, bmu_refined)
             print(f"created {created}")
             replay_state.g = g_new
 
-            bmu = int(compute_bmu(replay_state, mem_view))
+            bmu = int(compute_bmu(replay_state, replay_mem))
             if bmu == bmu_refined:
                 print("bmu created properly")
 
-            # break
+        replay_mem = update_memory(replay_mem)
+        replay_mem = add_memory(replay_mem, mem_vec[L+i])
 
 
-    """ 
-    TODO
-    When bmu 10 is created it is not activated in the replay hinting at some 
-    flaw in the logic
-    """
     seen_bmus = set()
+    bmus = []
     for _ in range(int(max_replay)):
         bmu = None
+        replay_mem = rollback_memory_state(replay_mem, mem_vec, L)
         # oldest → newest frames
         for j in range(L):
+            replay_mem = update_memory(replay_mem)
+            replay_mem = add_memory(replay_mem, mem_vec[L+j])
             prev_bmu = bmu
             mem_view = memory_view_at_global_timestep(ms, L-j-1)
             action_bmu = int(am[j])
 
-            bmu = int(compute_bmu(replay_state, mem_view))
+            bmu = int(compute_bmu(replay_state, replay_mem))
+            bmus.append(bmu)
             # if bmu == bmu_refined:
             #     print(f"prev {prev_bmu} -> {action_bmu} -> bmu: {bmu}")
             #
@@ -411,12 +429,13 @@ def _resolve_prev_with_memory_replay(
             #
             # optional learning of replay chain edges
             # keep only if needed for your dynamics
-            # if prev_bmu is not None:
-            #     replay_state.g = _update_edges_with_actions(
-            #         replay_state.g, prev_bmu=prev_bmu, bmu=bmu,
-            #         action_bmu=action_bmu, action_map=action_map,
-            #         gaussian_shape=cfg.gaussian_shape,
-            #     )
+            if prev_bmu is not None:
+                replay_state.g = _update_edges_with_actions(
+                    replay_state.g, prev_bmu=prev_bmu, bmu=bmu,
+                    action_bmu=action_bmu, action_map=action_map,
+                    gaussian_shape=cfg.gaussian_shape,
+                )
+                # print(bmus)
 
     if bmu_refined not in seen_bmus:
         raise EnvironmentError("added bmu not seen in replay")
@@ -516,6 +535,7 @@ def first_zero_col_node(g: Graph, ms: MemoryState, node_idx: int) -> int | None:
 
 def latent_step(
     ms: MemoryState,
+    mem_vec: List[int],
     state: LatentState,
     action_bmu: int,
     cfg: LatentParams,
@@ -574,6 +594,7 @@ def latent_step(
             g, resolved_prev, bmu_now = _resolve_prev_with_memory_replay(
                 state=state,
                 ms=ms,
+                mem_vec=mem_vec,
                 prev_bmu=state.prev_bmu,
                 bmu=bmu_now,
                 action_mem=action_mem,
@@ -584,7 +605,7 @@ def latent_step(
                 preds=preds,
             )
 
-            bmu_now = mapping[bmu_now]
+            # bmu_now = mapping[bmu_now]
 
             # # mark active for plotting
             # g = _set_activation(g, bmu_now)
@@ -618,7 +639,7 @@ def latent_step(
         #                                      ms.sensory_n_nodes))
 
 
-    bmu_now = mapping[bmu_now]
+    # bmu_now = mapping[bmu_now]
 
     print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} ->"
           f" {bmu_now}")

@@ -138,13 +138,13 @@ train_plot_trigger = "structure"   # "always" | "structure" | "bmu"
 replay_plot_trigger = "bmu"        # "always" | "structure" | "bmu"
 train_pause_s = 0.2
 replay_pause_s = 0.005
-mem_length = 10
+mem_length = 50
 edge_curvature = 0.18
 layout_for_cache = "spring_layout"
 
 # ----- data -----
-data_cfg = CSVConfig(root=str(DATASETS_DIR))
-obs, act = load_level_csv(data_cfg)
+data_cfg = CSVConfig(root=str(DATASETS_DIR),level=16)
+obs, act, col = load_level_csv(data_cfg)
 data_dim = int(obs.shape[1])
 action_dim = int(act.shape[1]) if act.ndim == 2 else 1
 
@@ -166,7 +166,7 @@ fig_train, ax_train = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
 prev_mask_train: Optional[np.ndarray] = None
 prev_bmu_train: Optional[int] = None
 
-for observation, action in iter_sequence(obs, act):
+for observation, action, collision in iter_sequence(obs, act, col):
     action_vec = np.atleast_1d(action).astype(np.float32)
     action_bmu, _ = am.step(action_vec)
 
@@ -237,7 +237,7 @@ for observation, action in iter_sequence(obs, act):
 # ----------------------------
 
 # init memory state using final sensory graph
-mem: MemoryState = init_mem(state, mem_length)
+mem: MemoryState = init_mem(state.gs.n, mem_length)
 
 # init latent from that memory
 latent: LatentState = init_latent_state(mem)
@@ -248,9 +248,10 @@ fig_replay, (ax_latent, ax_mem) = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
 
 prev_mask_latent: Optional[np.ndarray] = None
 prev_bmu_latent: Optional[int] = None
+mem_vec = []
 action_mem = []
 steps = 0
-for observation, action in iter_sequence(obs, act):
+for observation, action, collision in iter_sequence(obs, act, col):
     steps += 1
 
     action_vec = np.atleast_1d(action).astype(np.float32)
@@ -271,15 +272,17 @@ for observation, action in iter_sequence(obs, act):
         mem = init_mem(state, length=mem_length)
 
     # update memory and latent whenever we moved to a new BMU in sensory
-    if prev_bmu_latent is None or state.prev_bmu != prev_bmu_latent:
+    if prev_bmu_latent is None or not collision:
         sensory_activation = np.asarray(
             state.gs.node_features["activation"],
             dtype=np.float32,
         )
         mem = update_memory(mem)
         mem = add_memory(mem, sensory_activation)
+        mem_vec.append(sensory_activation)
         action_mem.append(action_bmu)
-        latent, bmu = latent_step(mem, latent, action_bmu, latent_cfg, am,
+        latent, bmu = latent_step(mem, mem_vec ,latent, action_bmu,
+                                  latent_cfg, am,
                                   action_mem)
 
     # plotting current latent graph + memory grid

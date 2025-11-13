@@ -21,17 +21,13 @@
       "class": "logging.handlers.TimedRotatingFileHandler",
       "level": "DEBUG",
       "formatter": "detailed",
-      "filename": "C:\\Users\\lcarv\\PycharmProjects\\mercurynx\\logs/logs.log",
+      "filename": "logs/maze_env.log",
       "when": "midnight"
     }
   },
-  "loggers": {
-    "root": {
-      "level": "DEBUG",
-      "handlers": [
-        "stderr",
-        "file"
-      ]
-    }
-  }
+  "root": {
+    "level": "DEBUG",
+    "handlers": ["stderr", "file"]
+  },
+  "loggers": {}
 }

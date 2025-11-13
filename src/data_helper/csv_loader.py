@@ -13,7 +13,7 @@ Array = np.ndarray
 class CSVConfig:
     root: str = f"{Path(__file__).resolve().parent.parent.parent}/datasets"
     level: int = 13
-    coords: str = "cardinal distance/range_None"
+    coords: str = "cardinal distance/range_2"
     timestamp: str | None = None        # "YYYYMMDDHHMMSS" or None => latest
     delimiter: str = ","
     dtype: np.dtype = np.float32
@@ -52,16 +52,19 @@ def load_level_csv(cfg: CSVConfig) -> Tuple[Array, Array]:
     ts = cfg.timestamp or _latest_timestamp(base)
     obs_p = base / f"{ts}_observations.csv"
     act_p = base / f"{ts}_actions.csv"
+    col_p = base / f"{ts}_collisions.csv"
     if not obs_p.exists() or not act_p.exists():
         raise FileNotFoundError(f"Missing files for timestamp {ts} under {base}")
     obs = _load_csv(obs_p, cfg.delimiter, cfg.dtype)
     act = _load_csv(act_p, cfg.delimiter, cfg.dtype)
+    col = _load_csv(col_p, cfg.delimiter, cfg.dtype)
     if act.ndim > 1 and act.shape[1] == 1:
         act = act.squeeze(1)
-    return obs, act
+    return obs, act, col
 
 
-def iter_sequence(obs: Array, act: Array) -> Iterator[Tuple[Array, Array]]:
+def iter_sequence(obs: Array, act: Array, col: Array) -> Iterator[Tuple[Array,
+Array, Array]]:
     """Yield (obs_t, act_t) pairs in sequence order."""
     for i in range(obs.shape[0]):
-        yield obs[i], act[i]
+        yield obs[i], act[i], col[i]
