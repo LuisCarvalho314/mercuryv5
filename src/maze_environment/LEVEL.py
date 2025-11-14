@@ -165,6 +165,11 @@ level_17 = [
     "XXXXXXX"
 ]
 
+level_18 = [
+    "XXXXXX",
+    "XP   X",
+    "XXXXXX"
+]
 
 # for value in maze.iter_rows(
 #     min_row=1, max_row=17, min_col=1, max_col=17, values_only=True
@@ -198,3 +203,4 @@ levels.append(level_14)
 levels.append(level_15)
 levels.append(level_16)
 levels.append(level_17)
+levels.append(level_18)

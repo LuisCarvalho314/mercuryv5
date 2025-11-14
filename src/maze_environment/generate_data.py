@@ -8,8 +8,8 @@ import os
 
 random.seed(0)
 
-level = 17
-agent_sensors = {"sensor": "cardinal distance", "range": 2}
+level = 18
+agent_sensors = {"sensor": "cardinal distance", "range": 1}
 # agent_sensors = {"sensor": "cartesian"}
 
 if agent_sensors["sensor"] == "cardinal distance":

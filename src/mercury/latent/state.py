@@ -437,8 +437,8 @@ def _resolve_prev_with_memory_replay(
                 )
                 # print(bmus)
 
-    if bmu_refined not in seen_bmus:
-        raise EnvironmentError("added bmu not seen in replay")
+    # if bmu_refined not in seen_bmus:
+    #     raise EnvironmentError("added bmu not seen in replay")
     return replay_state.g, int(prev_bmu), bmu
 
 
@@ -633,13 +633,13 @@ def latent_step(
             gaussian_shape=cfg.gaussian_shape,
         )
         #
-        # if state.step_idx % 5 == 0:
-        #     g, mapping = age_maintenance(resolved_prev,bmu_now,g,cfg,
-        #                                  exclude=np.arange(
-        #                                      ms.sensory_n_nodes))
+        if state.step_idx % 1 == 0:
+            g, mapping = age_maintenance(resolved_prev,bmu_now,g,cfg,
+                                         exclude=np.arange(
+                                             ms.sensory_n_nodes))
 
 
-    # bmu_now = mapping[bmu_now]
+    bmu_now = mapping[bmu_now]
 
     print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} ->"
           f" {bmu_now}")

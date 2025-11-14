@@ -143,7 +143,7 @@ edge_curvature = 0.18
 layout_for_cache = "spring_layout"
 
 # ----- data -----
-data_cfg = CSVConfig(root=str(DATASETS_DIR),level=16)
+data_cfg = CSVConfig(root=str(DATASETS_DIR),level=18)
 obs, act, col = load_level_csv(data_cfg)
 data_dim = int(obs.shape[1])
 action_dim = int(act.shape[1]) if act.ndim == 2 else 1
