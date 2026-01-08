@@ -70,6 +70,8 @@ def init_mem(n: int, length: int = 5) -> MemoryState:
             g.add_node()
         for t in range(0, strip_length - 1):
             g.add_edge(base + t, base + t + 1, weight=1.0)
+            # g.add_edge(base + t, base + t + 1, weight=0.5)
+
 
     return MemoryState(gs=g, length=strip_length, sensory_n_nodes=sensory_node_count)
 

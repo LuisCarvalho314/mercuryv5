@@ -61,6 +61,7 @@ def load_level_csv(cfg: CSVConfig) -> Tuple[Array, Array]:
     if act.ndim > 1 and act.shape[1] == 1:
         act = act.squeeze(1)
     return obs, act, col
+    # return obs, act
 
 
 def iter_sequence(obs: Array, act: Array, col: Array) -> Iterator[Tuple[Array,
@@ -68,3 +69,10 @@ Array, Array]]:
     """Yield (obs_t, act_t) pairs in sequence order."""
     for i in range(obs.shape[0]):
         yield obs[i], act[i], col[i]
+
+# def iter_sequence(obs: Array, act: Array) -> Iterator[
+#     Tuple[Array,
+#     Array, Array]]:
+#     """Yield (obs_t, act_t) pairs in sequence order."""
+#     for i in range(obs.shape[0]):
+#         yield obs[i], act[i]

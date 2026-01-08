@@ -101,7 +101,8 @@ class Agent:
         if action in self.action_dict:
             do_action, action_hot = self.action_dict[action]
             new_position = do_action()
-            collision = self.valid_position(maze=maze, new_position=new_position)
+            collision = self.valid_position(maze=maze,
+                                            new_position=new_position)
             if not collision:
                 self.position = new_position
             return self.position, action_hot ,collision

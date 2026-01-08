@@ -8,9 +8,9 @@ import os
 
 random.seed(0)
 
-level = 18
-agent_sensors = {"sensor": "cardinal distance", "range": 1}
-# agent_sensors = {"sensor": "cartesian"}
+level = 16
+# agent_sensors = {"sensor": "cardinal distance", "range": 1}
+agent_sensors = {"sensor": "cartesian"}
 
 if agent_sensors["sensor"] == "cardinal distance":
     directory = (f"../../datasets/level{level}/{agent_sensors["sensor"]}/"
@@ -30,11 +30,15 @@ observations = []
 actions = []
 collisions = []
 
+action = env.random_action()
+collision = True
+
 for i in np.arange(20000):
+    # action = env.random_policy(action,collision)
     action = env.random_action()
-    observation, action, collision = env.step(action)
+    observation, action_vec, collision = env.step(action)
     observations.append(observation)
-    actions.append(action)
+    actions.append(action_vec)
     collisions.append(collision)
 
 observations = np.array(observations)

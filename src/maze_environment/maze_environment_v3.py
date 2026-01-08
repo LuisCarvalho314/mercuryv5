@@ -57,6 +57,7 @@ class MazeEnvironment(gym.Env):
         # print(f"POS | {self.agent.position}")
         # print(f"ACT | {action}")
         # print(f"OBS | {self.agent.observation}")
+
         self.agent_position, self.agent.action, collision = (
             self.agent.take_action(
             self.maze,
@@ -70,14 +71,21 @@ class MazeEnvironment(gym.Env):
     def random_action(self):
         return random.choice(list(self.agent.action_dict.keys()))
 
+    def random_policy(self, previous_action, col):
+        if col:
+            return self.random_action()
+        return previous_action
+
 if __name__ == '__main__':
-    level = levels[13]
+    level = levels[18]
     agent_sensors = {"sensor": "cardinal distance", "range" : None}
     env = MazeEnvironment(level, plotting=True, agent_sensors=agent_sensors)
     env.reset()
+    action = env.random_action()
     for i in range(100):
-        action = random.choice(list(env.agent.action_dict.keys()))
+        # action = random.choice(list(env.agent.action_dict.keys()))
         obs = env.step(action)
+        action = env.random_policy(action, obs[2])
         print(obs)
         time.sleep(.001)
 

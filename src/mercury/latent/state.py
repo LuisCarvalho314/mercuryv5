@@ -1,12 +1,13 @@
 # latent/state.py
-from copy import deepcopy
+from copy import deepcopy, copy
 from dataclasses import dataclass, replace, field
 from typing import Any, Tuple, List
 
 import numpy as np
+import scipy.stats as stats
 
 from ..action_map.adapter import ActionMap
-from mercury.graph.core import Graph, Array
+from mercury.graph.core import Graph
 from mercury.graph.maintenance import age_maintenance
 from .params import LatentParams
 from ..memory.state import (MemoryState, mem_id, activations_at_t,
@@ -33,6 +34,7 @@ class LatentState:
     prev_bmu: int | None = None
     step_idx: int = 0
     preds: List = field(default_factory=list)
+    average_not_surprise = 0
 
     @property
     def mem_adj(self) -> Array:
@@ -202,6 +204,59 @@ def compute_bmu(state: LatentState, ms: MemoryState) -> int:
     # g.set_node_feat("activation", act.astype(np.float32))
     return bmu
 
+def compute_bmu_array(state: LatentState, ms: MemoryState) -> int:
+    """
+    Compute latent activations from memory, apply contender mask
+    (t0 required + consecutive 0..k timesteps), write 'activation'
+    to the graph, and return BMU index.
+    """
+    g = state.g
+    mem_adj = g.node_features["mem_adj"]                  # (n_latent, S*L)
+    n_lat = g.n
+    mem_len = mem_adj.shape[1]
+
+    L = getattr(ms, "length", mem_len)
+    if mem_len % L != 0:
+        raise ValueError(f"mem_len={mem_len} not multiple of L={L}")
+
+    act_mem = ms.activations.astype(np.float32)           # (S*L,)
+    if act_mem.shape[0] != mem_len:
+        raise ValueError(f"ms.activations len={act_mem.shape[0]} != mem_len={mem_len}")
+
+    # Raw latent scores
+    act = act_mem @ mem_adj.T                             # (n_lat,)
+
+    # Per-timestep contributions summed over sensors
+    contrib = np.empty((n_lat, L), dtype=np.float32)
+    for t in range(L):
+        idx = np.arange(t, mem_len, L, dtype=np.int64)    # s*L + t
+        contrib[:, t] = (mem_adj[:, idx] * act_mem[idx]).sum(axis=1)
+
+    # Contender rule: must include t=0 and be a contiguous prefix 0..k
+    has_t0 = contrib[:, 0] > 0
+    M = contrib > 0
+    has_any = M.any(axis=1)
+
+    last_from_end = np.argmax(M[:, ::-1], axis=1)         # 0 if all False
+    last_idx = (L - 1) - last_from_end
+    pos = np.arange(L)
+    within_prefix = pos <= last_idx[:, None]
+    prefix_all_true = np.all(~within_prefix | M, axis=1)
+
+    contenders = has_t0 & has_any & prefix_all_true
+
+    # if contenders.any():
+    masked = act.copy()
+    masked[~contenders] = -np.float32(np.inf)
+    bmu = int(np.argmax(masked))
+    # else:
+    #     bmu = int(np.argmax(act))  # fallback
+    #     print("FALLBACK BMU")
+    # bmu = int(np.argmax(act))  # fallback
+
+    # g.set_node_feat("activation", act.astype(np.float32))
+    return masked
+
 
 def _calc_activation(d: Array | float, gaussian_shape: float) -> Array | float:
     d = np.asarray(d, dtype=np.float32)
@@ -347,8 +402,14 @@ def rollback_memory_state(ms: MemoryState, mem_vec: Array, length) -> MemoryStat
         ms = add_memory(ms, mem_vec[i])
     return ms
 
+def rollback_k_memory_state(ms: MemoryState, mem_vec: Array, k: int, L: int) -> MemoryState:
+    length = 2*L
+    mem_vec = np.asarray(mem_vec[-length:])
+    replay_mem = init_mem(ms.sensory_n_nodes, ms.length)
 
 
+    replay_mem = rollback_memory_state(replay_mem, mem_vec, length-k)
+    return replay_mem
 
 def _resolve_prev_with_memory_replay(
     state: LatentState,
@@ -449,6 +510,23 @@ def _still_aliased(g: Graph, node: int | None, action_bmu: int) -> bool:
         return False
     return _is_aliased(g, _predict(g, int(node), int(action_bmu)))
 
+
+def opposite_actions(action_map: ActionMap, action_mem: List[int] ) -> bool:
+    if len(action_mem) < 2:
+        return False
+    curr_action_vec = action_map.state.codebook[action_mem[-1]]
+    prev_action_vec = action_map.state.codebook[action_mem[-2]]
+
+    reference_vectors = [np.array([0,1,0,1]), np.array([1,0,1,0])]
+
+    combined_vec = curr_action_vec + prev_action_vec
+
+    for ref_vec in reference_vectors:
+        if np.allclose(ref_vec, combined_vec):
+            return True
+    return False
+
+
 def add_temporal_edge_at_first_gap_clone(g: Graph, ms: MemoryState, v: int,
                                          preds: Array
                                          ) -> tuple[Graph, int, bool]:
@@ -530,6 +608,42 @@ def first_zero_col_node(g: Graph, ms: MemoryState, node_idx: int) -> int | None:
     zeros = np.flatnonzero(~np.any(mat != 0, axis=0))
     return int(zeros[0]) if zeros.size else None
 
+def novelty_for_prev(ms: MemoryState, g: Graph, prev_bmu: int) -> float:
+    mem_adj_row = g.node_features["mem_adj"][prev_bmu].astype(np.float32, copy=False)
+    act_mem = ms.activations.astype(np.float32, copy=False)
+
+    # Expected indices for this node:
+    expected_mask = mem_adj_row > 0.0  # bool mask over S*L
+
+    # Overlap between current activation and this node's expected pattern
+    overlap = (act_mem * expected_mask).sum()
+    total = act_mem.sum() + 1e-6
+
+    # 0 → fully explained by prev_bmu; 1 → completely novel
+    return 1.0 - float(overlap / total)
+
+def _should_resolve_alias(
+    ms: MemoryState,
+    g: Graph,
+    prev_bmu: int,
+    novelty_history: List[float],
+    cfg: LatentParams,
+) -> bool:
+    # Compute current novelty
+    nov = novelty_for_prev(ms, g, prev_bmu)
+    novelty_history.append(nov)
+
+    # keep only last K values
+    K = getattr(cfg, "alias_novelty_window", 5)
+    if len(novelty_history) > K:
+        del novelty_history[:-K]
+
+    # Require sustained novelty above threshold
+    thr = getattr(cfg, "alias_novelty_threshold", 0.3)
+    min_count = getattr(cfg, "alias_min_novel_steps", 3)
+
+    high = [x for x in novelty_history if x >= thr]
+    return len(high) >= min_count
 
 
 
@@ -540,11 +654,11 @@ def latent_step(
     action_bmu: int,
     cfg: LatentParams,
     action_map: ActionMap,
-    action_mem: list[int],
-) -> tuple[LatentState, int]:
+    action_mem: List[int],
+    state_mem: List[int]
+) -> tuple[LatentState, int, List[int]]:
     g = state.g
 
-    # BMU for the current timestep (true present)
     bmu_now = compute_bmu(state, ms)
     # print("bmu_now", bmu_now)
     mapping = np.arange(g.n, dtype=np.int32)
@@ -556,6 +670,12 @@ def latent_step(
     #      f"{memory_view_at_global_timestep(ms,4).activations}")
 
 
+
+    if bmu_now >= state.g.n or mapping[bmu_now] == -1:
+        bmu_now = compute_bmu(state, ms)
+    else:
+        bmu_now = mapping[bmu_now]
+
     if state.prev_bmu is None:
         # no previous state yet
         next_prev_bmu = int(bmu_now)
@@ -565,10 +685,26 @@ def latent_step(
         preds = _predict(state.g, int(state.prev_bmu), action_bmu)
 
 
-        if preds.size > 1:
+        is_current_aliased = False
+        for a in range(action_map.state.codebook.shape[0]):
+            current_preds = _predict(state.g, bmu_now, a)
+            if current_preds.size > 1:
+                is_current_aliased = True
+                state.average_not_surprise = max(state.average_not_surprise -
+                                                 1 ,0)
+                # state.average_not_surprise -= 1
+            else:
+                is_current_aliased = False
+                state.average_not_surprise = min(state.average_not_surprise +
+                                                 1 ,6)
+
+        if is_current_aliased:
+            print(True)
+
+        if preds.size > 1 and state.average_not_surprise > 3:
             print(f"ALIASED {state.prev_bmu}")
             state.preds.append(preds)
-            print(f"seen preds: {state.preds}")
+            # print(f"seen preds: {state.preds}")
             # resolve aliasing of the previous state chain using replay
             # """ remove all connections"""
             # for i in range(g.n):
@@ -605,23 +741,13 @@ def latent_step(
                 preds=preds,
             )
 
-            # bmu_now = mapping[bmu_now]
+            mapping = np.arange(g.n, dtype=np.int32)
 
-            # # mark active for plotting
-            # g = _set_activation(g, bmu_now)
-            #
-            # # # commit
-            # state.g = g
-            # state.prev_bmu = int(bmu_now)
-            # state.step_idx += 1
-            # state.mapping = mapping
-            #
-            # if state.step_idx % 10 == 0:
-            #     for i in range(state.g.n):
-            #         _debug_print_latent_mem_adj(g, ms, i)
-            #
-            # # print(f"{g.n} nodes @ step {state.step_idx}")
-            # return state, int(bmu_now)
+            for i in range(state.g.n):
+                _debug_print_latent_mem_adj(g,ms,i)
+            _debug_print_latent_action_adj(g)
+
+            state_mem[-1] = resolved_prev
 
         # learn live edge from resolved_prev -> bmu_now under current action_bmu
         g = _update_edges_with_actions(
@@ -639,7 +765,7 @@ def latent_step(
                                              ms.sensory_n_nodes))
 
 
-    bmu_now = mapping[bmu_now]
+            bmu_now = mapping[bmu_now]
 
     print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} ->"
           f" {bmu_now}")
@@ -647,17 +773,39 @@ def latent_step(
     # mark active for plotting
     g = _set_activation(g, bmu_now)
 
+
+
+
     # commit
+    state_mem.append(bmu_now)
     state.g = g
+
+    if bmu_now >= state.g.n or mapping[bmu_now] == -1:
+        bmu_now = compute_bmu(state, ms)
+    else:
+        bmu_now = mapping[bmu_now]
+
     state.prev_bmu = int(bmu_now)
     state.step_idx += 1
     state.mapping = mapping
 
-    if state.step_idx % 10 ==0:
-        for i in range(state.g.n):
-            _debug_print_latent_mem_adj(g,ms,i)
-        _debug_print_latent_action_adj(g)
+    # if state.step_idx % 10 ==0:
+    #     for i in np.arange(state.g.n-1):
+    #         for j in np.arange(i+1, state.g.n):
+    #             mem_adj_i = state.g.node_features["mem_adj"][i]
+    #             mem_adj_j = state.g.node_features["mem_adj"][j]
+    #             print(i, j, stats.wasserstein_distance(mem_adj_i, mem_adj_j),
+    #                   stats.wasserstein_distance(state.g.adj[i], state.g.adj[
+    #                       j]))
+    # #     for i in range(state.g.n):
+    # #         _debug_print_latent_mem_adj(g,ms,i)
+    # #     _debug_print_latent_action_adj(g)
+    # #
+
+
+
+
 
     # print(f"{g.n} nodes @ step {state.step_idx}")
-    return state, int(bmu_now)
+    return state, int(bmu_now), state_mem
 

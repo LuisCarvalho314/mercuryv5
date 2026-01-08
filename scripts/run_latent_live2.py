@@ -134,23 +134,24 @@ def _should_plot(
 # ----------------------------
 
 # config
-train_plot_trigger = "structure"   # "always" | "structure" | "bmu"
+train_plot_trigger = "always"   # "always" | "structure" | "bmu"
 replay_plot_trigger = "bmu"        # "always" | "structure" | "bmu"
-train_pause_s = 0.2
+train_pause_s = 0.002
 replay_pause_s = 0.005
-mem_length = 50
+mem_length = 100
 edge_curvature = 0.18
 layout_for_cache = "spring_layout"
 
 # ----- data -----
-data_cfg = CSVConfig(root=str(DATASETS_DIR),level=18)
+data_cfg = CSVConfig(root=str(DATASETS_DIR),level=16)
 obs, act, col = load_level_csv(data_cfg)
+# obs, act = load_level_csv(data_cfg)
 data_dim = int(obs.shape[1])
 action_dim = int(act.shape[1]) if act.ndim == 2 else 1
 
 # ----- sensory model + action map -----
 state = init_state(data_dim)
-cfg = SensoryParams(activation_threshold=0.95, max_age=100)
+cfg = SensoryParams(activation_threshold=0.95, max_age=17, sensory_weighting=1)
 am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
 
 # cache for node layout so the graph is visually stable
@@ -167,6 +168,8 @@ prev_mask_train: Optional[np.ndarray] = None
 prev_bmu_train: Optional[int] = None
 
 for observation, action, collision in iter_sequence(obs, act, col):
+# for observation, action in iter_sequence(obs, act):
+
     action_vec = np.atleast_1d(action).astype(np.float32)
     action_bmu, _ = am.step(action_vec)
 
@@ -183,52 +186,52 @@ for observation, action, collision in iter_sequence(obs, act, col):
     cur_adj = state.gs.adj
     cur_bmu = state.prev_bmu
 
-#     if _should_plot(
-#         train_plot_trigger,
-#         prev_mask=prev_mask_train,
-#         cur_adj=cur_adj,
-#         prev_bmu=prev_bmu_train,
-#         cur_bmu=cur_bmu,
-#     ):
-#         ax_train.clear()
-#         draw_graph_on_axes(
-#             ax_train,
-#             state.gs,
-#             layout="kamada_kawai",
-#             node_color_key="activation",
-#             edge_width_key="weight",
-#             edge_color_key="action",
-#             with_labels=False,
-#             arrows=True,
-#             alpha=0.9,
-#             positioner=positioner,
-#             edge_curvature=edge_curvature,
-#         )
-#         summary, cur_mask_now = _summarize_change(
-#             prev_mask_train,
-#             cur_adj,
-#             prev_bmu_train,
-#             cur_bmu,
-#         )
-#         ax_train.set_title(f"Training • step {state.step_idx}")
-#         ax_train.text(
-#             0.02,
-#             0.98,
-#             summary,
-#             transform=ax_train.transAxes,
-#             va="top",
-#             ha="left",
-#             fontsize=8,
-#             bbox=dict(boxstyle="round", fc="white", alpha=0.85),
-#         )
-#         ax_train.figure.tight_layout()
-#         plt.pause(train_pause_s)
-#         prev_mask_train = cur_mask_now
-#     else:
-#         prev_mask_train = _edge_presence_mask(cur_adj)
-#
-#     prev_bmu_train = cur_bmu
-#
+    # if _should_plot(
+    #     train_plot_trigger,
+    #     prev_mask=prev_mask_train,
+    #     cur_adj=cur_adj,
+    #     prev_bmu=prev_bmu_train,
+    #     cur_bmu=cur_bmu,
+    # ):
+    #     ax_train.clear()
+    #     draw_graph_on_axes(
+    #         ax_train,
+    #         state.gs,
+    #         layout="spring_layout",
+    #         node_color_key="activation",
+    #         edge_width_key="weight",
+    #         edge_color_key="action",
+    #         with_labels=False,
+    #         arrows=True,
+    #         alpha=0.9,
+    #         positioner=positioner,
+    #         edge_curvature=edge_curvature,
+    #     )
+    #     summary, cur_mask_now = _summarize_change(
+    #         prev_mask_train,
+    #         cur_adj,
+    #         prev_bmu_train,
+    #         cur_bmu,
+    #     )
+    #     ax_train.set_title(f"Training • step {state.step_idx}")
+    #     ax_train.text(
+    #         0.02,
+    #         0.98,
+    #         summary,
+    #         transform=ax_train.transAxes,
+    #         va="top",
+    #         ha="left",
+    #         fontsize=8,
+    #         bbox=dict(boxstyle="round", fc="white", alpha=0.85),
+    #     )
+    #     ax_train.figure.tight_layout()
+    #     plt.pause(train_pause_s)
+    #     prev_mask_train = cur_mask_now
+    # else:
+    #     prev_mask_train = _edge_presence_mask(cur_adj)
+    #
+    # prev_bmu_train = cur_bmu
+
 # plt.ioff()
 # plt.show()
 
@@ -241,7 +244,7 @@ mem: MemoryState = init_mem(state.gs.n, mem_length)
 
 # init latent from that memory
 latent: LatentState = init_latent_state(mem)
-latent_cfg = LatentParams()
+latent_cfg = LatentParams(max_age=50)
 
 plt.ion()
 fig_replay, (ax_latent, ax_mem) = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
@@ -250,7 +253,9 @@ prev_mask_latent: Optional[np.ndarray] = None
 prev_bmu_latent: Optional[int] = None
 mem_vec = []
 action_mem = []
+state_mem = []
 steps = 0
+# for observation, action in iter_sequence(obs, act):
 for observation, action, collision in iter_sequence(obs, act, col):
     steps += 1
 
@@ -273,6 +278,8 @@ for observation, action, collision in iter_sequence(obs, act, col):
 
     # update memory and latent whenever we moved to a new BMU in sensory
     if prev_bmu_latent is None or not collision:
+    # if prev_bmu_latent is None or state.prev_bmu != prev_bmu_latent:
+
         sensory_activation = np.asarray(
             state.gs.node_features["activation"],
             dtype=np.float32,
@@ -281,9 +288,9 @@ for observation, action, collision in iter_sequence(obs, act, col):
         mem = add_memory(mem, sensory_activation)
         mem_vec.append(sensory_activation)
         action_mem.append(action_bmu)
-        latent, bmu = latent_step(mem, mem_vec ,latent, action_bmu,
+        latent, bmu, state_mem = latent_step(mem, mem_vec ,latent, action_bmu,
                                   latent_cfg, am,
-                                  action_mem)
+                                  action_mem, state_mem)
 
     # plotting current latent graph + memory grid
     cur_adj_latent = latent.g.adj
@@ -301,7 +308,7 @@ for observation, action, collision in iter_sequence(obs, act, col):
         draw_graph_on_axes(
             ax_latent,
             latent.g,
-            layout="spring_layout",
+            layout="kamada_kawai",
             node_color_key="activation",
             edge_width_key="weight",
             edge_color_key="action",
