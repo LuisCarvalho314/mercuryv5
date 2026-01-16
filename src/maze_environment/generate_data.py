@@ -8,7 +8,7 @@ import os
 
 random.seed(0)
 
-level = 16
+level = 17
 # agent_sensors = {"sensor": "cardinal distance", "range": 1}
 agent_sensors = {"sensor": "cartesian"}
 
@@ -32,10 +32,11 @@ collisions = []
 
 action = env.random_action()
 collision = True
+rand_prob = 0.3
 
 for i in np.arange(20000):
-    # action = env.random_policy(action,collision)
-    action = env.random_action()
+    action = env.random_policy(action,collision,rand_prob)
+    # action = env.random_action()
     observation, action_vec, collision = env.step(action)
     observations.append(observation)
     actions.append(action_vec)

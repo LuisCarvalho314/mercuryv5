@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASETS_DIR = PROJECT_ROOT / "datasets"
 
 # ----- data -----
-level = 16
+level = 17
 # data_cfg = CSVConfig(root=str(DATASETS_DIR), level=1, coords="floor")
 data_cfg = CSVConfig(root=str(DATASETS_DIR), level=level)
 
@@ -31,7 +31,7 @@ action_dim = int(act.shape[1]) if act.ndim == 2 else 1
 # ----- models -----
 state = init_state(data_dim)
 cfg = SensoryParams(activation_threshold=0.95)
-am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
+am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.1, sigma=0.0, key=0)
 # ----- loop -----
 sensory_states = []
 
@@ -50,13 +50,13 @@ for t, (observation, action, collision) in enumerate(iter_sequence(obs, act,
 
 
 # ---- Models ----
-mem_length = 100
+mem_length = 10
 mem = init_mem(state.gs.n, mem_length)
 mem_vec = []
 action_mem = []
 state_mem = []
 latent = init_latent_state(mem)
-latent_cfg = LatentParams()
+latent_cfg = LatentParams(max_age=100, action_lr=0.1)
 
 prev_bmu = None
 latent_states = []
@@ -85,8 +85,9 @@ for t, (observation, action, collision) in enumerate(iter_sequence(obs, act,
                                   latent_cfg, am,
                                   action_mem, state_mem)
     latent_states.append(int(latent.prev_bmu))
+    # latent_states = [latent.mapping[x] for x in latent_states]
 
-    prev_bmu = state.prev_bmu
+    prev_bmu = latent.prev_bmu
     # if t % 5000 == 0:
     #     print(t)
     #     g = latent.g

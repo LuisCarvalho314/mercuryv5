@@ -1,5 +1,7 @@
 # sensory/state.py
 from __future__ import annotations
+
+import copy
 from dataclasses import dataclass, replace
 from typing import Any, Tuple
 
@@ -351,37 +353,17 @@ def sensory_step_frozen(
 ) -> SensoryState:
     g = state.gs
 
-    # 1) BMU selection
+    # 1) BMU selection only (no learning)
     weights = g.node_features["weight"]
     contexts = g.node_features["context"]
-    bmu, d_weight, diff_weights = _pick_bmu(
+    bmu, _, _ = _pick_bmu(
         weights, contexts, np.asarray(observation, np.float32),
         state.global_context, cfg.sensory_weighting
     )
 
-    activation = float(_calc_activation(d_weight[bmu], cfg.gaussian_shape))
-
-    if _should_create_node(
-        activation,
-        activation_threshold=cfg.activation_threshold,
-        n_neurons=g.n,
-        max_neurons=cfg.max_neurons,
-    ):
-        g = _add_node(g, observation, state.global_context)
-        bmu = g.n - 1
-    else:
-        g = _update_winning_node(g, bmu, np.asarray(observation, np.float32), state.global_context, cfg.winning_node_lr)
-        g = _update_neighbours(
-            g, bmu, np.asarray(observation, np.float32), diff_weights,
-            gaussian_shape=cfg.gaussian_shape,
-            distance_threshold=cfg.topological_neighbourhood_threshold,
-            lr=cfg.topological_neighbourhood_lr,
-        )
-
-    state = _update_global_context(state, g.node_features["weight"][bmu], g.node_features["context"][bmu], cfg.global_context_lr)
     mapping = np.arange(g.n, dtype=np.int32)
 
-    # 3) Temporal link + maintenance
+    # 2) Temporal link only (optional)
     if state.prev_bmu is not None:
         observed_row = np.asarray(action_map.state.codebook[action_bmu], np.float32)
         prior_row = _edge_action_row(g, state.prev_bmu, bmu, am=action_map)
@@ -390,12 +372,15 @@ def sensory_step_frozen(
             action_bmu=action_bmu, beta=cfg.action_lr,
             gaussian_shape=cfg.gaussian_shape,
         )
-        bmu = int(mapping[bmu])
 
+    # 3) Activation for plotting
     g = _set_activation(g, bmu)
 
     state.gs = g
+    state.prev_prev_bmu = copy.deepcopy(state.prev_bmu)
+    state.prev_bmu = state.prev_prev_bmu
     state.prev_bmu = bmu
     state.step_idx += 1
     state.mapping = mapping
     return state
+

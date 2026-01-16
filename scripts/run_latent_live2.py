@@ -136,14 +136,14 @@ def _should_plot(
 # config
 train_plot_trigger = "always"   # "always" | "structure" | "bmu"
 replay_plot_trigger = "bmu"        # "always" | "structure" | "bmu"
-train_pause_s = 0.002
-replay_pause_s = 0.005
-mem_length = 100
+train_pause_s = 0.0002
+replay_pause_s = 0.0005
+mem_length = 10
 edge_curvature = 0.18
 layout_for_cache = "spring_layout"
 
 # ----- data -----
-data_cfg = CSVConfig(root=str(DATASETS_DIR),level=16)
+data_cfg = CSVConfig(root=str(DATASETS_DIR),level=18)
 obs, act, col = load_level_csv(data_cfg)
 # obs, act = load_level_csv(data_cfg)
 data_dim = int(obs.shape[1])
@@ -151,7 +151,8 @@ action_dim = int(act.shape[1]) if act.ndim == 2 else 1
 
 # ----- sensory model + action map -----
 state = init_state(data_dim)
-cfg = SensoryParams(activation_threshold=0.95, max_age=17, sensory_weighting=1)
+cfg = SensoryParams(activation_threshold=0.95, max_age=17,
+                    sensory_weighting=0.6)
 am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
 
 # cache for node layout so the graph is visually stable
@@ -230,7 +231,7 @@ for observation, action, collision in iter_sequence(obs, act, col):
     # else:
     #     prev_mask_train = _edge_presence_mask(cur_adj)
     #
-    # prev_bmu_train = cur_bmu
+    prev_bmu_train = cur_bmu
 
 # plt.ioff()
 # plt.show()
@@ -244,7 +245,7 @@ mem: MemoryState = init_mem(state.gs.n, mem_length)
 
 # init latent from that memory
 latent: LatentState = init_latent_state(mem)
-latent_cfg = LatentParams(max_age=50)
+latent_cfg = LatentParams(max_age=50, action_lr=0.1)
 
 plt.ion()
 fig_replay, (ax_latent, ax_mem) = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
@@ -274,7 +275,7 @@ for observation, action, collision in iter_sequence(obs, act, col):
     sensory_node_count = state.gs.n
     # if memory shape no longer matches (S * L) recreate memory ring buffer
     if mem is None or mem.gs.n != sensory_node_count * mem_length:
-        mem = init_mem(state, length=mem_length)
+        mem = init_mem(sensory_node_count, length=mem_length)
 
     # update memory and latent whenever we moved to a new BMU in sensory
     if prev_bmu_latent is None or not collision:

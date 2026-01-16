@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASETS_DIR = PROJECT_ROOT / "datasets"
 
 # ----- data -----
-level = 16
+level = 17
 # data_cfg = CSVConfig(root=str(DATASETS_DIR), level=13, coords="floor")
 data_cfg = CSVConfig(root=str(DATASETS_DIR), level=level,coords="cartesian")
 

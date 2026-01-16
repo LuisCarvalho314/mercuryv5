@@ -71,8 +71,10 @@ class MazeEnvironment(gym.Env):
     def random_action(self):
         return random.choice(list(self.agent.action_dict.keys()))
 
-    def random_policy(self, previous_action, col):
-        if col:
+    def random_policy(self, previous_action, col, rand_prob):
+        rand_num = random.random()
+        do_random = rand_num < rand_prob or col
+        if do_random:
             return self.random_action()
         return previous_action
 
