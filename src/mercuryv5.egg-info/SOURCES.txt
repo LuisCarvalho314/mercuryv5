@@ -9,6 +9,7 @@ src/maze_environment/maze_environment.py
 src/maze_environment/maze_environment_v2.py
 src/maze_environment/maze_environment_v3.py
 src/maze_environment/plots.py
+src/maze_environment/schemas.py
 src/mercury/__init__.py
 src/mercury/action_map/__init__.py
 src/mercury/action_map/adapter.py
@@ -20,11 +21,17 @@ src/mercury/graph/plot_graph.py
 src/mercury/latent/__init__.py
 src/mercury/latent/params.py
 src/mercury/latent/state.py
+src/mercury/latent/state_2.py
 src/mercury/memory/__init__.py
 src/mercury/memory/state.py
 src/mercury/sensory/__init__.py
 src/mercury/sensory/params.py
 src/mercury/sensory/state.py
+src/mercury_runs/__init__.py
+src/mercury_runs/io_parquet.py
+src/mercury_runs/pipelines.py
+src/mercury_runs/save_results.py
+src/mercury_runs/schemas_results.py
 src/mercuryv5.egg-info/PKG-INFO
 src/mercuryv5.egg-info/SOURCES.txt
 src/mercuryv5.egg-info/dependency_links.txt
@@ -32,3 +39,5 @@ src/mercuryv5.egg-info/requires.txt
 src/mercuryv5.egg-info/top_level.txt
 src/utils/metrics.py
 src/utils/setup_logging.py
+src/vector_symbolic_architectures/BSC_SOM.py
+src/vector_symbolic_architectures/binary_splatter_code.py

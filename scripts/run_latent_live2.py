@@ -1,368 +1,478 @@
+# scripts/latent_live_2.py
 from __future__ import annotations
 
+import argparse
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
-from data_helper.csv_loader import CSVConfig, load_level_csv, iter_sequence
+from data_helper.csv_loader import iter_sequence
 from mercury.action_map.adapter import ActionMap
-from mercury.sensory.params import SensoryParams
-from mercury.sensory.state import sensory_step, init_state, sensory_step_frozen
-from mercury.memory.state import init_mem, update_memory, add_memory, MemoryState
-from mercury.latent.state import LatentState, latent_step, init_latent_state
-from mercury.latent.params import LatentParams
 from mercury.graph.plot_graph import (
+    Positioner,
     draw_graph_on_axes,
     draw_memory_grid_on_axes,
-    Positioner,
 )
+from mercury.latent.params import LatentParams
+from mercury.latent.state import LatentState, init_latent_state, latent_step
+from mercury.memory.state import MemoryState, add_memory, init_mem, update_memory
+from mercury.sensory.params import SensoryParams
+from mercury.sensory.state import init_state, sensory_step, sensory_step_frozen
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATASETS_DIR = PROJECT_ROOT / "datasets"
+from mercury_runs.io_parquet import ParquetConfig, load_level_parquet
+
 
 # ----------------------------
 # edge diff + plotting helpers
 # ----------------------------
 
-def _edge_presence_mask(adj: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+def edge_presence_mask(adjacency: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     """Boolean mask of present edges, excluding self-loops."""
-    mask = np.abs(adj) > eps
+    mask = np.abs(adjacency) > eps
     np.fill_diagonal(mask, False)
     return mask
 
 
-def _pad_mask(target_shape: tuple[int, int], previous: Optional[np.ndarray]) -> np.ndarray:
+def pad_mask(target_shape: tuple[int, int], previous_mask: Optional[np.ndarray]) -> np.ndarray:
     """Pad previous mask to target shape with False."""
-    if previous is None:
+    if previous_mask is None:
         return np.zeros(target_shape, dtype=bool)
-    if previous.shape == target_shape:
-        return previous
-    out = np.zeros(target_shape, dtype=bool)
-    r = min(target_shape[0], previous.shape[0])
-    c = min(target_shape[1], previous.shape[1])
-    out[:r, :c] = previous[:r, :c]
-    return out
+    if previous_mask.shape == target_shape:
+        return previous_mask
+    padded = np.zeros(target_shape, dtype=bool)
+    row_count = min(target_shape[0], previous_mask.shape[0])
+    col_count = min(target_shape[1], previous_mask.shape[1])
+    padded[:row_count, :col_count] = previous_mask[:row_count, :col_count]
+    return padded
 
 
-def _edge_add_remove(
-    prev_mask: Optional[np.ndarray],
-    cur_adj: np.ndarray,
+def edge_add_remove(
+    previous_mask: Optional[np.ndarray],
+    current_adjacency: np.ndarray,
     eps: float = 1e-8,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
     """
     Returns:
-      cur_mask : bool (n,n) current presence
-      added    : int (k,2) edges now present that were absent
-      removed  : int (k,2) edges now absent that were present
-      changed  : bool any add/remove
-    Notes:
-      - Ignores weight-only changes.
-      - Self-loops excluded.
-      - Handles n changes via padding.
+      current_mask : bool (n,n) current presence
+      added        : int (k,2) edges now present that were absent
+      removed      : int (k,2) edges now absent that were present
+      changed      : bool any add/remove
     """
-    cur_mask = _edge_presence_mask(cur_adj, eps)
-    prev_aligned = _pad_mask(cur_mask.shape, prev_mask)
-    added = np.argwhere(cur_mask & (~prev_aligned))
-    removed = np.argwhere((~cur_mask) & prev_aligned)
+    current_mask = edge_presence_mask(current_adjacency, eps)
+    previous_aligned = pad_mask(current_mask.shape, previous_mask)
+    added = np.argwhere(current_mask & (~previous_aligned))
+    removed = np.argwhere((~current_mask) & previous_aligned)
     changed = (added.size + removed.size) > 0
-    return cur_mask, added, removed, changed
+    return current_mask, added, removed, changed
 
 
-def _summarize_change(
-    prev_mask: Optional[np.ndarray],
-    cur_adj: np.ndarray,
-    prev_bmu: Optional[int],
-    cur_bmu: Optional[int],
+def summarize_change(
+    previous_mask: Optional[np.ndarray],
+    current_adjacency: np.ndarray,
+    previous_bmu: Optional[int],
+    current_bmu: Optional[int],
     eps: float = 1e-8,
 ) -> Tuple[str, np.ndarray]:
-    """
-    Human-readable summary string for the live plot.
-    Returns (summary_text, cur_mask_for_next_iter).
-    """
-    cur_mask, added, removed, _ = _edge_add_remove(prev_mask, cur_adj, eps=eps)
-    add_cnt = int(added.shape[0])
-    rem_cnt = int(removed.shape[0])
-    add_examples = [f"{int(u)}→{int(v)}" for u, v in added[:3]]
-    rem_examples = [f"{int(u)}→{int(v)}" for u, v in removed[:3]]
+    current_mask, added, removed, _ = edge_add_remove(previous_mask, current_adjacency, eps=eps)
 
-    parts: list[str] = []
-    if add_cnt or rem_cnt:
-        ae = f" ({', '.join(add_examples)})" if add_examples else ""
-        re = f" ({', '.join(rem_examples)})" if rem_examples else ""
-        parts.append(f"edges +{add_cnt}{ae}, -{rem_cnt}{re}")
+    added_count = int(added.shape[0])
+    removed_count = int(removed.shape[0])
+
+    added_examples = [f"{int(u)}→{int(v)}" for u, v in added[:3]]
+    removed_examples = [f"{int(u)}→{int(v)}" for u, v in removed[:3]]
+
+    edge_part = "edges 0"
+    if added_count or removed_count:
+        added_suffix = f" ({', '.join(added_examples)})" if added_examples else ""
+        removed_suffix = f" ({', '.join(removed_examples)})" if removed_examples else ""
+        edge_part = f"edges +{added_count}{added_suffix}, -{removed_count}{removed_suffix}"
+
+    if previous_bmu is None:
+        bmu_part = f"BMU {current_bmu}"
     else:
-        parts.append("edges 0")
+        changed_flag = " (Δ)" if current_bmu != previous_bmu else " (=)"
+        bmu_part = f"BMU {previous_bmu}→{current_bmu}{changed_flag}"
 
-    if prev_bmu is None:
-        parts.append(f"BMU {cur_bmu}")
-    else:
-        delta_flag = " (Δ)" if cur_bmu != prev_bmu else " (=)"
-        parts.append(f"BMU {prev_bmu}→{cur_bmu}{delta_flag}")
-
-    return " | ".join(parts), cur_mask
+    return f"{edge_part} | {bmu_part}", current_mask
 
 
-def _should_plot(
+def should_plot(
     trigger: str,
     *,
-    prev_mask: Optional[np.ndarray],
-    cur_adj: np.ndarray,
-    prev_bmu: Optional[int],
-    cur_bmu: Optional[int],
+    previous_mask: Optional[np.ndarray],
+    current_adjacency: np.ndarray,
+    previous_bmu: Optional[int],
+    current_bmu: Optional[int],
     eps: float = 1e-8,
 ) -> bool:
     """
     trigger:
       - "always"    -> always True
       - "bmu"       -> True iff BMU changed
-      - "structure" -> True iff edge set changed (add/remove only, self-loops excluded)
+      - "structure" -> True iff edge set changed (add/remove, self-loops excluded)
     """
-    t = (trigger or "structure").lower()
-    if t == "always":
+    mode = (trigger or "structure").lower()
+    if mode == "always":
         return True
-    if t == "bmu":
-        return prev_bmu is None or cur_bmu != prev_bmu
-    # "structure"
-    _, _, _, changed = _edge_add_remove(prev_mask, cur_adj, eps=eps)
+    if mode == "bmu":
+        return previous_bmu is None or current_bmu != previous_bmu
+    _, _, _, changed = edge_add_remove(previous_mask, current_adjacency, eps=eps)
     return changed
 
 
 # ----------------------------
-# Script body
+# core pipeline steps
 # ----------------------------
 
-# config
-train_plot_trigger = "always"   # "always" | "structure" | "bmu"
-replay_plot_trigger = "bmu"        # "always" | "structure" | "bmu"
-train_pause_s = 0.0002
-replay_pause_s = 0.0005
-mem_length = 10
-edge_curvature = 0.18
-layout_for_cache = "spring_layout"
-
-# ----- data -----
-data_cfg = CSVConfig(root=str(DATASETS_DIR),level=18)
-obs, act, col = load_level_csv(data_cfg)
-# obs, act = load_level_csv(data_cfg)
-data_dim = int(obs.shape[1])
-action_dim = int(act.shape[1]) if act.ndim == 2 else 1
-
-# ----- sensory model + action map -----
-state = init_state(data_dim)
-cfg = SensoryParams(activation_threshold=0.95, max_age=17,
-                    sensory_weighting=0.6)
-am = ActionMap.random(n_codebook=4, dim=action_dim, lr=0.5, sigma=0.0, key=0)
-
-# cache for node layout so the graph is visually stable
-positioner = Positioner(layout=layout_for_cache)
-
-# ----------------------------
-# Phase 1. Train sensory over full dataset (live plot optional)
-# ----------------------------
-
-plt.ion()
-fig_train, ax_train = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
-
-prev_mask_train: Optional[np.ndarray] = None
-prev_bmu_train: Optional[int] = None
-
-for observation, action, collision in iter_sequence(obs, act, col):
-# for observation, action in iter_sequence(obs, act):
-
-    action_vec = np.atleast_1d(action).astype(np.float32)
-    action_bmu, _ = am.step(action_vec)
-
-    # update sensory graph with plasticity
-    state = sensory_step(
-        observation.astype(np.float32),
-        int(action_bmu),
-        state,
-        cfg,
-        am,
+def build_action_map(action_dim: int, *, n_codebook: int, lr: float, sigma: float, key: int) -> ActionMap:
+    return ActionMap.random(
+        n_codebook=int(n_codebook),
+        dim=int(action_dim),
+        lr=float(lr),
+        sigma=float(sigma),
+        key=int(key),
     )
 
-    # live training plot
-    cur_adj = state.gs.adj
-    cur_bmu = state.prev_bmu
 
-    # if _should_plot(
-    #     train_plot_trigger,
-    #     prev_mask=prev_mask_train,
-    #     cur_adj=cur_adj,
-    #     prev_bmu=prev_bmu_train,
-    #     cur_bmu=cur_bmu,
-    # ):
-    #     ax_train.clear()
-    #     draw_graph_on_axes(
-    #         ax_train,
-    #         state.gs,
-    #         layout="spring_layout",
-    #         node_color_key="activation",
-    #         edge_width_key="weight",
-    #         edge_color_key="action",
-    #         with_labels=False,
-    #         arrows=True,
-    #         alpha=0.9,
-    #         positioner=positioner,
-    #         edge_curvature=edge_curvature,
-    #     )
-    #     summary, cur_mask_now = _summarize_change(
-    #         prev_mask_train,
-    #         cur_adj,
-    #         prev_bmu_train,
-    #         cur_bmu,
-    #     )
-    #     ax_train.set_title(f"Training • step {state.step_idx}")
-    #     ax_train.text(
-    #         0.02,
-    #         0.98,
-    #         summary,
-    #         transform=ax_train.transAxes,
-    #         va="top",
-    #         ha="left",
-    #         fontsize=8,
-    #         bbox=dict(boxstyle="round", fc="white", alpha=0.85),
-    #     )
-    #     ax_train.figure.tight_layout()
-    #     plt.pause(train_pause_s)
-    #     prev_mask_train = cur_mask_now
-    # else:
-    #     prev_mask_train = _edge_presence_mask(cur_adj)
-    #
-    prev_bmu_train = cur_bmu
+def train_sensory_over_dataset(
+    observations: np.ndarray,
+    actions: np.ndarray,
+    collisions: np.ndarray,
+    *,
+    sensory_params: SensoryParams,
+    action_map: ActionMap,
+    training_plot_trigger: str,
+    training_pause_s: float,
+    edge_curvature: float,
+    positioner: Positioner,
+    enable_training_plot: bool,
+) -> tuple[Any, list[int]]:
+    observation_dim = int(observations.shape[1])
+    sensory_state = init_state(observation_dim)
 
-# plt.ioff()
-# plt.show()
+    training_bmus: list[int] = []
+    previous_mask: Optional[np.ndarray] = None
+    previous_bmu: Optional[int] = None
 
-# ----------------------------
-# Phase 2. Freeze sensory. Run memory + latent. Live plot sensory+memory.
-# ----------------------------
-
-# init memory state using final sensory graph
-mem: MemoryState = init_mem(state.gs.n, mem_length)
-
-# init latent from that memory
-latent: LatentState = init_latent_state(mem)
-latent_cfg = LatentParams(max_age=50, action_lr=0.1)
-
-plt.ion()
-fig_replay, (ax_latent, ax_mem) = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
-
-prev_mask_latent: Optional[np.ndarray] = None
-prev_bmu_latent: Optional[int] = None
-mem_vec = []
-action_mem = []
-state_mem = []
-steps = 0
-# for observation, action in iter_sequence(obs, act):
-for observation, action, collision in iter_sequence(obs, act, col):
-    steps += 1
-
-    action_vec = np.atleast_1d(action).astype(np.float32)
-    action_bmu, _ = am.step(action_vec)
-
-    # freeze sensory structure (sensory_step_frozen does not grow graph)
-    state = sensory_step_frozen(
-        observation.astype(np.float32),
-        int(action_bmu),
-        state,
-        cfg,
-        am,
-    )
-
-    sensory_node_count = state.gs.n
-    # if memory shape no longer matches (S * L) recreate memory ring buffer
-    if mem is None or mem.gs.n != sensory_node_count * mem_length:
-        mem = init_mem(sensory_node_count, length=mem_length)
-
-    # update memory and latent whenever we moved to a new BMU in sensory
-    if prev_bmu_latent is None or not collision:
-    # if prev_bmu_latent is None or state.prev_bmu != prev_bmu_latent:
-
-        sensory_activation = np.asarray(
-            state.gs.node_features["activation"],
-            dtype=np.float32,
-        )
-        mem = update_memory(mem)
-        mem = add_memory(mem, sensory_activation)
-        mem_vec.append(sensory_activation)
-        action_mem.append(action_bmu)
-        latent, bmu, state_mem = latent_step(mem, mem_vec ,latent, action_bmu,
-                                  latent_cfg, am,
-                                  action_mem, state_mem)
-
-    # plotting current latent graph + memory grid
-    cur_adj_latent = latent.g.adj
-    cur_bmu_latent = latent.prev_bmu
-
-    if _should_plot(
-        replay_plot_trigger,
-        prev_mask=prev_mask_latent,
-        cur_adj=cur_adj_latent,
-        prev_bmu=prev_bmu_latent,
-        cur_bmu=cur_bmu_latent,
-    ):
-        # left: latent graph
-        ax_latent.clear()
-        draw_graph_on_axes(
-            ax_latent,
-            latent.g,
-            layout="kamada_kawai",
-            node_color_key="activation",
-            edge_width_key="weight",
-            edge_color_key="action",
-            with_labels=True,
-            arrows=True,
-            alpha=0.9,
-            # positioner=positioner,
-            edge_curvature=edge_curvature,
-        )
-        summary_latent, cur_mask_latent_now = _summarize_change(
-            prev_mask_latent,
-            cur_adj_latent,
-            prev_bmu_latent,
-            cur_bmu_latent,
-        )
-        ax_latent.set_title(f"Latent • step {latent.step_idx}")
-        ax_latent.text(
-            0.02,
-            0.98,
-            summary_latent,
-            transform=ax_latent.transAxes,
-            va="top",
-            ha="left",
-            fontsize=8,
-            bbox=dict(boxstyle="round", fc="white", alpha=0.85),
-        )
-
-        # right: memory grid (S x L occupancy / activation)
-        ax_mem.clear()
-        draw_memory_grid_on_axes(
-            ax_mem,
-            mem_state=mem,
-            S=sensory_node_count,
-            L=mem_length,
-            dx=1.0,
-            dy=1.0,
-            node_color_key="activation",
-            arrows=True,
-            alpha=0.9,
-        )
-        ax_mem.set_title(f"Memory grid S×L = {sensory_node_count}×{mem_length}")
-        ax_mem.set_aspect("equal", adjustable="box")
-
-        fig_replay.tight_layout()
-        plt.pause(replay_pause_s)
-
-        prev_mask_latent = cur_mask_latent_now
+    if enable_training_plot:
+        plt.ion()
+        figure, axis = plt.subplots(1, 1, figsize=(7, 5), dpi=120)
     else:
-        prev_mask_latent = _edge_presence_mask(cur_adj_latent)
+        figure = None
+        axis = None
 
-    prev_bmu_latent = state.prev_bmu
+    for observation, action, collision in iter_sequence(observations, actions, collisions):
+        action_vector = np.atleast_1d(action).astype(np.float32)
+        action_bmu, _ = action_map.step(action_vector)
 
-plt.ioff()
-plt.show()
+        sensory_state = sensory_step(
+            observation.astype(np.float32),
+            int(action_bmu),
+            sensory_state,
+            sensory_params,
+            action_map,
+        )
 
-print(f"n states in latent | {latent.g.n}")
+        training_bmus.append(int(sensory_state.prev_bmu))
+
+        if not enable_training_plot:
+            continue
+
+        current_adjacency = sensory_state.gs.adj
+        current_bmu = int(sensory_state.prev_bmu)
+
+        if should_plot(
+            training_plot_trigger,
+            previous_mask=previous_mask,
+            current_adjacency=current_adjacency,
+            previous_bmu=previous_bmu,
+            current_bmu=current_bmu,
+        ):
+            axis.clear()
+            draw_graph_on_axes(
+                axis,
+                sensory_state.gs,
+                layout="spring_layout",
+                node_color_key="activation",
+                edge_width_key="weight",
+                edge_color_key="action",
+                with_labels=False,
+                arrows=True,
+                alpha=0.9,
+                positioner=positioner,
+                edge_curvature=edge_curvature,
+            )
+            summary_text, current_mask = summarize_change(previous_mask, current_adjacency, previous_bmu, current_bmu)
+            axis.set_title(f"Sensory training • step {getattr(sensory_state, 'step_idx', '?')}")
+            axis.text(
+                0.02,
+                0.98,
+                summary_text,
+                transform=axis.transAxes,
+                va="top",
+                ha="left",
+                fontsize=8,
+                bbox=dict(boxstyle="round", fc="white", alpha=0.85),
+            )
+            figure.tight_layout()
+            plt.pause(training_pause_s)
+            previous_mask = current_mask
+        else:
+            previous_mask = edge_presence_mask(current_adjacency)
+
+        previous_bmu = current_bmu
+
+    return sensory_state, training_bmus
+
+
+def replay_latent_with_live_plot(
+    observations: np.ndarray,
+    actions: np.ndarray,
+    collisions: np.ndarray,
+    *,
+    sensory_state: Any,
+    sensory_params: SensoryParams,
+    latent_params: LatentParams,
+    action_map: ActionMap,
+    memory_length: int,
+    replay_plot_trigger: str,
+    replay_pause_s: float,
+    edge_curvature: float,
+) -> tuple[LatentState, MemoryState]:
+    memory_state: MemoryState = init_mem(sensory_state.gs.n, memory_length)
+    latent_state: LatentState = init_latent_state(memory_state)
+
+    plt.ion()
+    figure, (latent_axis, memory_axis) = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
+
+    previous_mask: Optional[np.ndarray] = None
+    previous_latent_bmu: Optional[int] = None
+
+    memory_vectors: list[np.ndarray] = []
+    action_memory: list[int] = []
+    state_memory: list[int] = []
+
+    for observation, action, collision in iter_sequence(observations, actions, collisions):
+        action_vector = np.atleast_1d(action).astype(np.float32)
+        action_bmu, _ = action_map.step(action_vector)
+
+        sensory_state = sensory_step_frozen(
+            observation.astype(np.float32),
+            int(action_bmu),
+            sensory_state,
+            sensory_params,
+            action_map,
+        )
+
+        sensory_node_count = int(sensory_state.gs.n)
+        if memory_state.gs.n != sensory_node_count * memory_length:
+            memory_state = init_mem(sensory_node_count, length=memory_length)
+
+        if previous_latent_bmu is None or not bool(collision):
+            sensory_activation = np.asarray(sensory_state.gs.node_features["activation"], dtype=np.float32)
+            memory_state = update_memory(memory_state)
+            memory_state = add_memory(memory_state, sensory_activation)
+
+            memory_vectors.append(sensory_activation)
+            action_memory.append(int(action_bmu))
+
+            latent_state, _, state_memory = latent_step(
+                memory_state,
+                memory_vectors,
+                latent_state,
+                int(action_bmu),
+                latent_params,
+                action_map,
+                action_memory,
+                state_memory,
+            )
+
+        current_adjacency = latent_state.g.adj
+        current_latent_bmu = int(latent_state.prev_bmu)
+
+        if should_plot(
+            replay_plot_trigger,
+            previous_mask=previous_mask,
+            current_adjacency=current_adjacency,
+            previous_bmu=previous_latent_bmu,
+            current_bmu=current_latent_bmu,
+        ):
+            latent_axis.clear()
+            draw_graph_on_axes(
+                latent_axis,
+                latent_state.g,
+                layout="kamada_kawai",
+                node_color_key="activation",
+                edge_width_key="weight",
+                edge_color_key="action",
+                with_labels=True,
+                arrows=True,
+                alpha=0.9,
+                edge_curvature=edge_curvature,
+            )
+            summary_text, current_mask = summarize_change(previous_mask, current_adjacency, previous_latent_bmu, current_latent_bmu)
+            latent_axis.set_title(f"Latent • step {getattr(latent_state, 'step_idx', '?')}")
+            latent_axis.text(
+                0.02,
+                0.98,
+                summary_text,
+                transform=latent_axis.transAxes,
+                va="top",
+                ha="left",
+                fontsize=8,
+                bbox=dict(boxstyle="round", fc="white", alpha=0.85),
+            )
+
+            memory_axis.clear()
+            draw_memory_grid_on_axes(
+                memory_axis,
+                mem_state=memory_state,
+                S=sensory_node_count,
+                L=memory_length,
+                dx=1.0,
+                dy=1.0,
+                node_color_key="activation",
+                arrows=True,
+                alpha=0.9,
+            )
+            memory_axis.set_title(f"Memory grid S×L = {sensory_node_count}×{memory_length}")
+            memory_axis.set_aspect("equal", adjustable="box")
+
+            figure.tight_layout()
+            plt.pause(replay_pause_s)
+
+            previous_mask = current_mask
+        else:
+            previous_mask = edge_presence_mask(current_adjacency)
+
+        previous_latent_bmu = current_latent_bmu
+
+    plt.ioff()
+    plt.show()
+    return latent_state, memory_state
+
+
+# ----------------------------
+# CLI / Entry
+# ----------------------------
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--level", type=int, required=True)
+    parser.add_argument(
+        "--sensor",
+        type=str,
+        default="cardinal distance",
+        choices=["cartesian", "cardinal distance"],
+        help='Dataset sensor (quote if it contains spaces): --sensor "cardinal distance"',
+    )
+    parser.add_argument("--sensor_range", type=int, default=1)
+
+    parser.add_argument("--datasets_root", type=str, default="datasets")
+    parser.add_argument("--select", type=str, default="latest", choices=["latest", "run_id"])
+    parser.add_argument("--run_id", type=str, default=None)
+
+    parser.add_argument("--memory_length", type=int, default=10)
+
+    # plotting controls
+    parser.add_argument("--enable_training_plot", action="store_true")
+    parser.add_argument("--training_plot_trigger", type=str, default="structure", choices=["always", "structure", "bmu"])
+    parser.add_argument("--replay_plot_trigger", type=str, default="bmu", choices=["always", "structure", "bmu"])
+    parser.add_argument("--training_pause_s", type=float, default=0.0002)
+    parser.add_argument("--replay_pause_s", type=float, default=0.0005)
+    parser.add_argument("--edge_curvature", type=float, default=0.18)
+
+    # action map params (same AM used for both phases)
+    parser.add_argument("--am_n_codebook", type=int, default=4)
+    parser.add_argument("--am_lr", type=float, default=0.5)
+    parser.add_argument("--am_sigma", type=float, default=0.0)
+    parser.add_argument("--am_key", type=int, default=0)
+
+    # sensory params (minimal knobs for live script)
+    parser.add_argument("--activation_threshold", type=float, default=0.95)
+    parser.add_argument("--sensory_weighting", type=float, default=0.6)
+    parser.add_argument("--sensory_max_age", type=int, default=17)
+
+    # latent params (minimal knobs)
+    parser.add_argument("--latent_max_age", type=int, default=50)
+    parser.add_argument("--latent_action_lr", type=float, default=0.1)
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_arguments()
+
+    datasets_root = Path(args.datasets_root)
+    loaded = load_level_parquet(
+        ParquetConfig(
+            root=datasets_root,
+            level=args.level,
+            sensor=args.sensor,
+            sensor_range=args.sensor_range,
+            select=args.select,
+            run_id=args.run_id,
+        )
+    )
+
+    observations = loaded.observations
+    actions = loaded.actions
+    collisions = loaded.collisions
+
+    action_dim = int(actions.shape[1]) if actions.ndim == 2 else 1
+    action_map = build_action_map(
+        action_dim,
+        n_codebook=args.am_n_codebook,
+        lr=args.am_lr,
+        sigma=args.am_sigma,
+        key=args.am_key,
+    )
+
+    sensory_params = SensoryParams(
+        activation_threshold=args.activation_threshold,
+        sensory_weighting=args.sensory_weighting,
+        max_age=args.sensory_max_age,
+    )
+    latent_params = LatentParams(
+        max_age=args.latent_max_age,
+        action_lr=args.latent_action_lr,
+    )
+
+    positioner = Positioner(layout="spring_layout")
+
+    sensory_state, _ = train_sensory_over_dataset(
+        observations=observations,
+        actions=actions,
+        collisions=collisions,
+        sensory_params=sensory_params,
+        action_map=action_map,
+        training_plot_trigger=args.training_plot_trigger,
+        training_pause_s=args.training_pause_s,
+        edge_curvature=args.edge_curvature,
+        positioner=positioner,
+        enable_training_plot=bool(args.enable_training_plot),
+    )
+
+    latent_state, _ = replay_latent_with_live_plot(
+        observations=observations,
+        actions=actions,
+        collisions=collisions,
+        sensory_state=sensory_state,
+        sensory_params=sensory_params,
+        latent_params=latent_params,
+        action_map=action_map,
+        memory_length=args.memory_length,
+        replay_plot_trigger=args.replay_plot_trigger,
+        replay_pause_s=args.replay_pause_s,
+        edge_curvature=args.edge_curvature,
+    )
+
+    print(f"n states in latent | {int(latent_state.g.n)}")
+
+
+if __name__ == "__main__":
+    main()

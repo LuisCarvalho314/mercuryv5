@@ -160,12 +160,30 @@ level_16 = [
 ]
 
 level_17 = [
+    "XXXXXXXXXX",
+    "XP       X",
+    "XXXXXXXXXX"
+]
+
+level_18 = [
+    "XXXXXXXXX",
+    "XP      X",
+    "XXXXXXXXX"
+]
+
+level_19 = [
+    "XXXXXXXX",
+    "XP     X",
+    "XXXXXXXX"
+]
+
+level_20 = [
     "XXXXXXX",
     "XP    X",
     "XXXXXXX"
 ]
 
-level_18 = [
+level_21 = [
     "XXXXXX",
     "XP   X",
     "XXXXXX"

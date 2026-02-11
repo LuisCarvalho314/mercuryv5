@@ -34,7 +34,6 @@ class LatentState:
     prev_bmu: int | None = None
     step_idx: int = 0
     preds: List = field(default_factory=list)
-    ambiguity_threshold = 10
     prev_activations : np.ndarray | None = None
 
     @property
@@ -152,13 +151,20 @@ def _add_temporal_edge(g: Graph, u: int, v: int, t: int, L: int) -> Graph:
 #     act_mem = ms.activations
 #
 #     act = act_mem @ mem_adj.T
-
-def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
+def compute_bmu_current_timestep_only(state: LatentState, ms: MemoryState,
+                                 action_bmu:int, cfg : LatentParams) \
+        -> (
+        int):
     """
     Compute latent activations from memory, apply contender mask
     (t0 required + consecutive 0..k timesteps), write 'activation'
     to the graph, and return BMU index.
     """
+    trace_decay = cfg.trace_decay
+    mixture_alpha = cfg.mixture_alpha
+    mixture_beta = cfg.mixture_beta
+
+
     g = state.g
     mem_adj = g.node_features["mem_adj"]                  # (n_latent, S*L)
     n_lat = g.n
@@ -201,9 +207,6 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     # bmu = int(np.argmax(masked))
 
     # --- use trace_{t-1} to bias BMU selection (diffusion) ---
-    trace_decay = 0.99
-    trace_influence = 0.2  # your (1 - 0.9)
-    action_trace_influence = 0.2
 
     prev_trace = state.prev_activations
     if prev_trace is None:
@@ -230,7 +233,7 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     degrees_inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
     A_norm = (A_tilde * degrees_inv_sqrt[None, :]) * degrees_inv_sqrt[:, None]
 
-    action_diffusion_from_trace = A_action_conditioned @ prev_trace
+    action_diffusion_from_trace = A_action_norm @ prev_trace
     diffusion_from_trace = A_norm @ prev_trace  # (n,)
 
 
@@ -256,29 +259,30 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     diffusion_from_trace[~candidate_mask] = 0
     action_diffusion_from_trace[~candidate_mask] = 0
 
-    print(
-        f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
-    print(
-        f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
-    print(
-        f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
 
     # Normalise
     masked = norm(masked)
     diffusion_from_trace = norm(diffusion_from_trace)
     action_diffusion_from_trace = norm(action_diffusion_from_trace)
 
-    print(
-        f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
-    print(
-        f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
-    print(
-        f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
 
 
 
-    scored = masked + (trace_influence * diffusion_from_trace) + (
-        action_trace_influence * action_diffusion_from_trace)
+    w_mem, w_trace, w_action = _convex_mixture_weights(mixture_alpha, mixture_beta)
+    scored = (w_mem * masked) + (w_trace * diffusion_from_trace) + (w_action * action_diffusion_from_trace)
+
 
     print(
         f"scored {np.array2string(scored, precision=3, floatmode='fixed')}")
@@ -287,12 +291,15 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
 
     bmu = int(np.argmax(scored))
 
-    if memory_bmu != bmu:
-        print("memory bmu", memory_bmu)
-        print("bmu", bmu)
-        print(f"memory_bmu mem {state.g.node_features["mem_adj"][memory_bmu]}")
-        print(f"bmu mem {state.g.node_features["mem_adj"][bmu]})")
-        print(50*"-")
+    print(f"memory_bmu {memory_bmu}")
+    print(f"bmu {bmu}")
+
+    # if memory_bmu != bmu:
+    #     print("memory bmu", memory_bmu)
+    #     print("bmu", bmu)
+    # #     print(f"memory_bmu mem {state.g.node_features["mem_adj"][memory_bmu]}")
+    # #     print(f"bmu mem {state.g.node_features["mem_adj"][bmu]})")
+    #     print(50*"-")
     # dist_w = np.zeros((g.n), dtype=np.float32)
     # for i in range(g.n):
     #     a = wasserstein_per_sensor(mem_adj[i], act_mem, ms.sensory_n_nodes,
@@ -301,7 +308,7 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     # print(dist_w)
     #
     # bmu = np.argmin(dist_w)
-
+    #
     # # --- your selection + scoring ---
     # t_now = 0
     # idx_now = t_now + np.arange(ms.sensory_n_nodes,
@@ -316,9 +323,9 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     # # precompute kernel once
     # K = time_varying_gaussian_kernel(
     #     L=ms.length,
-    #     sigma_min=1.0,  # tune
-    #     sigma_max=6.0,  # tune
-    #     power=1.2,  # tune
+    #     sigma_min=0.5,  # tune
+    #     sigma_max=4.0,  # tune
+    #     power=1,  # tune
     # )
     #
     # observed_mass_sl = np.maximum(
@@ -353,7 +360,7 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
 
 
 
-    #
+
     # bmu = np.argmin(dist_gaus)
 
 
@@ -366,6 +373,452 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int) -> int:
     )
 
     return bmu
+
+def compute_bmu_current_timestep_only(
+    state: LatentState,
+    memory_state: MemoryState,
+    action_bmu: int,
+    cfg: LatentParams,
+    timestep_now: int = 0,
+) -> int:
+    trace_decay = cfg.trace_decay
+    mixture_alpha = cfg.mixture_alpha
+    mixture_beta = cfg.mixture_beta
+
+    graph = state.g
+    mem_adj = graph.node_features["mem_adj"]  # (n_latent, S*L)
+    n_latent = graph.n
+    mem_len = mem_adj.shape[1]
+
+    length = getattr(memory_state, "length", mem_len)
+    if mem_len % length != 0:
+        raise ValueError(f"mem_len={mem_len} not multiple of length={length}")
+
+    memory_activations = memory_state.activations.astype(np.float32)
+    if memory_activations.shape[0] != mem_len:
+        raise ValueError(
+            f"memory_state.activations len={memory_activations.shape[0]} != mem_len={mem_len}"
+        )
+
+    if not (0 <= timestep_now < length):
+        raise ValueError(f"timestep_now={timestep_now} out of range [0, {length})")
+
+    # --- memory score uses ONLY current timestep evidence ---
+    indices_now = timestep_now + np.arange(
+        memory_state.sensory_n_nodes, dtype=np.int64
+    ) * length  # (S,)
+
+    activations_now = np.maximum(memory_activations[indices_now], 0.0).astype(np.float32)  # (S,)
+    mem_adj_now = mem_adj[:, indices_now].astype(np.float32, copy=False)  # (N, S)
+
+    memory_score = (mem_adj_now * activations_now[None, :]).sum(axis=1)  # (N,)
+
+    # Sensor-consistency gating (based on active sensors at timestep_now)
+    active_sensors = activations_now != 0.0
+    if np.any(active_sensors):
+        candidate_mask = np.all(mem_adj_now[:, active_sensors] != 0, axis=1)
+    else:
+        candidate_mask = np.ones((n_latent,), dtype=bool)
+
+    memory_score[~candidate_mask] = 0.0
+
+    # --- trace diffusion terms (same as full version) ---
+    prev_trace = state.prev_activations
+    if prev_trace is None:
+        prev_trace = np.zeros((n_latent,), dtype=np.float32)
+    else:
+        prev_trace = np.asarray(prev_trace, dtype=np.float32).reshape(-1)
+
+    if prev_trace.shape[0] < n_latent:
+        prev_trace = np.pad(prev_trace, (0, n_latent - prev_trace.shape[0]), mode="constant")
+    elif prev_trace.shape[0] > n_latent:
+        prev_trace = prev_trace[:n_latent]
+
+    base_norm = _normalized_adjacency_with_self_loops(graph.adj)
+    action_adjacency = _transition_for_action_strength(graph, action_bmu)
+    action_norm = _normalized_adjacency_with_self_loops(action_adjacency)
+
+    diffusion_from_trace = base_norm @ prev_trace
+    action_diffusion_from_trace = action_norm @ prev_trace
+
+    diffusion_from_trace[~candidate_mask] = 0.0
+    action_diffusion_from_trace[~candidate_mask] = 0.0
+
+    # Combine
+    memory_score = norm(memory_score)
+    diffusion_from_trace = norm(diffusion_from_trace)
+    action_diffusion_from_trace = norm(action_diffusion_from_trace)
+
+    w_mem, w_trace, w_action = _convex_mixture_weights(mixture_alpha, mixture_beta)
+    combined_score = (
+        (w_mem * memory_score)
+        + (w_trace * diffusion_from_trace)
+        + (w_action * action_diffusion_from_trace)
+    )
+
+    bmu = int(np.argmax(combined_score))
+
+    # Update trace using masked memory evidence
+    state.prev_activations = _update_exponential_trace(
+        prev_trace=prev_trace,
+        current_signal=memory_score.astype(np.float32, copy=False),
+        trace_decay=trace_decay,
+        clip_min=0.0,
+    )
+    return bmu
+
+def _normalized_adjacency_with_self_loops(adjacency: np.ndarray) -> np.ndarray:
+    adjacency = adjacency.astype(np.float32, copy=False)
+    adjacency_tilde = adjacency + np.identity(adjacency.shape[0], dtype=np.float32)
+    degrees = np.sum(adjacency_tilde, axis=1).astype(np.float32)
+    degrees_inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
+    return (adjacency_tilde * degrees_inv_sqrt[None, :]) * degrees_inv_sqrt[:, None]
+
+
+def _convex_mixture_weights(p: float, q: float) -> Tuple[float, float, float]:
+    p = float(np.clip(p, 0.0, 1.0))
+    q = float(np.clip(q, 0.0, 1.0))
+    w_mem = p
+    w_action = (1.0 - p) * q
+    w_trace = (1.0 - p) * (1.0 - q)
+    return w_mem, w_trace, w_action
+
+
+
+def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int, cfg : LatentParams) \
+        -> (
+        int):
+    """
+    Compute latent activations from memory, apply contender mask
+    (t0 required + consecutive 0..k timesteps), write 'activation'
+    to the graph, and return BMU index.
+    """
+    trace_decay = cfg.trace_decay
+    mixture_alpha = cfg.mixture_alpha
+    mixture_beta = cfg.mixture_beta
+
+
+    g = state.g
+    mem_adj = g.node_features["mem_adj"]                  # (n_latent, S*L)
+    n_lat = g.n
+    mem_len = mem_adj.shape[1]
+
+    L = getattr(ms, "length", mem_len)
+    if mem_len % L != 0:
+        raise ValueError(f"mem_len={mem_len} not multiple of L={L}")
+
+    act_mem = ms.activations.astype(np.float32)           # (S*L,)
+    if act_mem.shape[0] != mem_len:
+        raise ValueError(f"ms.activations len={act_mem.shape[0]} != mem_len={mem_len}")
+
+    # Raw latent scores
+    act = act_mem @ mem_adj.T                             # (n_lat,)
+
+    # Per-timestep contributions summed over sensors
+    contrib = np.empty((n_lat, L), dtype=np.float32)
+    for t in range(L):
+        idx = np.arange(t, mem_len, L, dtype=np.int64)    # s*L + t
+        contrib[:, t] = (mem_adj[:, idx] * act_mem[idx]).sum(axis=1)
+
+    # Contender rule: must include t=0 and be a contiguous prefix 0..k
+    has_t0 = contrib[:, 0] > 0
+    M = contrib > 0
+    has_any = M.any(axis=1)
+
+    last_from_end = np.argmax(M[:, ::-1], axis=1)         # 0 if all False
+    last_idx = (L - 1) - last_from_end
+    pos = np.arange(L)
+    within_prefix = pos <= last_idx[:, None]
+    prefix_all_true = np.all(~within_prefix | M, axis=1)
+
+    contenders = has_t0 & has_any & prefix_all_true
+    # contenders = has_t0
+
+    # if contenders.any():
+    masked = act.copy()
+    masked[~contenders] = 0
+    # bmu = int(np.argmax(masked))
+
+    # --- use trace_{t-1} to bias BMU selection (diffusion) ---
+
+    prev_trace = state.prev_activations
+    if prev_trace is None:
+        prev_trace = np.zeros((g.n,), dtype=np.float32)
+    else:
+        prev_trace = np.asarray(prev_trace, dtype=np.float32).reshape(-1)
+
+    # ensure shape matches current graph
+    if prev_trace.shape[0] < g.n:
+        prev_trace = np.pad(prev_trace, (0, g.n - prev_trace.shape[0]),
+                            mode="constant")
+    elif prev_trace.shape[0] > g.n:
+        prev_trace = prev_trace[: g.n]
+
+    A_action_conditioned = _transition_for_action_strength(g, action_bmu)
+    A_tilde_conditioned = A_action_conditioned + np.identity(g.n, dtype=np.float32)
+    degrees = np.sum(A_tilde_conditioned, axis=1).astype(np.float32)
+    degrees_inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
+    A_action_norm = ((A_tilde_conditioned * degrees_inv_sqrt[None, :]) *
+               degrees_inv_sqrt[:, None])
+
+    A_tilde = g.adj.astype(np.float32) + np.identity(g.n, dtype=np.float32)
+    degrees = np.sum(A_tilde, axis=1).astype(np.float32)
+    degrees_inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
+    A_norm = (A_tilde * degrees_inv_sqrt[None, :]) * degrees_inv_sqrt[:, None]
+
+    action_diffusion_from_trace = A_action_norm @ prev_trace
+    diffusion_from_trace = A_norm @ prev_trace  # (n,)
+
+
+
+    t_now = 0
+    idx_now = t_now + np.arange(ms.sensory_n_nodes,
+                                dtype=np.int64) * ms.length  # (S,)
+
+    a_now = np.maximum(act_mem[idx_now], 0.0).astype(np.float32)  # (S,)
+    mem_adj_now = mem_adj[:, idx_now]
+
+    active_sensors = (a_now != 0)  # (S,)
+
+    # Candidate if it connects to all active sensors (when there are any)
+    if np.any(active_sensors):
+        candidate_mask = np.all(mem_adj_now[:, active_sensors] != 0,
+                                axis=1)  # (N,)
+    else:
+        candidate_mask = np.ones(mem_adj_now.shape[0],
+                                 dtype=bool)  # no evidence -> allow all
+
+    masked[~candidate_mask] = 0
+    diffusion_from_trace[~candidate_mask] = 0
+    action_diffusion_from_trace[~candidate_mask] = 0
+
+    # print(
+    #     f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
+
+    # Normalise
+    masked = norm(masked)
+    diffusion_from_trace = norm(diffusion_from_trace)
+    action_diffusion_from_trace = norm(action_diffusion_from_trace)
+
+    # print(
+    #     f"mem_score {np.array2string(masked, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"diffusion_from_trace {np.array2string(diffusion_from_trace, precision=3, floatmode='fixed')}")
+    # print(
+    #     f"action_diffusion_from_trace {np.array2string(action_diffusion_from_trace, precision=3, floatmode='fixed')}")
+
+
+
+    w_mem, w_trace, w_action = _convex_mixture_weights(mixture_alpha, mixture_beta)
+    scored = (w_mem * masked) + (w_trace * diffusion_from_trace) + (w_action * action_diffusion_from_trace)
+
+    # print(
+    #     f"scored {np.array2string(scored, precision=3, floatmode='fixed')}")
+
+    memory_bmu = int(np.argmax(masked))
+
+    bmu = int(np.argmax(scored))
+
+    # if memory_bmu != bmu:
+    #     print("memory bmu", memory_bmu)
+    #     print("bmu", bmu)
+    #     print(f"memory_bmu mem {state.g.node_features["mem_adj"][memory_bmu]}")
+    #     print(f"bmu mem {state.g.node_features["mem_adj"][bmu]})")
+    #     print(50*"-")
+    # dist_w = np.zeros((g.n), dtype=np.float32)
+    # for i in range(g.n):
+    #     a = wasserstein_per_sensor(mem_adj[i], act_mem, ms.sensory_n_nodes,
+    #                             ms.length)
+    #     dist_w[i] = sum(a)
+    # print(dist_w)
+    #
+    # bmu = np.argmin(dist_w)
+    #
+    # # --- your selection + scoring ---
+    # t_now = 0
+    # idx_now = t_now + np.arange(ms.sensory_n_nodes,
+    #                             dtype=np.int64) * ms.length  # (S,)
+    #
+    # a_now = np.maximum(act_mem[idx_now], 0.0).astype(np.float32)
+    # mem_adj_now = mem_adj[:, idx_now]  # (N, S)
+    #
+    # candidate_mask = (mem_adj_now != 0) & (a_now[None, :] != 0)
+    # candidate_nodes = np.flatnonzero(candidate_mask.any(axis=1))
+    #
+    # # precompute kernel once
+    # K = time_varying_gaussian_kernel(
+    #     L=ms.length,
+    #     sigma_min=0.5,  # tune
+    #     sigma_max=4.0,  # tune
+    #     power=1,  # tune
+    # )
+    #
+    # observed_mass_sl = np.maximum(
+    #     act_mem.reshape(ms.sensory_n_nodes, ms.length), 0.0
+    # ).astype(np.float32)
+    #
+    # # distances only for candidates
+    # dist_cand = np.empty(candidate_nodes.size, dtype=np.float32)
+    # for j, node_index in enumerate(candidate_nodes):
+    #     node_edge_weights_sl = np.abs(mem_adj[node_index]).reshape(
+    #         ms.sensory_n_nodes, ms.length
+    #     ).astype(np.float32)
+    #     dist_cand[j] = kernel_distance_with_evidence(
+    #         observed_mass_sl=observed_mass_sl,
+    #         node_edge_weights_sl=node_edge_weights_sl,
+    #         K=K,
+    #         kappa=5.0,
+    #     )
+    #
+    # # convert to similarity (local, independent)
+    # tau = 1.0  # temperature; tune
+    # sim_cand = softmax_neg_distance(dist_cand, tau)  # in (0,1]
+    #
+    # # write back to full vector (non-candidates get 0 similarity)
+    # sim_gauss = np.zeros(g.n, dtype=np.float32)
+    #
+    # sim_gauss[candidate_nodes] = sim_cand
+    #
+    # scored = sim_gauss + (trace_influence * diffusion_from_trace) + (
+    #     action_trace_influence * action_diffusion_from_trace)
+    # bmu = int(np.argmax(scored))
+
+
+
+
+    # bmu = np.argmin(dist_gaus)
+
+
+    # --- now update trace_t using current masked evidence ---
+    state.prev_activations = _update_exponential_trace(
+        prev_trace=prev_trace,
+        current_signal=masked.astype(np.float32, copy=False),
+        trace_decay=trace_decay,
+        clip_min=0.0,
+    )
+
+    return bmu
+
+def compute_bmu(
+    state: LatentState,
+    memory_state: MemoryState,
+    action_bmu: int,
+    cfg: LatentParams,
+    timestep_for_gating: int = 0,
+) -> int:
+    trace_decay = cfg.trace_decay
+    mixture_alpha = cfg.mixture_alpha
+    mixture_beta = cfg.mixture_beta
+
+    graph = state.g
+    mem_adj = graph.node_features["mem_adj"]  # (n_latent, S*L)
+    n_latent = graph.n
+    mem_len = mem_adj.shape[1]
+
+    length = getattr(memory_state, "length", mem_len)
+    if mem_len % length != 0:
+        raise ValueError(f"mem_len={mem_len} not multiple of length={length}")
+
+    memory_activations = memory_state.activations.astype(np.float32)
+    if memory_activations.shape[0] != mem_len:
+        raise ValueError(
+            f"memory_state.activations len={memory_activations.shape[0]} != mem_len={mem_len}"
+        )
+
+    # --- memory score uses ALL timesteps ---
+    raw_scores = memory_activations @ mem_adj.T  # (N,)
+
+    # Per-timestep contributions (summed over sensors)
+    timestep_contrib = np.empty((n_latent, length), dtype=np.float32)
+    for t in range(length):
+        indices_t = np.arange(t, mem_len, length, dtype=np.int64)
+        timestep_contrib[:, t] = (mem_adj[:, indices_t] * memory_activations[indices_t]).sum(axis=1)
+
+    # Contender: must include t=0 and be contiguous prefix 0..k
+    has_t0 = timestep_contrib[:, 0] > 0
+    positive_mask = timestep_contrib > 0
+    has_any_positive = positive_mask.any(axis=1)
+
+    last_true_from_end = np.argmax(positive_mask[:, ::-1], axis=1)
+    last_true_index = (length - 1) - last_true_from_end
+    positions = np.arange(length)
+    within_prefix = positions <= last_true_index[:, None]
+    prefix_all_true = np.all(~within_prefix | positive_mask, axis=1)
+
+    contenders = has_t0 & has_any_positive & prefix_all_true
+
+    memory_score = raw_scores.astype(np.float32, copy=True)
+    memory_score[~contenders] = 0.0
+
+    # Optional: gate using a single timestep (default t=0)
+    if not (0 <= timestep_for_gating < length):
+        raise ValueError(f"timestep_for_gating={timestep_for_gating} out of range [0, {length})")
+
+    indices_gate = timestep_for_gating + np.arange(
+        memory_state.sensory_n_nodes, dtype=np.int64
+    ) * length
+
+    activations_gate = np.maximum(memory_activations[indices_gate], 0.0).astype(np.float32)
+    mem_adj_gate = mem_adj[:, indices_gate]
+    active_sensors = activations_gate != 0.0
+
+    if np.any(active_sensors):
+        candidate_mask = np.all(mem_adj_gate[:, active_sensors] != 0, axis=1)
+    else:
+        candidate_mask = np.ones((n_latent,), dtype=bool)
+
+    memory_score[~candidate_mask] = 0.0
+
+    # --- trace diffusion terms ---
+    prev_trace = state.prev_activations
+    if prev_trace is None:
+        prev_trace = np.zeros((n_latent,), dtype=np.float32)
+    else:
+        prev_trace = np.asarray(prev_trace, dtype=np.float32).reshape(-1)
+
+    if prev_trace.shape[0] < n_latent:
+        prev_trace = np.pad(prev_trace, (0, n_latent - prev_trace.shape[0]), mode="constant")
+    elif prev_trace.shape[0] > n_latent:
+        prev_trace = prev_trace[:n_latent]
+
+    base_norm = _normalized_adjacency_with_self_loops(graph.adj)
+    action_adjacency = _transition_for_action_strength(graph, action_bmu)
+    action_norm = _normalized_adjacency_with_self_loops(action_adjacency)
+
+    diffusion_from_trace = base_norm @ prev_trace
+    action_diffusion_from_trace = action_norm @ prev_trace
+
+    diffusion_from_trace[~candidate_mask] = 0.0
+    action_diffusion_from_trace[~candidate_mask] = 0.0
+
+    # Combine
+    memory_score = norm(memory_score)
+    diffusion_from_trace = norm(diffusion_from_trace)
+    action_diffusion_from_trace = norm(action_diffusion_from_trace)
+
+    w_mem, w_trace, w_action = _convex_mixture_weights(mixture_alpha, mixture_beta)
+    combined_score = (
+        (w_mem * memory_score)
+        + (w_trace * diffusion_from_trace)
+        + (w_action * action_diffusion_from_trace)
+    )
+
+    bmu = int(np.argmax(combined_score))
+
+    state.prev_activations = _update_exponential_trace(
+        prev_trace=prev_trace,
+        current_signal=memory_score.astype(np.float32, copy=False),
+        trace_decay=trace_decay,
+        clip_min=0.0,
+    )
+    return bmu
+
+
+
 
 def softmax_neg_distance(distances: np.ndarray, temperature: float = 1.0) -> np.ndarray:
     x = -distances / temperature
@@ -665,7 +1118,8 @@ def _update_edges_with_actions(g: Graph,
                                bmu: int,
                                action_bmu: int,
                                action_map: ActionMap,
-                               gaussian_shape: int) -> Graph:
+                               gaussian_shape: int,
+                               beta : float) -> Graph:
     observed_row = np.asarray(action_map.state.codebook[action_bmu],
                               np.float32)
     prior_row = _edge_action_row(g, prev_bmu, bmu, am=action_map)
@@ -695,7 +1149,7 @@ def _predict(g: Graph, bmu: int, action_bmu: int) -> Array:
     # idx1 = np.flatnonzero(mask1).astype(np.int32, copy=False)
     # if np.array_equal(idx, np.array([3, 7])):
     #     print("ayo")
-    print(f"prev {bmu} -> {action_bmu} -> preds: {idx}")
+    # print(f"prev {bmu} -> {action_bmu} -> preds: {idx}")
     return idx
 
 
@@ -787,17 +1241,21 @@ def _resolve_prev_with_memory_replay(
 
     for i in range(L):
         action_bmu = int(am[i])
-        bmu = int(compute_bmu(replay_state, replay_mem, action_bmu))
-
+        if cfg.memory_disambiguation:
+            bmu = int(compute_bmu(replay_state, replay_mem, action_bmu, cfg))
+        else:
+            bmu = int(
+                compute_bmu_current_timestep_only(replay_state, replay_mem,
+                                                  action_bmu, cfg))
         if bmu == prev_bmu:
         # if preds.size >1:
-            nov = novelty_for_prev(replay_mem, replay_state.g, int(prev_bmu))
+        #     nov = novelty_for_prev(replay_mem, replay_state.g, int(prev_bmu))
             # if nov >= 0.35:
             if True:
                 g_new, bmu_refined, created = add_temporal_edge_at_first_gap_clone(
                     replay_state.g, replay_mem, int(prev_bmu), preds
                 )
-                state.ambiguity_threshold += 1
+                # cfg.ambiguity_threshold += 1
                 replay_state.g = g_new
                 _align_prev_activations_to_graph(replay_state)
             # # refine by spawning a clone extended at the first gap
@@ -811,9 +1269,14 @@ def _resolve_prev_with_memory_replay(
             # print(f"created {created}")
             # replay_state.g = g_new
 
-                bmu = int(compute_bmu(replay_state, replay_mem, action_bmu))
-                if bmu == bmu_refined:
-                    print("bmu created properly")
+                # bmu = int(compute_bmu(replay_state, replay_mem, action_bmu,
+                #                       cfg))
+                # bmu = int(
+                #     compute_bmu_current_timestep_only(replay_state, replay_mem,
+                #                                       action_bmu, cfg))
+
+                # if bmu == bmu_refined:
+                #     print("bmu created properly")
 
         replay_mem = update_memory(replay_mem)
         replay_mem = add_memory(replay_mem, mem_vec[L+i])
@@ -832,7 +1295,14 @@ def _resolve_prev_with_memory_replay(
             mem_view = memory_view_at_global_timestep(ms, L-j-1)
             action_bmu = int(am[j])
 
-            bmu = int(compute_bmu(replay_state, replay_mem, action_bmu))
+            if cfg.memory_replay:
+                bmu = int(compute_bmu(replay_state, replay_mem, action_bmu, cfg))
+            else:
+                bmu = int(compute_bmu_current_timestep_only(replay_state, replay_mem, action_bmu, cfg))
+
+            # if bmu in seen_bmus:
+            #     break
+            seen_bmus.add(bmu)
             bmus.append(bmu)
             # if bmu == bmu_refined:
             #     print(f"prev {prev_bmu} -> {action_bmu} -> bmu: {bmu}")
@@ -841,13 +1311,12 @@ def _resolve_prev_with_memory_replay(
             #     print(f"prev {prev_bmu} -> {action_bmu} -> bmu: {bmu}")
             seen_bmus.add(bmu)
             #
-            # optional learning of replay chain edges
-            # keep only if needed for your dynamics
+
             if prev_bmu is not None:
                 replay_state.g = _update_edges_with_actions(
                     replay_state.g, prev_bmu=prev_bmu, bmu=bmu,
                     action_bmu=action_bmu, action_map=action_map,
-                    gaussian_shape=cfg.gaussian_shape,
+                    gaussian_shape=cfg.gaussian_shape, beta=cfg.action_lr
                 )
                 # print(bmus)
 
@@ -1018,7 +1487,7 @@ def latent_step(
 ) -> tuple[LatentState, int, List[int]]:
     g = state.g
 
-    bmu_now = compute_bmu(state, ms, action_bmu)
+    bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
 
 
     # print("bmu_now", bmu_now)
@@ -1033,7 +1502,7 @@ def latent_step(
 
 
     if bmu_now >= state.g.n or mapping[bmu_now] == -1:
-        bmu_now = compute_bmu(state, ms, action_bmu)
+        bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
     else:
         bmu_now = mapping[bmu_now]
 
@@ -1065,8 +1534,9 @@ def latent_step(
         if preds.size > 1:
             state.g.node_features["ambiguity_score"][state.prev_bmu] += 1
 
-        if state.g.node_features["ambiguity_score"][state.prev_bmu] > state.ambiguity_threshold:
-            print(f"ALIASED {state.prev_bmu}")
+        if (state.g.node_features["ambiguity_score"][state.prev_bmu] >
+                cfg.ambiguity_threshold):
+            # print(f"ALIASED {state.prev_bmu}")
             state.preds.append(preds)
             # print(f"seen preds: {state.preds}")
             # resolve aliasing of the previous state chain using replay
@@ -1108,9 +1578,9 @@ def latent_step(
 
             mapping = np.arange(g.n, dtype=np.int32)
 
-            for i in range(state.g.n):
-                _debug_print_latent_mem_adj(g,ms,i)
-            _debug_print_latent_action_adj(g)
+            # for i in range(state.g.n):
+            #     _debug_print_latent_mem_adj(g,ms,i)
+            # _debug_print_latent_action_adj(g)
 
             state_mem[-1] = resolved_prev
 
@@ -1122,6 +1592,7 @@ def latent_step(
             action_bmu=action_bmu,
             action_map=action_map,
             gaussian_shape=cfg.gaussian_shape,
+            beta = cfg.action_lr
         )
         #
         if state.step_idx % 1 == 0:
@@ -1135,8 +1606,8 @@ def latent_step(
             state.prev_activations = _remap_prev_activations(
                 state.prev_activations, mapping, g.n)
 
-    print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} ->"
-          f" {bmu_now}")
+    # print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} ->"
+    #       f" {bmu_now}")
 
     # mark active for plotting
     g = _set_activation(g, bmu_now)
@@ -1149,7 +1620,7 @@ def latent_step(
     state.g = g
 
     if bmu_now >= state.g.n or mapping[bmu_now] == -1:
-        bmu_now = compute_bmu(state, ms, action_bmu)
+        bmu_now = compute_bmu(state, ms, action_bmu, cfg)
     else:
         bmu_now = mapping[bmu_now]
 
@@ -1160,16 +1631,16 @@ def latent_step(
     state.mapping = mapping
 
     # if state.step_idx % 10 ==0:
-    #     for i in np.arange(state.g.n-1):
+        # for i in np.arange(state.g.n-1):
     #         for j in np.arange(i+1, state.g.n):
     #             mem_adj_i = state.g.node_features["mem_adj"][i]
     #             mem_adj_j = state.g.node_features["mem_adj"][j]
     #             print(i, j, stats.wasserstein_distance(mem_adj_i, mem_adj_j),
     #                   stats.wasserstein_distance(state.g.adj[i], state.g.adj[
     #                       j]))
-    # #     for i in range(state.g.n):
-    # #         _debug_print_latent_mem_adj(g,ms,i)
-    # #     _debug_print_latent_action_adj(g)
+    #     for i in range(state.g.n):
+    #         _debug_print_latent_mem_adj(g,ms,i)
+    #     _debug_print_latent_action_adj(g)
     # #
 
 
@@ -1178,4 +1649,3 @@ def latent_step(
 
     # print(f"{g.n} nodes @ step {state.step_idx}")
     return state, int(bmu_now), state_mem
-

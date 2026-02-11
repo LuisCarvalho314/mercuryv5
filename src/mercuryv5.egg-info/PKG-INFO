@@ -3,10 +3,14 @@ Name: mercuryv5
 Version: 0.1.0
 Summary: Add your description here
 Requires-Python: >=3.13
+Requires-Dist: filelock>=3.20.3
 Requires-Dist: gymnasium>=1.2.1
 Requires-Dist: imageio>=2.37.0
 Requires-Dist: matplotlib>=3.10.7
 Requires-Dist: networkx>=3.5
 Requires-Dist: numpy>=2.3.3
+Requires-Dist: polars>=1.37.1
+Requires-Dist: pyarrow>=23.0.0
+Requires-Dist: pydantic>=2.12.5
 Requires-Dist: pytest>=8.4.2
 Requires-Dist: scipy>=1.16.2
