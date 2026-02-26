@@ -156,6 +156,14 @@ def _write_study_summary(study_root: Path, study_name: str) -> Path:
             (pl.col("sensory_precision").std() / pl.col(
                 "sensory_precision").mean()).alias(
                 "sensory_precision_coeff_var"),
+            pl.col("latent_node_count").mean().alias("latent_node_count_mean"),
+            pl.col("latent_node_count").min().alias("latent_node_count_min"),
+            pl.col("latent_node_count").max().alias("latent_node_count_max"),
+            pl.col("latent_node_count").var().alias("latent_node_count_var"),
+            pl.col("latent_node_count").std().alias("latent_node_count_std"),
+            (pl.col("latent_node_count").std() / pl.col(
+                "latent_node_count").mean()).alias(
+                "latent_node_count_coeff_var"),
         ).to_dicts()[0]
 
         row = {
@@ -163,6 +171,8 @@ def _write_study_summary(study_root: Path, study_name: str) -> Path:
             "timestamp_utc": meta.timestamp_utc,
             "level": meta.source.level,
             "sensor": meta.source.sensor,
+            # "seed": meta.source.seed,
+            # "rand_prob": meta.source.rand_prob,
             "sensor_range": meta.source.sensor_range,
             "memory_length": meta.memory_length,
             "activation_threshold": meta.sensory_params.get("activation_threshold"),
@@ -374,21 +384,21 @@ def run_study(args: argparse.Namespace) -> None:
 
     # Define parameter space here (edit as needed)
     parameter_space = {
-        "level": [16, 17, 18, 19, 20, 21],
+        "level": [16],
         "sensor": ["cardinal distance"],
         "sensor_range": [1],
-        "seed": [0, 1, 2],
-        "rand_prob": [0, 0.3],
-        "memory_length": [20],
+        "seed": [0],
+        "rand_prob": [0.3],
+        "memory_length": [40],
         "activation_threshold": [0.95],
-        "ambiguity_threshold": [0, 10],
-        "am_lr": [0.1],
+        "ambiguity_threshold": [10],
+        "am_lr": [0.001],
         "am_key": [0],
         "window_length": [100],
-        "mixture_alpha": [1, 0.75, 0.5],
-        "mixture_beta": [1, 0.5],
-        "memory_replay": [True, False],
-        "memory_disambiguation": [True, False],
+        "mixture_alpha": [0.5],
+        "mixture_beta": [0.5],
+        "memory_replay": [False, True],
+        "memory_disambiguation": [False, True],
         # route outputs into this study folder
         "study_root": [defaults.study_root],
         "study_name": [defaults.study_name],

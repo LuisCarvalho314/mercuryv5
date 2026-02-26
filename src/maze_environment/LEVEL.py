@@ -222,3 +222,7 @@ levels.append(level_15)
 levels.append(level_16)
 levels.append(level_17)
 levels.append(level_18)
+levels.append(level_19)
+levels.append(level_20)
+levels.append(level_21)
+

@@ -1528,8 +1528,8 @@ def latent_step(
                 # state.average_not_surprise = min(state.average_not_surprise +
                 #                                  1 ,6)
 
-        if is_current_aliased:
-            print(True)
+        # if is_current_aliased:
+        #     print(True)
 
         if preds.size > 1:
             state.g.node_features["ambiguity_score"][state.prev_bmu] += 1
