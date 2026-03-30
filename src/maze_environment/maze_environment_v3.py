@@ -1,81 +1,89 @@
 import logging
 import random
-import numpy as np
-import gymnasium as gym
+from typing import Any, Optional
 
-from src.utils.setup_logging import setup_logging
-from src.maze_environment.LEVEL import *
-from src.maze_environment.colour_tile_levels import *
+import gymnasium as gym
+import numpy as np
+
 from src.maze_environment.agent import Agent
 from src.maze_environment.plots import MazeEnvironmentVisualization
-import time
+from src.utils.setup_logging import setup_logging
+
 
 class MazeEnvironment(gym.Env):
-    def __init__(self, level, plotting=False, agent_sensors=None,
-                 colour_tile_levels=True):
+    def __init__(
+        self,
+        level: Any,
+        plotting: bool = False,
+        agent_sensors: Optional[dict] = None,
+        colour_tile_levels: bool = False,
+        seed: int = 0,
+    ):
         setup_logging()
         self.logger = logging.getLogger(self.__class__.__name__)
+
         if colour_tile_levels:
-            self.maze, self.initial_agent_position = self.read_colour_level(level)
+            self.maze, self.initial_agent_position = self._read_colour_level(level)
         else:
-            self.maze, self.initial_agent_position = self.read_level(level)
+            self.maze, self.initial_agent_position = self._read_level(level)
+
         self.agent_position = self.initial_agent_position
-        self.agent = Agent(initial_position=self.agent_position,
-                           sensors=agent_sensors, maze = self.maze)
+        self.agent = Agent(initial_position=self.agent_position, sensors=agent_sensors, maze=self.maze)
+
+        self.action_keys = list(self.agent.action_dict.keys())
+        self.rng = random.Random(seed)
+
         self.plotting = plotting
-        if plotting:
-            self.visualization = MazeEnvironmentVisualization(self)
+        self.visualization = MazeEnvironmentVisualization(self) if plotting else None
+        if self.visualization is not None:
             self.visualization.update_loop(self)
 
+    @staticmethod
+    def _read_level(level: Any) -> tuple[np.ndarray, tuple[int, int]]:
+        maze = np.zeros((len(level), len(level[0])), dtype=np.uint8)
+        initial_agent_position = (0, 0)
 
-    def read_level(self, level):
-        maze = np.ones((len(level), len(level[0])), dtype=np.uint8)
-        initial_agent_position = (0,0)
-        for i, row in enumerate(level):
-            for j, element in enumerate(row):
+        for row_index, row in enumerate(level):
+            for col_index, element in enumerate(row):
                 if element == "X":
-                    maze[i, j] = 0
-                if element == "P":
-                    initial_agent_position = (i, j)
+                    maze[row_index, col_index] = 1
+                elif element == "P":
+                    initial_agent_position = (row_index, col_index)
+
         return maze, initial_agent_position
 
-    def read_colour_level(self, level):
+    @staticmethod
+    def _read_colour_level(level: Any) -> tuple[np.ndarray, tuple[int, int]]:
         maze = np.array(level)
-        initial_agent_position = (1,1)
+        initial_agent_position = (1, 1)
         return maze, initial_agent_position
 
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
 
-    def reset(self):
-        self.logger.debug("RESET")
+        if seed is not None:
+            self.rng = random.Random(seed)
+
         self.agent_position = self.initial_agent_position
+        self.agent.position = self.initial_agent_position
+        self.agent.make_observation(self.maze)
 
-    def _get_obs(self):
-        return {"agent": self.agent.make_observation(self.maze)}
+        return self.agent.observation, {}
 
-    def step(self, action):
-        # print("-"*50)
-        # print(f"POS | {self.agent.position}")
-        # print(f"ACT | {action}")
-        # print(f"OBS | {self.agent.observation}")
-        self.agent_position, self.agent.action = self.agent.take_action(
-            self.maze,
-                                                        action=action)
-        self._get_obs()
+    def step(self, action: str):
+        self.agent_position, self.agent.action, collision = self.agent.take_action(self.maze, action=action)
+        self.agent.make_observation(self.maze)
+
         self.logger.debug("STEP")
-        if self.plotting:
+
+        if self.visualization is not None:
             self.visualization.update_loop(self)
-        return self.agent.observation, self.agent.action
 
-    def random_action(self):
-        return random.choice(list(self.agent.action_dict.keys()))
+        return self.agent.observation, self.agent.action, bool(collision)
 
-if __name__ == '__main__':
-    level = colour_levels[0]
-    agent_sensors = {"sensor": "floor"}
-    env = MazeEnvironment(level, plotting=True, agent_sensors=agent_sensors)
-    env.reset()
-    for i in range(100):
-        action = random.choice(list(env.agent.action_dict.keys()))
-        obs = env.step(action)
+    def random_action(self) -> str:
+        return self.rng.choice(self.action_keys)
 
-
+    def random_policy(self, previous_action: str, collision: bool, rand_prob: float) -> str:
+        do_random = (self.rng.random() < rand_prob) or collision
+        return self.random_action() if do_random else previous_action

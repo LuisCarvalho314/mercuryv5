@@ -143,3 +143,31 @@ def test_ignores_other_files_and_picks_pair(tmp_path: Path):
     o, a = load_level_csv(cfg)
     assert o.shape == (2, 2)
     assert a.shape == (2,)
+
+
+def test_load_level_csv_with_collisions(tmp_path: Path):
+    base = tmp_path / "datasets" / "level9" / "cartesian"
+    ts = "20240808080808"
+    _write_csv(base / f"{ts}_observations.csv", np.ones((3, 2)))
+    _write_csv(base / f"{ts}_actions.csv", np.zeros((3,)))
+    _write_csv(base / f"{ts}_collisions.csv", np.array([0, 1, 0], dtype=np.float32))
+
+    cfg = CSVConfig(root=str(tmp_path / "datasets"), level=9, coords="cartesian", timestamp=ts)
+    o, a, c = load_level_csv(cfg, include_collisions=True)
+
+    assert o.shape == (3, 2)
+    assert a.shape == (3,)
+    assert c.shape == (3,)
+
+
+def test_iter_sequence_with_collisions_yields_triples():
+    obs = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    act = np.array([0, 1], dtype=np.float32)
+    col = np.array([0, 1], dtype=np.float32)
+
+    seq = list(iter_sequence(obs, act, col))
+    assert len(seq) == 2
+    for i, (oi, ai, ci) in enumerate(seq):
+        assert np.array_equal(oi, obs[i])
+        assert float(ai) == float(act[i])
+        assert float(ci) == float(col[i])

@@ -8,7 +8,11 @@ from mercury.sensory.state import (
     _calc_activation, _should_create_node, _pick_bmu,
     _compute_dn, _topological_similarity, _meets_threshold,
     _update_winning_node, _update_neighbours, _update_edge, _edge_action_row,
+    sensory_step,
+    sensory_step_frozen,
 )
+from mercury.sensory.params import SensoryParams
+from mercury.action_map.adapter import ActionMap
 from mercury.graph.core import Graph
 
 Array = np.ndarray
@@ -402,3 +406,63 @@ def test_topological_similarity_scalar_input_returns_length1():
     assert sim.shape == (1,)
     expected = np.array([np.exp(-0.5 * 1.0 ** 2)], np.float32)
     np.testing.assert_allclose(sim, expected, atol=1e-6)
+
+
+def test_sensory_step_frozen_updates_context_without_learning_edges():
+    state = init_state(data_dim=2, n=2)
+    weights = np.array([[0.0, 0.0], [2.0, 2.0]], dtype=np.float32)
+    contexts = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32)
+    state.gs.set_node_feat("weight", weights)
+    state.gs.set_node_feat("context", contexts)
+    state.global_context = np.array([1.0, 1.0], dtype=np.float32)
+    state.prev_bmu = 0
+    state.gs.add_edge(0, 1, weight=0.25, edge_feat={"action": np.array([3], dtype=np.int32)})
+
+    adj_before = state.gs.adj.copy()
+    edge_action_before = state.gs.edge_features["action"].copy()
+    cfg = SensoryParams(sensory_weighting=0.0, global_context_lr=0.25)
+    action_map = ActionMap.identity(dim=2)
+
+    next_state = sensory_step_frozen(
+        observation=np.array([9.0, 9.0], dtype=np.float32),
+        action_bmu=1,
+        state=state,
+        cfg=cfg,
+        action_map=action_map,
+    )
+
+    assert next_state.prev_bmu == 1
+    np.testing.assert_array_equal(next_state.gs.adj, adj_before)
+    np.testing.assert_array_equal(next_state.gs.edge_features["action"], edge_action_before)
+    np.testing.assert_array_equal(next_state.gs.node_features["activation"], np.array([0.0, 1.0], dtype=np.float32))
+    np.testing.assert_allclose(next_state.global_context, np.array([1.25, 1.25], dtype=np.float32))
+
+
+def test_sensory_step_uses_configured_action_lr(monkeypatch):
+    state = init_state(data_dim=2, n=2)
+    state.gs.set_node_feat("weight", np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32))
+    state.gs.set_node_feat("context", np.zeros((2, 2), dtype=np.float32))
+    state.prev_bmu = 0
+
+    recorded: dict[str, float] = {}
+
+    def fake_update_edge(g, u, v, prior_row, observed_row, action_bmu, beta, gaussian_shape):
+        recorded["beta"] = float(beta)
+        return g
+
+    monkeypatch.setattr("mercury.sensory.state._update_edge", fake_update_edge)
+    monkeypatch.setattr("mercury.sensory.state.age_maintenance", lambda u, v, g, p: (g, np.arange(g.n, dtype=np.int32)))
+
+    action_map = ActionMap.identity(dim=2)
+    cfg = SensoryParams(action_lr=0.23, gaussian_shape=2)
+
+    next_state = sensory_step(
+        observation=np.array([0.0, 0.0], dtype=np.float32),
+        action_bmu=1,
+        state=state,
+        cfg=cfg,
+        action_map=action_map,
+    )
+
+    assert next_state.prev_bmu == 0
+    assert recorded["beta"] == pytest.approx(0.23)

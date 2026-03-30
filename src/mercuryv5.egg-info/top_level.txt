@@ -1,4 +1,6 @@
 data_helper
 maze_environment
 mercury
+mercury_runs
 utils
+vector_symbolic_architectures

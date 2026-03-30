@@ -101,13 +101,18 @@ class Agent:
         if action in self.action_dict:
             do_action, action_hot = self.action_dict[action]
             new_position = do_action()
-            if self.valid_position(maze=maze, new_position=new_position):
+            collision = self.valid_position(maze=maze,
+                                            new_position=new_position)
+            if not collision:
                 self.position = new_position
-            return self.position, action_hot
+            return self.position, action_hot ,collision
 
+    # @staticmethod
+    # def valid_position(maze, new_position):
+    #     if maze[new_position[0]][new_position[1]] == 0:
+    #         return False
+    #     # print("COLLISION")
+    #     return True
     @staticmethod
     def valid_position(maze, new_position):
-        if maze[new_position[0]][new_position[1]] == 0:
-            return False
-        # print("COLLISION")
-        return True
+        return maze[new_position[0]][new_position[1]]
