@@ -34,6 +34,7 @@
     "paper_precision_walk_length": [1000],
     "structure_metrics": [true],
     "structure_metrics_epsilon": [1e-6],
+    "structure_metrics_ignore_self_loops": [true],
     "structure_metrics_scope": ["exact_level"],
     "structure_metrics_ground_truth_source": ["empirical_walks"],
     "computational_eval": [false],

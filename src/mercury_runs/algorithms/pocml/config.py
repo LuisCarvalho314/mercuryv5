@@ -52,5 +52,6 @@ class POCMLConfig(BaseModel):
     paper_precision_action_map_params: dict[str, Any] = Field(default_factory=dict)
     structure_metrics_enabled: bool = True
     structure_metrics_epsilon: float = Field(default=1e-6, ge=0.0)
+    structure_metrics_ignore_self_loops: bool = True
     structure_metrics_scope: str = "exact_level"
     structure_metrics_ground_truth_source: str = "empirical_walks"

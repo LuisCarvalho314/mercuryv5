@@ -85,6 +85,7 @@ def parse_arguments() -> argparse.Namespace:
                         default=1_000)
     parser.add_argument("--structure_metrics", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--structure_metrics_epsilon", type=float, default=1e-6)
+    parser.add_argument("--structure_metrics_ignore_self_loops", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--structure_metrics_scope", type=str, default="exact_level", choices=["exact_level", "walk_local"])
     parser.add_argument("--structure_metrics_ground_truth_source", type=str, default="empirical_walks", choices=["empirical_walks", "maze_topology"])
     parser.add_argument("--computational_eval", nargs="?", const=True, default=False, type=strtobool)
