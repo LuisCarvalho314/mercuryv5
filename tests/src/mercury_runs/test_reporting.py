@@ -260,6 +260,40 @@ def test_compute_weighted_structure_metrics_perfect_alignment() -> None:
     }
 
 
+def test_compute_weighted_structure_metrics_can_ignore_self_loops() -> None:
+    decoded_walks = [np.array([0, 1], dtype=np.int64)]
+    true_walks = [np.array([0, 1], dtype=np.int64)]
+    true_adjacency = np.array([[1.0, 1.0], [0.0, 0.0]], dtype=np.float64)
+    learned_adjacency = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float64)
+
+    metrics = compute_weighted_structure_metrics(
+        decoded_walks=decoded_walks,
+        true_walks=true_walks,
+        W_hat=learned_adjacency,
+        n_true=2,
+        W_true=true_adjacency,
+        ignore_self_loops=False,
+    )
+    ignored_metrics = compute_weighted_structure_metrics(
+        decoded_walks=decoded_walks,
+        true_walks=true_walks,
+        W_hat=learned_adjacency,
+        n_true=2,
+        W_true=true_adjacency,
+        ignore_self_loops=True,
+    )
+
+    assert metrics["edge_recall"] == pytest.approx(0.5)
+    assert metrics["edge_f1"] == pytest.approx(2.0 / 3.0)
+    assert metrics["mean_total_variation"] == pytest.approx(0.25)
+    assert ignored_metrics == {
+        "mean_total_variation": pytest.approx(0.0),
+        "edge_precision": pytest.approx(1.0),
+        "edge_recall": pytest.approx(1.0),
+        "edge_f1": pytest.approx(1.0),
+    }
+
+
 def test_collapse_action_transition_tensor_to_adjacency_sums_over_actions() -> None:
     transition_tensor = np.array(
         [

@@ -92,6 +92,7 @@ def args_from_config(config: Dict[str, Any]) -> List[str]:
                 "pocml_memory_bias",
                 "computational_eval",
                 "structure_metrics",
+                "structure_metrics_ignore_self_loops",
                 "mercury_valid_trajectories_only",
                 "mercury_split_sensory_raw_latent_valid",
                 "pocml_valid_trajectories_only",

@@ -221,6 +221,7 @@ def compute_cscg_paper_precision_metrics_from_model(
         structure_scope = str(getattr(config, "structure_metrics_scope", "exact_level")).strip().lower()
         structure_source = str(getattr(config, "structure_metrics_ground_truth_source", "empirical_walks")).strip().lower()
         structure_epsilon = float(getattr(config, "structure_metrics_epsilon", 1e-6))
+        ignore_self_loops = bool(getattr(config, "structure_metrics_ignore_self_loops", True))
         if structure_scope == "walk_local":
             true_structure_walks = remap_position_walks_to_global_ids(gt_position_walks)
             n_true_states = int(len(np.unique(concatenate_walk_series(true_structure_walks)))) if true_structure_walks else 0
@@ -256,6 +257,7 @@ def compute_cscg_paper_precision_metrics_from_model(
             n_true=n_true_states,
             W_true=W_true,
             epsilon=structure_epsilon,
+            ignore_self_loops=ignore_self_loops,
         )
         metrics["latent_mean_total_variation"] = structure_metrics["mean_total_variation"]
         metrics["latent_edge_precision"] = structure_metrics["edge_precision"]
@@ -301,6 +303,7 @@ def compute_cscg_paper_precision_metrics_from_model(
             n_true=n_true_states,
             T_true=T_true,
             epsilon=structure_epsilon,
+            ignore_self_loops=ignore_self_loops,
         )
         metrics["latent_action_conditioned_mean_total_variation"] = action_structure_metrics["mean_total_variation"]
         metrics["latent_action_conditioned_edge_precision"] = action_structure_metrics["edge_precision"]

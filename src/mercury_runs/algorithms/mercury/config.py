@@ -36,6 +36,7 @@ class MercuryConfig(BaseModel):
     paper_precision_walk_length: int = Field(default=10_000, gt=0)
     structure_metrics_enabled: bool = True
     structure_metrics_epsilon: float = Field(default=1e-6, ge=0.0)
+    structure_metrics_ignore_self_loops: bool = True
     structure_metrics_scope: str = "exact_level"
     structure_metrics_ground_truth_source: str = "empirical_walks"
     run_parameters: dict[str, Any] = Field(default_factory=dict)

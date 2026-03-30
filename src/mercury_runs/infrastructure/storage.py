@@ -335,6 +335,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "structure_metrics": {
                     "enabled": bool(getattr(args, "structure_metrics", True)),
                     "epsilon": float(getattr(args, "structure_metrics_epsilon", 1e-6)),
+                    "ignore_self_loops": bool(getattr(args, "structure_metrics_ignore_self_loops", True)),
                     "scope": str(getattr(args, "structure_metrics_scope", "exact_level")),
                     "ground_truth_source": str(getattr(args, "structure_metrics_ground_truth_source", "empirical_walks")),
                 },

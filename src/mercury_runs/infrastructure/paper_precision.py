@@ -344,6 +344,23 @@ def row_normalize(W: np.ndarray) -> np.ndarray:
     return normalized
 
 
+def zero_diagonal(W: np.ndarray) -> np.ndarray:
+    weights = np.asarray(W, dtype=np.float64).copy()
+    if weights.ndim != 2 or weights.shape[0] != weights.shape[1]:
+        raise ValueError(f"Expected square matrix, got {weights.shape!r}")
+    np.fill_diagonal(weights, 0.0)
+    return weights
+
+
+def zero_action_tensor_diagonal(T: np.ndarray) -> np.ndarray:
+    transitions = np.asarray(T, dtype=np.float64).copy()
+    if transitions.ndim != 3 or transitions.shape[1] != transitions.shape[2]:
+        raise ValueError(f"Expected action-conditioned tensor with shape (a, n, n), got {transitions.shape!r}")
+    diag_indices = np.arange(transitions.shape[1])
+    transitions[:, diag_indices, diag_indices] = 0.0
+    return transitions
+
+
 def compute_mean_tv(T_true: np.ndarray, T_aligned: np.ndarray) -> float:
     transition_true = np.asarray(T_true, dtype=np.float64)
     transition_aligned = np.asarray(T_aligned, dtype=np.float64)
@@ -642,6 +659,7 @@ def compute_weighted_structure_metrics(
     n_true: int,
     W_true: np.ndarray | None = None,
     epsilon: float = 1e-6,
+    ignore_self_loops: bool = False,
 ) -> dict[str, float]:
     decoded_series = concatenate_walk_series(decoded_walks)
     true_series = concatenate_walk_series(true_walks)
@@ -669,6 +687,9 @@ def compute_weighted_structure_metrics(
         if W_true is not None
         else build_weighted_adjacency_from_walks(true_walks, n_states=n_true_states)
     )
+    if ignore_self_loops:
+        true_adjacency = zero_diagonal(true_adjacency)
+        aligned_adjacency = zero_diagonal(aligned_adjacency)
     return {
         "mean_total_variation": compute_mean_tv(
             row_normalize(true_adjacency),
@@ -687,6 +708,7 @@ def compute_action_conditioned_structure_metrics(
     n_true: int,
     T_true: np.ndarray | None = None,
     epsilon: float = 1e-6,
+    ignore_self_loops: bool = False,
 ) -> dict[str, float]:
     decoded_series = concatenate_walk_series(decoded_walks)
     true_series = concatenate_walk_series(true_walks)
@@ -721,6 +743,9 @@ def compute_action_conditioned_structure_metrics(
     resolved_n_actions = max(int(true_tensor.shape[0]), int(aligned_tensor.shape[0]))
     true_tensor = _pad_action_tensor_to_n_actions(true_tensor, resolved_n_actions)
     aligned_tensor = _pad_action_tensor_to_n_actions(aligned_tensor, resolved_n_actions)
+    if ignore_self_loops:
+        true_tensor = zero_action_tensor_diagonal(true_tensor)
+        aligned_tensor = zero_action_tensor_diagonal(aligned_tensor)
     return {
         "mean_total_variation": compute_action_conditioned_mean_tv(
             true_tensor,

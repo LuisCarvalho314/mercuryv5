@@ -258,6 +258,7 @@ def compute_mercury_paper_precision_metrics(
         structure_scope = str(getattr(config, "structure_metrics_scope", "exact_level")).strip().lower()
         structure_source = str(getattr(config, "structure_metrics_ground_truth_source", "empirical_walks")).strip().lower()
         structure_epsilon = float(getattr(config, "structure_metrics_epsilon", 1e-6))
+        ignore_self_loops = bool(getattr(config, "structure_metrics_ignore_self_loops", True))
         if structure_scope == "walk_local":
             true_structure_walks = remap_position_walks_to_global_ids(gt_position_walks)
             n_true_states = int(len(np.unique(concatenate_walk_series(true_structure_walks)))) if true_structure_walks else 0
@@ -293,6 +294,7 @@ def compute_mercury_paper_precision_metrics(
             n_true=n_true_states,
             W_true=W_true,
             epsilon=structure_epsilon,
+            ignore_self_loops=ignore_self_loops,
         )
         latent_structure_metrics = compute_weighted_structure_metrics(
             decoded_walks=latent_walks,
@@ -301,6 +303,7 @@ def compute_mercury_paper_precision_metrics(
             n_true=n_true_states,
             W_true=W_true,
             epsilon=structure_epsilon,
+            ignore_self_loops=ignore_self_loops,
         )
         metrics["sensory_mean_total_variation"] = sensory_structure_metrics["mean_total_variation"]
         metrics["sensory_edge_precision"] = sensory_structure_metrics["edge_precision"]
@@ -357,6 +360,7 @@ def compute_mercury_paper_precision_metrics(
                 n_true=n_true_states,
                 T_true=T_true,
                 epsilon=structure_epsilon,
+                ignore_self_loops=ignore_self_loops,
             )
             latent_action_metrics = compute_action_conditioned_structure_metrics(
                 decoded_walks=latent_walks,
@@ -370,6 +374,7 @@ def compute_mercury_paper_precision_metrics(
                 n_true=n_true_states,
                 T_true=T_true,
                 epsilon=structure_epsilon,
+                ignore_self_loops=ignore_self_loops,
             )
             metrics["sensory_action_conditioned_mean_total_variation"] = sensory_action_metrics["mean_total_variation"]
             metrics["sensory_action_conditioned_edge_precision"] = sensory_action_metrics["edge_precision"]

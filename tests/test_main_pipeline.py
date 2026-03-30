@@ -276,6 +276,7 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
         paper_precision_walk_length=250,
         structure_metrics=False,
         structure_metrics_epsilon=1e-4,
+        structure_metrics_ignore_self_loops=True,
         structure_metrics_scope="walk_local",
         structure_metrics_ground_truth_source="maze_topology",
         computational_eval=True,
@@ -355,13 +356,14 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
         "num_points": None,
         "num_walks": 7,
         "walk_length": 250,
-        "structure_metrics": {
-            "enabled": False,
-            "epsilon": 1e-4,
-            "scope": "walk_local",
-            "ground_truth_source": "maze_topology",
-        },
-    }
+            "structure_metrics": {
+                "enabled": False,
+                "epsilon": 1e-4,
+                "ignore_self_loops": True,
+                "scope": "walk_local",
+                "ground_truth_source": "maze_topology",
+            },
+        }
     assert payload["evaluation"]["computational"] == {"enabled": True, "profile": "full"}
     assert payload["valid_trajectories_only"] is True
     assert payload["mercury_valid_trajectories_only"] is False
@@ -439,6 +441,8 @@ def test_parse_arguments_accepts_structure_metric_flags(monkeypatch) -> None:
             "False",
             "--structure_metrics_epsilon",
             "0.0001",
+            "--structure_metrics_ignore_self_loops",
+            "False",
             "--structure_metrics_scope",
             "walk_local",
             "--structure_metrics_ground_truth_source",
@@ -450,6 +454,7 @@ def test_parse_arguments_accepts_structure_metric_flags(monkeypatch) -> None:
 
     assert args.structure_metrics is False
     assert args.structure_metrics_epsilon == 1e-4
+    assert args.structure_metrics_ignore_self_loops is False
     assert args.structure_metrics_scope == "walk_local"
     assert args.structure_metrics_ground_truth_source == "maze_topology"
 
