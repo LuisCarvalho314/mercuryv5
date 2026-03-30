@@ -6,6 +6,7 @@ from mercury.latent.state import (
     _make_past_memory_view,
     _extend_prev_from_memory_once,
     _resolve_prev_with_memory_replay,
+    _update_edges_with_actions,
     latent_step,
     LatentState,
     _register_features,
@@ -361,6 +362,31 @@ def test_resolve_prev_with_memory_replay_alias_spawns_and_wires(monkeypatch):
     assert wired_cur == prev_bmu  # old prev
     assert wired_label == 99
     assert wired_gauss == pytest.approx(gaussian_shape)
+
+
+def test_update_edges_with_actions_uses_passed_beta(monkeypatch):
+    g = _make_graph_with_nodes(mem_len=3, n_lat=2)
+    action_map = StubActionMap(dim=3, n_codes=3)
+    recorded: dict[str, float] = {}
+
+    def fake_update_edge(g_in, u, v, prior_row, observed_row, action_bmu, beta, gaussian_shape):
+        recorded["beta"] = float(beta)
+        return g_in
+
+    monkeypatch.setattr(latent_state_mod, "_update_edge", fake_update_edge)
+
+    out = _update_edges_with_actions(
+        g=g,
+        prev_bmu=0,
+        bmu=1,
+        action_bmu=2,
+        action_map=action_map,
+        gaussian_shape=1.5,
+        beta=0.37,
+    )
+
+    assert out is g
+    assert recorded["beta"] == pytest.approx(0.37)
 
 
 # ---------- latent_step integration tests ----------

@@ -1,4 +1,6 @@
 levels = [""]
+
+level_0 = []
 level_1 = [
     "XXXXXXXXXXX",
     "XXP  XXXT X",
@@ -189,6 +191,14 @@ level_21 = [
     "XXXXXX"
 ]
 
+level_22 = [
+    "XXXXXX",
+    "XP   X",
+    "X    X",
+    "X    X",
+    "XXXXXX"
+]
+
 # for value in maze.iter_rows(
 #     min_row=1, max_row=17, min_col=1, max_col=17, values_only=True
 # ):
@@ -203,7 +213,7 @@ level_21 = [
 #     min_row=1, max_row=17, min_col=1, max_col=17, values_only=True
 # ):
 #     level_10.append(value)
-
+levels.append(level_0)
 levels.append(level_1)
 levels.append(level_2)
 levels.append(level_3)
@@ -225,4 +235,5 @@ levels.append(level_18)
 levels.append(level_19)
 levels.append(level_20)
 levels.append(level_21)
+levels.append(level_22)
 

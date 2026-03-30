@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ def _find_existing_dataset_run_id(
     seed: int,
     rand_prob: float,
     num_steps: int,
+    valid_trajectories_only: bool,
 ) -> Optional[str]:
     """
     Returns an existing run_id if a dataset with identical params exists in output_dir.
@@ -55,6 +57,7 @@ def _find_existing_dataset_run_id(
             and metadata.get("random_seed") == seed
             and float(metadata.get("random_prob")) == float(rand_prob)
             and int(metadata.get("num_steps")) == int(num_steps)
+            and bool(metadata.get("valid_trajectories_only", False)) == bool(valid_trajectories_only)
         ):
             existing_run_id = metadata.get("run_id")
             if existing_run_id:
@@ -99,15 +102,17 @@ def _build_run_id(
     seed: int,
     rand_prob: float,
     num_steps: int,
+    valid_trajectories_only: bool,
     timestamp_compact: str,
 ) -> str:
     sensor_name = agent_sensors["sensor"]
     sensor_range = agent_sensors.get("range", None)
+    validity_tag = "validonly" if valid_trajectories_only else "allsteps"
 
     if sensor_name == "cardinal distance":
-        return f"level{level}_{sensor_name}_range{sensor_range}_seed{seed}_p{rand_prob}_steps{num_steps}_{timestamp_compact}"
+        return f"level{level}_{sensor_name}_range{sensor_range}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{timestamp_compact}"
 
-    return f"level{level}_{sensor_name}_seed{seed}_p{rand_prob}_steps{num_steps}_{timestamp_compact}"
+    return f"level{level}_{sensor_name}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{timestamp_compact}"
 
 
 def _infer_action_column_names(action_width: int) -> list[str]:
@@ -124,10 +129,11 @@ def _dataset_to_dict(dataset: MazeDataset) -> dict[str, Any]:
     return dataset.dict()
 
 
-def _rollout(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _rollout(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
     observations = []
     actions = []
     collisions = []
+    attempted_steps = 0
 
     action = env.random_action()
     collision = True
@@ -135,6 +141,7 @@ def _rollout(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np
     for _ in range(num_steps):
         action = env.random_policy(action, collision, rand_prob)
         observation, action_vec, collision = env.step(action)
+        attempted_steps += 1
 
         observations.append(observation)
         actions.append(action_vec)
@@ -144,7 +151,46 @@ def _rollout(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np
     actions_array = _to_2d_array(actions).astype(np.int8, copy=False)
     collisions_array = np.asarray(collisions, dtype=bool)
 
-    return observations_array, actions_array, collisions_array
+    stats = {
+        "requested_steps": int(num_steps),
+        "saved_steps": int(collisions_array.shape[0]),
+        "attempted_steps": int(attempted_steps),
+        "dropped_collision_steps": int(collisions_array.sum()),
+    }
+    return observations_array, actions_array, collisions_array, stats
+
+
+def _rollout_valid_only(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
+    observations = []
+    actions = []
+    attempted_steps = 0
+    dropped_collision_steps = 0
+
+    action = env.random_action()
+    collision = True
+
+    while len(observations) < num_steps:
+        action = env.random_policy(action, collision, rand_prob)
+        observation, action_vec, collision = env.step(action)
+        attempted_steps += 1
+
+        if bool(collision):
+            dropped_collision_steps += 1
+            continue
+
+        observations.append(observation)
+        actions.append(action_vec)
+
+    observations_array = _to_2d_array(observations)
+    actions_array = _to_2d_array(actions).astype(np.int8, copy=False)
+    collisions_array = np.zeros((len(observations),), dtype=bool)
+    stats = {
+        "requested_steps": int(num_steps),
+        "saved_steps": int(collisions_array.shape[0]),
+        "attempted_steps": int(attempted_steps),
+        "dropped_collision_steps": int(dropped_collision_steps),
+    }
+    return observations_array, actions_array, collisions_array, stats
 
 
 def _build_frame(observations: np.ndarray, actions: np.ndarray, collisions: np.ndarray) -> pl.DataFrame:
@@ -183,7 +229,7 @@ def _json_safe(value):
     return value
 
 
-def _write_artifacts(output_dir, run_id, frame, dataset, compression="zstd"):
+def _write_artifacts(output_dir, run_id, frame, dataset, *, valid_trajectories_only: bool, generation_stats: dict[str, int], compression="zstd"):
     import json
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +254,8 @@ def _write_artifacts(output_dir, run_id, frame, dataset, compression="zstd"):
         "random_seed": dataset.random_seed,
         "random_prob": dataset.random_prob,
         "num_steps": dataset.num_steps,
+        "valid_trajectories_only": bool(valid_trajectories_only),
+        "generation_stats": {key: int(value) for key, value in generation_stats.items()},
         "artifact": {"parquet": parquet_path.name},
         "table": {
             "num_rows": frame.height,
@@ -238,6 +286,7 @@ def generate_data(
     seed: int = 0,
     rand_prob: float = 0.3,
     num_steps: int = 20_000,
+    valid_trajectories_only: bool = False,
     output_root: str | Path = "../../datasets",
     reuse_existing: bool = True,
 ) -> dict[str, str]:
@@ -271,10 +320,12 @@ def generate_data(
                 seed=seed,
                 rand_prob=rand_prob,
                 num_steps=num_steps,
+                valid_trajectories_only=bool(valid_trajectories_only),
             )
             if existing_run_id is not None:
                 run_ids[sensor_key] = existing_run_id
-                print(f"Reusing existing dataset: {output_dir / (existing_run_id + '.parquet')}")
+                if os.environ.get("MERCURY_PROGRESS", "1").strip().lower() not in {"0", "false", "f", "no", "n", "off"}:
+                    print(f"Reusing existing dataset: {output_dir / (existing_run_id + '.parquet')}")
                 continue
 
         run_id = _build_run_id(
@@ -283,6 +334,7 @@ def generate_data(
             seed=seed,
             rand_prob=rand_prob,
             num_steps=num_steps,
+            valid_trajectories_only=bool(valid_trajectories_only),
             timestamp_compact=timestamp_utc_compact,
         )
 
@@ -293,7 +345,18 @@ def generate_data(
             seed=seed,
         )
 
-        observations, actions, collisions = _rollout(env, num_steps=num_steps, rand_prob=rand_prob)
+        if valid_trajectories_only:
+            observations, actions, collisions, generation_stats = _rollout_valid_only(
+                env,
+                num_steps=num_steps,
+                rand_prob=rand_prob,
+            )
+        else:
+            observations, actions, collisions, generation_stats = _rollout(
+                env,
+                num_steps=num_steps,
+                rand_prob=rand_prob,
+            )
 
         trajectory = MazeTrajectory(observations=observations, actions=actions, collisions=collisions)
         agent_config = AgentConfig(sensor=agent_sensors["sensor"], range=agent_sensors.get("range", None))
@@ -310,7 +373,14 @@ def generate_data(
         )
 
         frame = _build_frame(observations, actions, collisions)
-        _write_artifacts(output_dir=output_dir, run_id=run_id, frame=frame, dataset=dataset)
+        _write_artifacts(
+            output_dir=output_dir,
+            run_id=run_id,
+            frame=frame,
+            dataset=dataset,
+            valid_trajectories_only=bool(valid_trajectories_only),
+            generation_stats=generation_stats,
+        )
 
         run_ids[sensor_key] = run_id
 

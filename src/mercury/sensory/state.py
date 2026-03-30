@@ -1,9 +1,7 @@
 # sensory/state.py
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, replace
-from typing import Any, Tuple
 
 import numpy as np
 
@@ -330,7 +328,7 @@ def sensory_step(
         prior_row = _edge_action_row(g, state.prev_bmu, bmu, am=action_map)
         g = _update_edge(
             g, state.prev_bmu, bmu, prior_row, observed_row,
-            action_bmu=action_bmu, beta=0.5, gaussian_shape=cfg.gaussian_shape,
+            action_bmu=action_bmu, beta=cfg.action_lr, gaussian_shape=cfg.gaussian_shape,
         )
         g, mapping = age_maintenance(u=state.prev_bmu, v=bmu, g=g, p=cfg)  # numpy version
         bmu = int(mapping[bmu])
@@ -363,24 +361,38 @@ def sensory_step_frozen(
 
     mapping = np.arange(g.n, dtype=np.int32)
 
-    # 2) Temporal link only (optional)
-    if state.prev_bmu is not None:
-        observed_row = np.asarray(action_map.state.codebook[action_bmu], np.float32)
-        prior_row = _edge_action_row(g, state.prev_bmu, bmu, am=action_map)
-        g = _update_edge(
-            g, state.prev_bmu, bmu, prior_row, observed_row,
-            action_bmu=action_bmu, beta=cfg.action_lr,
-            gaussian_shape=cfg.gaussian_shape,
-        )
+    # 2) Advance context without mutating the frozen graph.
+    state = _update_global_context(state, weights[bmu], contexts[bmu], cfg.global_context_lr)
 
     # 3) Activation for plotting
     g = _set_activation(g, bmu)
 
     state.gs = g
-    state.prev_prev_bmu = copy.deepcopy(state.prev_bmu)
-    state.prev_bmu = state.prev_prev_bmu
-    state.prev_bmu = bmu
+    state.prev_bmu = int(bmu)
     state.step_idx += 1
     state.mapping = mapping
     return state
 
+
+def sensory_step_predict_only(
+    observation: Array,
+    state: SensoryState,
+    cfg: SensoryParams,
+) -> tuple[SensoryState, Array]:
+    g = state.gs
+    weights = g.node_features["weight"]
+    contexts = g.node_features["context"]
+    bmu, _, _ = _pick_bmu(
+        weights,
+        contexts,
+        np.asarray(observation, np.float32),
+        state.global_context,
+        cfg.sensory_weighting,
+    )
+    next_state = _update_global_context(state, weights[bmu], contexts[bmu], cfg.global_context_lr)
+    next_state.prev_bmu = int(bmu)
+    next_state.step_idx += 1
+    next_state.mapping = np.arange(g.n, dtype=np.int32)
+    activation = np.zeros((g.n,), dtype=np.float32)
+    activation[bmu] = 1.0
+    return next_state, activation

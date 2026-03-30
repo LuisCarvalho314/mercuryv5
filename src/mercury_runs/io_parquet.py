@@ -2,32 +2,63 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Literal, Optional
 
 import numpy as np
 import polars as pl
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-@dataclass(frozen=True)
-class ParquetConfig:
+class ParquetConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, str_strip_whitespace=True)
+
     root: Path
-    level: int
-    sensor: str
-    sensor_range: Optional[int] = None
+    level: int = Field(ge=0)
+    sensor: str = Field(min_length=1)
+    sensor_range: Optional[int] = Field(default=None, ge=0)
 
-    select: str = "latest"  # "latest" or "run_id"
+    select: Literal["latest", "run_id"] = "latest"
     run_id: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _validate_selection_and_sensor(self) -> "ParquetConfig":
+        if self.select == "run_id" and not self.run_id:
+            raise ValueError("select='run_id' requires run_id.")
+        if self.sensor == "cardinal distance" and self.sensor_range is None:
+            raise ValueError("sensor='cardinal distance' requires sensor_range.")
+        return self
 
-@dataclass(frozen=True)
-class LoadedDataset:
+
+class LoadedDataset(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
     observations: np.ndarray  # (T, D_obs)
     actions: np.ndarray       # (T, D_act)
     collisions: np.ndarray    # (T,)
-    source_metadata: dict
+    source_metadata: dict[str, Any]
     parquet_path: Path
+
+    @field_validator("observations", "actions", "collisions", mode="before")
+    @classmethod
+    def _coerce_array(cls, value: Any) -> np.ndarray:
+        if isinstance(value, np.ndarray):
+            return value
+        return np.asarray(value)
+
+    @model_validator(mode="after")
+    def _validate_shapes(self) -> "LoadedDataset":
+        if self.observations.ndim != 2:
+            raise ValueError("observations must be a 2D array.")
+        if self.actions.ndim != 2:
+            raise ValueError("actions must be a 2D array.")
+        if self.collisions.ndim != 1:
+            raise ValueError("collisions must be a 1D array.")
+
+        n_rows = int(self.observations.shape[0])
+        if int(self.actions.shape[0]) != n_rows or int(self.collisions.shape[0]) != n_rows:
+            raise ValueError("observations, actions, and collisions must have matching row counts.")
+        return self
 
 
 def dataset_directory(config: ParquetConfig) -> Path:
@@ -60,6 +91,8 @@ def load_level_parquet(config: ParquetConfig) -> LoadedDataset:
 
     metadata_path = parquet_path.with_suffix(".metadata.json")
     source_metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    if not isinstance(source_metadata, dict):
+        raise ValueError(f"Expected metadata JSON object in {metadata_path.name}, got {type(source_metadata).__name__}.")
 
     frame = pl.read_parquet(parquet_path)
 

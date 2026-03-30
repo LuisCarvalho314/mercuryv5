@@ -40,7 +40,7 @@ class LatentState:
     def mem_adj(self) -> Array:
         return self.g.node_features["mem_adj"]
 
-def _register_features(g: Graph, mem_len: int) -> Graph:
+def _register_features(g: Graph, mem_len: int, n_actions: int) -> Graph:
     """
     Register required features.
 
@@ -57,23 +57,23 @@ def _register_features(g: Graph, mem_len: int) -> Graph:
 
     g.register_node_feature("activation", 1, init_value=0)
     g.register_node_feature("mem_adj", mem_len, init_value=0)
-    g.register_node_feature("ambiguity_score", 1, init_value=0)
+    g.register_node_feature("ambiguity_score", n_actions, init_value=0)
     g.register_edge_feature("age", 1, dtype=np.int32, init_value=0)
     g.register_edge_feature("action", 1, dtype=np.int32, init_value=0)
     return g
 
 
-def build_initial_graph(ms: MemoryState) -> Graph:
+def build_initial_graph(ms: MemoryState, n_actions: int = 1) -> Graph:
     g = Graph(directed=True)
-    _register_features(g, ms.gs.n)
+    _register_features(g, ms.gs.n, n_actions)
     for n in np.arange(ms.sensory_n_nodes):
         g = _add_node(g, ms, n)
 
 
     return g
 
-def init_latent_state(ms: MemoryState) -> LatentState:
-    g = build_initial_graph(ms)
+def init_latent_state(ms: MemoryState, n_actions: int = 1) -> LatentState:
+    g = build_initial_graph(ms, n_actions=n_actions)
     return LatentState(g, mapping = np.arange(g.n))
 
 
@@ -113,6 +113,11 @@ def _add_node(
         node_feat={
             "activation": np.array(0.0, dtype=np.float32),
             "mem_adj": mem_adj_init,
+            "ambiguity_score": (
+                np.zeros((g.node_features["ambiguity_score"].shape[1],), dtype=np.float32)
+                if g.node_features["ambiguity_score"].ndim > 1
+                else np.array(0.0, dtype=np.float32)
+            ),
         },
         edge_defaults_for_new_node={
             "age": np.array([0], dtype=np.int32),
@@ -467,6 +472,22 @@ def compute_bmu_current_timestep_only(
     )
     return bmu
 
+
+def _normalized_undirected_adjacency_with_self_loops(
+        adjacency: np.ndarray) -> np.ndarray:
+    adjacency = adjacency.astype(np.float32, copy=False)
+
+    # Convert directed -> undirected without doubling reciprocal edges.
+    undirected = np.maximum(adjacency, adjacency.T)
+
+    adjacency_tilde = undirected + np.identity(undirected.shape[0],
+                                               dtype=np.float32)
+    degrees = np.sum(adjacency_tilde, axis=1).astype(np.float32)
+    degrees_inv_sqrt = 1.0 / np.sqrt(np.maximum(degrees, 1e-12))
+    return (adjacency_tilde * degrees_inv_sqrt[None, :]) * degrees_inv_sqrt[
+        :, None]
+
+
 def _normalized_adjacency_with_self_loops(adjacency: np.ndarray) -> np.ndarray:
     adjacency = adjacency.astype(np.float32, copy=False)
     adjacency_tilde = adjacency + np.identity(adjacency.shape[0], dtype=np.float32)
@@ -785,26 +806,29 @@ def compute_bmu(
     elif prev_trace.shape[0] > n_latent:
         prev_trace = prev_trace[:n_latent]
 
+    undirected_base_norm = _normalized_undirected_adjacency_with_self_loops(graph.adj)
     base_norm = _normalized_adjacency_with_self_loops(graph.adj)
     action_adjacency = _transition_for_action_strength(graph, action_bmu)
     action_norm = _normalized_adjacency_with_self_loops(action_adjacency)
 
+    undirected_diffusion_from_trace = undirected_base_norm @ prev_trace
     diffusion_from_trace = base_norm @ prev_trace
-    action_diffusion_from_trace = action_norm @ prev_trace
+    # action_diffusion_from_trace = action_norm @ prev_trace
 
+    undirected_diffusion_from_trace[~candidate_mask] = 0.0
     diffusion_from_trace[~candidate_mask] = 0.0
-    action_diffusion_from_trace[~candidate_mask] = 0.0
+    # action_diffusion_from_trace[~candidate_mask] = 0.0
 
     # Combine
-    memory_score = norm(memory_score)
-    diffusion_from_trace = norm(diffusion_from_trace)
-    action_diffusion_from_trace = norm(action_diffusion_from_trace)
+    # memory_score = norm(memory_score)
+    # diffusion_from_trace = norm(diffusion_from_trace)
+    # action_diffusion_from_trace = norm(action_diffusion_from_trace)
 
     w_mem, w_trace, w_action = _convex_mixture_weights(mixture_alpha, mixture_beta)
     combined_score = (
         (w_mem * memory_score)
-        + (w_trace * diffusion_from_trace)
-        + (w_action * action_diffusion_from_trace)
+        + (w_trace * undirected_diffusion_from_trace)
+        + (w_action * diffusion_from_trace)
     )
 
     bmu = int(np.argmax(combined_score))
@@ -817,6 +841,248 @@ def compute_bmu(
     )
     return bmu
 
+def compute_bmu(
+    state: LatentState,
+    memory_state: MemoryState,
+    action_bmu: int,
+    cfg: LatentParams,
+    timestep_for_gating: int = 0,
+) -> int:
+    """
+    Select the winning latent unit by minimizing a constrained neural energy.
+
+    Neural interpretation
+    ---------------------
+    Each latent node is treated as a neural unit receiving four forms of drive:
+
+        1. memory drive
+        2. undirected recurrent drive
+        3. baseline directed transition drive
+        4. action-conditioned transition drive
+
+    For latent unit i, the instantaneous neural support is
+
+        h_i =
+            w_memory      * memory_drive_i
+          + w_undirected  * recurrent_drive_i
+          + w_base        * baseline_transition_drive_i
+          + w_action      * action_transition_drive_i
+
+    Structural admissibility is enforced by binary gating. Units that fail the
+    temporal-prefix gate or the sensory gate are excluded from competition.
+
+    The neural energy is
+
+        E_i = -h_i    for admissible units
+        E_i = +inf    for gated-out units
+
+    The inferred latent state is the winner-take-all unit with minimum energy.
+
+    Notes
+    -----
+    - Temporal-prefix gating requires positive support beginning at t=0 and
+      continuing as a contiguous prefix.
+    - Sensory gating requires all currently active gated sensory channels to be
+      represented by the latent unit.
+    - The trace update at the end is a separate persistence dynamic and not part
+      of the instantaneous energy itself.
+    """
+    trace_decay = cfg.trace_decay
+
+    latent_graph = state.g
+    latent_memory_templates = latent_graph.node_features["mem_adj"]  # shape: (n_latent, S * L)
+    n_latent_units = latent_graph.n
+    flattened_memory_length = latent_memory_templates.shape[1]
+
+    temporal_window_length = getattr(memory_state, "length", flattened_memory_length)
+    if flattened_memory_length % temporal_window_length != 0:
+        raise ValueError(
+            f"flattened_memory_length={flattened_memory_length} is not a multiple "
+            f"of temporal_window_length={temporal_window_length}"
+        )
+
+    current_memory_activity = memory_state.activations.astype(np.float32)
+    if current_memory_activity.shape[0] != flattened_memory_length:
+        raise ValueError(
+            f"memory_state.activations has length {current_memory_activity.shape[0]} "
+            f"but expected {flattened_memory_length}"
+        )
+
+    # ------------------------------------------------------------------
+    # 1. Memory drive: direct overlap between current memory activity and
+    #    each latent unit's stored sensory-temporal template.
+    # ------------------------------------------------------------------
+    raw_memory_drive = current_memory_activity @ latent_memory_templates.T  # shape: (n_latent,)
+
+    per_timestep_memory_drive = np.empty(
+        (n_latent_units, temporal_window_length),
+        dtype=np.float32,
+    )
+    for timestep_index in range(temporal_window_length):
+        timestep_flat_indices = np.arange(
+            timestep_index,
+            flattened_memory_length,
+            temporal_window_length,
+            dtype=np.int64,
+        )
+        per_timestep_memory_drive[:, timestep_index] = (
+            latent_memory_templates[:, timestep_flat_indices]
+            * current_memory_activity[timestep_flat_indices]
+        ).sum(axis=1)
+
+    # ------------------------------------------------------------------
+    # 2. Temporal admissibility gate:
+    #    the latent unit must show positive support from t=0 over a
+    #    contiguous prefix of the temporal memory strip.
+    # ------------------------------------------------------------------
+    has_positive_initial_drive = per_timestep_memory_drive[:, 0] > 0
+    positive_timestep_mask = per_timestep_memory_drive > 0
+    has_any_positive_timestep = positive_timestep_mask.any(axis=1)
+
+    last_positive_from_end = np.argmax(positive_timestep_mask[:, ::-1], axis=1)
+    last_positive_timestep = (temporal_window_length - 1) - last_positive_from_end
+
+    timestep_positions = np.arange(temporal_window_length)
+    within_positive_prefix = timestep_positions <= last_positive_timestep[:, None]
+    prefix_is_contiguous = np.all(
+        ~within_positive_prefix | positive_timestep_mask,
+        axis=1,
+    )
+
+    passes_temporal_prefix_gate = (
+        has_positive_initial_drive
+        & has_any_positive_timestep
+        & prefix_is_contiguous
+    )
+
+    memory_drive = raw_memory_drive.astype(np.float32, copy=True)
+    memory_drive[~passes_temporal_prefix_gate] = 0.0
+
+    # ------------------------------------------------------------------
+    # 3. Sensory admissibility gate:
+    #    all active sensory channels at the chosen gating timestep must be
+    #    represented by the latent unit.
+    # ------------------------------------------------------------------
+    if not (0 <= timestep_for_gating < temporal_window_length):
+        raise ValueError(
+            f"timestep_for_gating={timestep_for_gating} out of range "
+            f"[0, {temporal_window_length})"
+        )
+
+    gated_flat_indices = timestep_for_gating + np.arange(
+        memory_state.sensory_n_nodes,
+        dtype=np.int64,
+    ) * temporal_window_length
+
+    gated_sensory_activity = np.maximum(
+        current_memory_activity[gated_flat_indices],
+        0.0,
+    ).astype(np.float32)
+
+    gated_latent_templates = latent_memory_templates[:, gated_flat_indices]
+    active_gated_channels = gated_sensory_activity != 0.0
+
+    if np.any(active_gated_channels):
+        passes_sensory_gate = np.all(
+            gated_latent_templates[:, active_gated_channels] != 0,
+            axis=1,
+        )
+    else:
+        passes_sensory_gate = np.ones((n_latent_units,), dtype=bool)
+
+    memory_drive[~passes_sensory_gate] = 0.0
+
+    admissibility_gate = passes_temporal_prefix_gate & passes_sensory_gate
+
+    # ------------------------------------------------------------------
+    # 4. Persistent latent trace from the previous step.
+    # ------------------------------------------------------------------
+    previous_latent_trace = state.prev_activations
+    if previous_latent_trace is None:
+        previous_latent_trace = np.zeros((n_latent_units,), dtype=np.float32)
+    else:
+        previous_latent_trace = np.asarray(previous_latent_trace, dtype=np.float32).reshape(-1)
+
+    if previous_latent_trace.shape[0] < n_latent_units:
+        previous_latent_trace = np.pad(
+            previous_latent_trace,
+            (0, n_latent_units - previous_latent_trace.shape[0]),
+            mode="constant",
+        )
+    elif previous_latent_trace.shape[0] > n_latent_units:
+        previous_latent_trace = previous_latent_trace[:n_latent_units]
+
+    # ------------------------------------------------------------------
+    # 5. Recurrent and transition drives.
+    # ------------------------------------------------------------------
+    undirected_recurrent_graph = np.maximum(latent_graph.adj,
+                                            latent_graph.adj.T).astype(
+        np.float32,
+        copy=False,
+    )
+    baseline_transition_graph = latent_graph.adj.astype(np.float32, copy=False)
+
+    action_conditioned_transition_graph = _transition_for_action_strength(
+        latent_graph,
+        action_bmu,
+    ).astype(np.float32, copy=False)
+
+    if cfg.allow_self_loops:
+        identity = np.identity(latent_graph.n, dtype=np.float32)
+        undirected_recurrent_graph = undirected_recurrent_graph + identity
+        baseline_transition_graph = baseline_transition_graph + identity
+        action_conditioned_transition_graph = action_conditioned_transition_graph + identity
+
+    undirected_recurrent_drive = (undirected_recurrent_graph @
+                                  previous_latent_trace)
+    baseline_transition_drive = (baseline_transition_graph @
+                                 previous_latent_trace)
+    action_transition_drive = (action_conditioned_transition_graph @
+                               previous_latent_trace)
+
+    undirected_recurrent_drive[~admissibility_gate] = 0.0
+    baseline_transition_drive[~admissibility_gate] = 0.0
+    action_transition_drive[~admissibility_gate] = 0.0
+
+    # ------------------------------------------------------------------
+    # 6. Weighted neural support.
+    # ------------------------------------------------------------------
+    (
+        weight_memory,
+        weight_undirected,
+        weight_base,
+        weight_action,
+    ) = cfg.normalized_energy_weights()
+
+    latent_neural_support = (
+        (weight_memory * memory_drive)
+        + (weight_undirected * undirected_recurrent_drive)
+        + (weight_base * baseline_transition_drive)
+        + (weight_action * action_transition_drive)
+        - (cfg.lambda_trace * previous_latent_trace)
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Constrained neural energy and winner-take-all selection.
+    # ------------------------------------------------------------------
+    neural_energy = np.full((n_latent_units,), np.inf, dtype=np.float32)
+    neural_energy[admissibility_gate] = -latent_neural_support[admissibility_gate]
+
+    winning_latent_unit = int(np.argmin(neural_energy))
+
+    # ------------------------------------------------------------------
+    # 8. Trace persistence dynamics.
+    # ------------------------------------------------------------------
+    bounded_memory_drive = np.tanh(memory_drive)
+
+    state.prev_activations = _update_exponential_trace(
+        prev_trace=previous_latent_trace,
+        current_signal=bounded_memory_drive.astype(np.float32, copy=False),
+        trace_decay=trace_decay,
+        clip_min=0.0,
+    )
+
+    return winning_latent_unit
 
 
 
@@ -1125,7 +1391,7 @@ def _update_edges_with_actions(g: Graph,
     prior_row = _edge_action_row(g, prev_bmu, bmu, am=action_map)
     g = _update_edge(
         g, prev_bmu, bmu, prior_row, observed_row,
-        action_bmu=action_bmu, beta=0.1, gaussian_shape=gaussian_shape,
+        action_bmu=action_bmu, beta=beta, gaussian_shape=gaussian_shape,
     )
     return g
 
@@ -1531,11 +1797,13 @@ def latent_step(
         # if is_current_aliased:
         #     print(True)
 
+        ambiguity_score = state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu]
+        ambiguity_score = float(cfg.ambiguity_decay) * float(ambiguity_score)
         if preds.size > 1:
-            state.g.node_features["ambiguity_score"][state.prev_bmu] += 1
+            ambiguity_score += 1.0
+        state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu] = ambiguity_score
 
-        if (state.g.node_features["ambiguity_score"][state.prev_bmu] >
-                cfg.ambiguity_threshold):
+        if ambiguity_score > cfg.ambiguity_threshold:
             # print(f"ALIASED {state.prev_bmu}")
             state.preds.append(preds)
             # print(f"seen preds: {state.preds}")
@@ -1550,7 +1818,7 @@ def latent_step(
             for i in range(g.n):
                 g = _remove_aliased_connections(g, i, resolved_prev)
 
-            state.g.node_features["ambiguity_score"][state.prev_bmu] = 0
+            state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu] = 0
 
             # g = _remove_aliased_connections(
             #     g,
@@ -1648,4 +1916,68 @@ def latent_step(
 
 
     # print(f"{g.n} nodes @ step {state.step_idx}")
+    return state, int(bmu_now), state_mem
+
+def latent_step_frozen(
+    ms: MemoryState,
+    mem_vec: List[int],
+    state: LatentState,
+    action_bmu: int,
+    cfg: LatentParams,
+    action_map: ActionMap,
+    action_mem: List[int],
+    state_mem: List[int]
+) -> tuple[LatentState, int, List[int]]:
+    g = state.g
+
+    bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
+
+
+    # print("bmu_now", bmu_now)
+    mapping = np.arange(g.n, dtype=np.int32)
+
+    # assert np.array_equal(ms.activations, memory_view_at_global_timestep(ms,
+    #                                                          4).activations),\
+    #     (f"{ms.activations} vs"
+    #                                                      f" "
+    #      f"{memory_view_at_global_timestep(ms,4).activations}")
+
+    g = _set_activation(g, bmu_now)
+
+    # commit
+    state_mem.append(bmu_now)
+    state.g = g
+
+    if bmu_now >= state.g.n or mapping[bmu_now] == -1:
+        bmu_now = compute_bmu(state, ms, action_bmu, cfg)
+    else:
+        bmu_now = mapping[bmu_now]
+
+    # update_bmu_memory_adj()
+
+    state.prev_bmu = int(bmu_now)
+    state.step_idx += 1
+    state.mapping = mapping
+
+    # print(f"{g.n} nodes @ step {state.step_idx}")
+    return state, int(bmu_now), state_mem
+
+
+def latent_step_predict_only(
+    ms: MemoryState,
+    state: LatentState,
+    action_bmu: int,
+    cfg: LatentParams,
+    state_mem: List[int],
+) -> tuple[LatentState, int, List[int]]:
+    bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
+    mapping = np.arange(state.g.n, dtype=np.int32)
+    state_mem.append(bmu_now)
+    if bmu_now >= state.g.n or mapping[bmu_now] == -1:
+        bmu_now = compute_bmu(state, ms, action_bmu, cfg)
+    else:
+        bmu_now = mapping[bmu_now]
+    state.prev_bmu = int(bmu_now)
+    state.step_idx += 1
+    state.mapping = mapping
     return state, int(bmu_now), state_mem
