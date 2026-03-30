@@ -1,0 +1,132 @@
+{
+  "environment": {
+    "level": [
+      19, 20, 21
+    ],
+    "num_steps": [60000],
+    "sensor": [
+      "cardinal distance"
+    ],
+    "sensor_range": [
+      1
+    ],
+    "seed": [
+      0, 1, 2
+    ],
+    "rand_prob": [
+      0.0, 0.1, 0.3
+    ],
+    "mercury_valid_trajectories_only": [
+      false, true
+    ],
+    "pocml_valid_trajectories_only": [
+      false
+    ],
+    "cscg_valid_trajectories_only": [
+      false
+    ],
+    "window_length": [
+      100
+    ],
+    "reuse_existing_run": [
+      false
+    ]
+  },
+  "evaluation": {
+    "paper_precision_mode": [
+      "per_iteration"
+    ],
+    "paper_precision_num_points": [
+      21
+    ],
+    "paper_precision_num_walks": [
+      20
+    ],
+    "paper_precision_walk_length": [
+      100
+    ],
+    "computational_eval": [
+      true
+    ],
+    "computational_eval_profile": [
+      "full"
+    ]
+  },
+  "methods": {
+    "mercury": {
+      "enabled": true,
+      "grid": {
+        "memory_length": [
+          20
+        ],
+        "activation_threshold": [
+          0.95
+        ],
+        "ambiguity_threshold": [
+          10
+        ],
+        "am_lr": [
+          0.001
+        ],
+        "am_key": [
+          0
+        ],
+        "weight_preset": [
+          "baseline",
+          "no_memory",
+          "no_undirected",
+          "no_base",
+          "no_action",
+          "memory_dominant",
+          "undirected_dominant",
+          "base_dominant",
+          "action_dominant"
+        ],
+        "memory_replay": [
+          true
+        ],
+        "memory_disambiguation": [
+          true
+        ],
+        "trace_decay": [0.99],
+        "sensory_weighting": [1.0]
+      }
+    },
+    "pocml": {
+      "enabled": false,
+      "grid": {}
+    },
+    "cscg": {
+      "enabled": false,
+      "grid": {
+        "cscg_clones_per_obs": [
+          20
+        ],
+        "cscg_n_iter": [
+          1
+        ],
+        "cscg_pseudocount": [
+          0.002
+        ],
+        "cscg_term_early": [
+          false
+        ],
+        "cscg_train_algorithm": [
+          "em"
+        ],
+        "cscg_training_mode": [
+          "online_em"
+        ],
+        "cscg_batch_size": [
+          10, 100
+        ],
+        "cscg_online_lambda": [
+          0.9, 0.99
+        ],
+        "cscg_seed": [
+          0,1
+        ]
+      }
+    }
+  }
+}
