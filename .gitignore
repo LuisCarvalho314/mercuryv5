@@ -1,0 +1,35 @@
+# Python cache/build
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE/editor
+.idea/
+.vscode/
+
+# Local runtime artifacts
+logs/
+results/
+saved_states/
+src/maze_environment/logs/
+scripts/*.csv
+external/
+Ezenkwu_Starkey_2021_Unsupervised Temporospatial Neural Architecture for Sensorimotor Map Learning.pdf
+
+# Local data outputs (keep folder, ignore contents)
+datasets/level*/
+datasets/level=*/
+datasets/level16/
+datasets/level17/
+datasets/level18/
+datasets/level20/
+datasets/level21/
+
+# lock/temp
+datasets/.dataset_generation.lock

@@ -1,0 +1,20 @@
+{
+  "level": [16, 17],
+  "sensor": ["cardinal distance"],
+  "sensor_range": [1],
+  "seed": [0, 1],
+  "rand_prob": [0.3],
+  "memory_length": [40],
+  "activation_threshold": [0.95],
+  "ambiguity_threshold": [10],
+  "am_lr": [0.001],
+  "am_key": [0],
+  "window_length": [100],
+  "weight_memory": [0.4],
+  "weight_undirected": [0.2],
+  "weight_base": [0.2],
+  "weight_action": [0.2],
+  "memory_replay": [false, true],
+  "memory_disambiguation": [false, true],
+  "reuse_existing_run": [false]
+}
