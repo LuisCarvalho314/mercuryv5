@@ -434,13 +434,23 @@ def build_action_conditioned_tensor_from_walks(
     for state_walk, action_walk in zip(state_walks, action_walks, strict=False):
         states = np.asarray(state_walk, dtype=np.int64)
         actions = np.asarray(action_walk, dtype=np.int64)
-        if states.shape[0] != actions.shape[0]:
-            raise ValueError("State walks and action walks must have matching lengths.")
         if states.shape[0] < 2:
             continue
+        if actions.shape[0] == states.shape[0]:
+            # Evaluation walks store action[t] alongside the post-step observation/state[t].
+            # The transition states[t] -> states[t+1] is therefore conditioned by action[t+1].
+            transition_actions = actions[1:]
+        elif actions.shape[0] == states.shape[0] - 1:
+            # Standard convention: one action per state transition.
+            transition_actions = actions
+        else:
+            raise ValueError(
+                "Action walks must either match state walk length (post-step action convention) "
+                "or be exactly one shorter (transition action convention)."
+            )
         for source_state, action_id, target_state in zip(
             states[:-1].tolist(),
-            actions[:-1].tolist(),
+            transition_actions.tolist(),
             states[1:].tolist(),
             strict=False,
         ):
