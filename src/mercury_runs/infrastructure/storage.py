@@ -64,10 +64,14 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
     cscg_dir = method_output_dir(run_root / "bundles" / "cscg", level, sensor, sensor_range)
     return ArtifactLayout(
         mercury_states_parquet=mercury_dir / f"{run_id}_states.parquet",
+        mercury_attribution_parquet=mercury_dir / f"{run_id}_attribution.parquet",
         mercury_paper_precision_json=(run_root / "metrics" / "mercury" / f"{run_id}_paper_precision.json"),
         mercury_computational_json=(run_root / "metrics" / "mercury" / f"{run_id}_computational.json"),
         mercury_latent_graph_npz=mercury_dir / f"{run_id}_latent_graph.npz",
         mercury_internal_graph_png=run_root / "plots" / "mercury_internal_graph.png",
+        mercury_bmu_attribution_step_png=run_root / "plots" / "mercury_bmu_attribution_vs_training_step.png",
+        mercury_bmu_attribution_edge_f1_png=run_root / "plots" / "mercury_bmu_attribution_vs_edge_f1.png",
+        mercury_bmu_attribution_node_ratio_png=run_root / "plots" / "mercury_bmu_attribution_vs_node_ratio.png",
         pocml_states_parquet=pocml_dir / f"{run_id}_states.parquet",
         pocml_paper_precision_json=(run_root / "metrics" / "pocml" / f"{run_id}_paper_precision.json"),
         pocml_computational_json=(run_root / "metrics" / "pocml" / f"{run_id}_computational.json"),
@@ -136,10 +140,14 @@ def collect_run_artifacts(
         "run_status_json": path_if_exists(layout.run_status_json),
         "comparison_summary_json": path_if_exists(layout.comparison_summary_json),
         "mercury_states_parquet": path_if_exists(layout.mercury_states_parquet),
+        "mercury_attribution_parquet": path_if_exists(layout.mercury_attribution_parquet),
         "mercury_paper_precision_json": path_if_exists(layout.mercury_paper_precision_json),
         "mercury_computational_json": path_if_exists(layout.mercury_computational_json),
         "mercury_latent_graph_npz": path_if_exists(layout.mercury_latent_graph_npz),
         "mercury_internal_graph_png": path_if_exists(layout.mercury_internal_graph_png),
+        "mercury_bmu_attribution_step_png": path_if_exists(layout.mercury_bmu_attribution_step_png),
+        "mercury_bmu_attribution_edge_f1_png": path_if_exists(layout.mercury_bmu_attribution_edge_f1_png),
+        "mercury_bmu_attribution_node_ratio_png": path_if_exists(layout.mercury_bmu_attribution_node_ratio_png),
         "internal_graphs_comparison_png": path_if_exists(layout.internal_graphs_comparison_png),
     }
     if include_baseline_artifacts and baseline_enabled(run_payload, "pocml"):

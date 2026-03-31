@@ -7,6 +7,7 @@ Purpose: post-run metrics computation and offline analysis.
 - `hyperparameter_optimisation.py`: feature/model analysis over study summaries.
 - `run_health_report.py`: scan study outputs and summarize run completion/status health.
 - `plot_method_graphs.py`: regenerate unified internal graph plots for enabled methods and a combined comparison figure for a run.
+- `plot_study_histories.py`: aggregate Mercury paper-precision histories across seeds and write per-level training-step plots.
 
 ## Example usage
 ```bash
@@ -14,6 +15,7 @@ uv run python scripts/analysis/compute_precision.py --level 16 --sensor "cardina
 uv run python scripts/analysis/hyperparameter_optimisation.py
 uv run python scripts/analysis/run_health_report.py --study-root results/current/studies
 uv run python scripts/analysis/plot_method_graphs.py --run_root results/current/studies/pocml_test/<run_id>
+uv run python scripts/analysis/plot_study_histories.py --study-root results/current/studies/levels_13_21_22_weight_study
 ```
 
 Notes:

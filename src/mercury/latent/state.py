@@ -35,10 +35,39 @@ class LatentState:
     step_idx: int = 0
     preds: List = field(default_factory=list)
     prev_activations : np.ndarray | None = None
+    last_bmu_attribution: Any | None = None
 
     @property
     def mem_adj(self) -> Array:
         return self.g.node_features["mem_adj"]
+
+
+@dataclass(frozen=True)
+class LatentBMUAttribution:
+    winning_latent_unit: int
+    admissible_node_count: int
+    selected_memory_drive_raw: float
+    selected_undirected_drive_raw: float
+    selected_baseline_drive_raw: float
+    selected_action_drive_raw: float
+    selected_memory_drive_weighted: float
+    selected_undirected_drive_weighted: float
+    selected_baseline_drive_weighted: float
+    selected_action_drive_weighted: float
+    selected_memory_drive_share: float
+    selected_undirected_drive_share: float
+    selected_baseline_drive_share: float
+    selected_action_drive_share: float
+    selected_trace_penalty: float
+    selected_total_support_pre_trace: float
+    selected_total_support_post_trace: float
+
+
+@dataclass(frozen=True)
+class _LatentBMUComputation:
+    winning_latent_unit: int
+    updated_trace: np.ndarray
+    attribution: LatentBMUAttribution
 
 def _register_features(g: Graph, mem_len: int, n_actions: int) -> Graph:
     """
@@ -724,7 +753,7 @@ def compute_bmu(state: LatentState, ms: MemoryState, action_bmu :int, cfg : Late
 
     return bmu
 
-def compute_bmu(
+def _compute_bmu_mixture_score(
     state: LatentState,
     memory_state: MemoryState,
     action_bmu: int,
@@ -841,7 +870,7 @@ def compute_bmu(
     )
     return bmu
 
-def compute_bmu(
+def _compute_bmu_energy_attribution(
     state: LatentState,
     memory_state: MemoryState,
     action_bmu: int,
@@ -956,6 +985,8 @@ def compute_bmu(
     )
 
     memory_drive = raw_memory_drive.astype(np.float32, copy=True)
+    # memory_drive_gain = 0.1
+    # memory_drive = np.tanh(memory_drive_gain*memory_drive)
     memory_drive[~passes_temporal_prefix_gate] = 0.0
 
     # ------------------------------------------------------------------
@@ -1070,19 +1101,90 @@ def compute_bmu(
 
     winning_latent_unit = int(np.argmin(neural_energy))
 
+    selected_memory_drive_raw = float(memory_drive[winning_latent_unit])
+    selected_undirected_drive_raw = float(undirected_recurrent_drive[winning_latent_unit])
+    selected_baseline_drive_raw = float(baseline_transition_drive[winning_latent_unit])
+    selected_action_drive_raw = float(action_transition_drive[winning_latent_unit])
+
+    selected_memory_drive_weighted = float(weight_memory * selected_memory_drive_raw)
+    selected_undirected_drive_weighted = float(weight_undirected * selected_undirected_drive_raw)
+    selected_baseline_drive_weighted = float(weight_base * selected_baseline_drive_raw)
+    selected_action_drive_weighted = float(weight_action * selected_action_drive_raw)
+
+    selected_total_support_pre_trace = (
+        selected_memory_drive_weighted
+        + selected_undirected_drive_weighted
+        + selected_baseline_drive_weighted
+        + selected_action_drive_weighted
+    )
+    selected_trace_penalty = float(cfg.lambda_trace * previous_latent_trace[winning_latent_unit])
+    selected_total_support_post_trace = selected_total_support_pre_trace - selected_trace_penalty
+
+    if selected_total_support_pre_trace > 0.0:
+        selected_memory_drive_share = selected_memory_drive_weighted / selected_total_support_pre_trace
+        selected_undirected_drive_share = selected_undirected_drive_weighted / selected_total_support_pre_trace
+        selected_baseline_drive_share = selected_baseline_drive_weighted / selected_total_support_pre_trace
+        selected_action_drive_share = selected_action_drive_weighted / selected_total_support_pre_trace
+    else:
+        selected_memory_drive_share = 0.0
+        selected_undirected_drive_share = 0.0
+        selected_baseline_drive_share = 0.0
+        selected_action_drive_share = 0.0
+
     # ------------------------------------------------------------------
     # 8. Trace persistence dynamics.
     # ------------------------------------------------------------------
     bounded_memory_drive = np.tanh(memory_drive)
-
-    state.prev_activations = _update_exponential_trace(
+    # bounded_memory_drive = memory_drive
+    updated_trace = _update_exponential_trace(
         prev_trace=previous_latent_trace,
         current_signal=bounded_memory_drive.astype(np.float32, copy=False),
         trace_decay=trace_decay,
         clip_min=0.0,
     )
 
-    return winning_latent_unit
+    return _LatentBMUComputation(
+        winning_latent_unit=winning_latent_unit,
+        updated_trace=updated_trace,
+        attribution=LatentBMUAttribution(
+            winning_latent_unit=winning_latent_unit,
+            admissible_node_count=int(np.count_nonzero(admissibility_gate)),
+            selected_memory_drive_raw=selected_memory_drive_raw,
+            selected_undirected_drive_raw=selected_undirected_drive_raw,
+            selected_baseline_drive_raw=selected_baseline_drive_raw,
+            selected_action_drive_raw=selected_action_drive_raw,
+            selected_memory_drive_weighted=selected_memory_drive_weighted,
+            selected_undirected_drive_weighted=selected_undirected_drive_weighted,
+            selected_baseline_drive_weighted=selected_baseline_drive_weighted,
+            selected_action_drive_weighted=selected_action_drive_weighted,
+            selected_memory_drive_share=float(selected_memory_drive_share),
+            selected_undirected_drive_share=float(selected_undirected_drive_share),
+            selected_baseline_drive_share=float(selected_baseline_drive_share),
+            selected_action_drive_share=float(selected_action_drive_share),
+            selected_trace_penalty=selected_trace_penalty,
+            selected_total_support_pre_trace=float(selected_total_support_pre_trace),
+            selected_total_support_post_trace=float(selected_total_support_post_trace),
+        ),
+    )
+
+
+def compute_bmu(
+    state: LatentState,
+    memory_state: MemoryState,
+    action_bmu: int,
+    cfg: LatentParams,
+    timestep_for_gating: int = 0,
+) -> int:
+    computation = _compute_bmu_energy_attribution(
+        state=state,
+        memory_state=memory_state,
+        action_bmu=action_bmu,
+        cfg=cfg,
+        timestep_for_gating=timestep_for_gating,
+    )
+    state.prev_activations = computation.updated_trace
+    state.last_bmu_attribution = computation.attribution
+    return computation.winning_latent_unit
 
 
 

@@ -165,6 +165,48 @@ def run_ground_truth_cartesian(
     return np.asarray(bmus, dtype=np.int32)
 
 
+def _attribution_row_for_step(
+    *,
+    step: int,
+    latent_bmu: int,
+    latent_node_count: int,
+    attribution: Any | None,
+) -> dict[str, float | int]:
+    row: dict[str, float | int] = {
+        "step": int(step),
+        "latent_bmu": int(latent_bmu),
+        "latent_node_count": int(latent_node_count),
+    }
+    default_fields = {
+        "admissible_node_count": 0,
+        "selected_memory_drive_raw": 0.0,
+        "selected_undirected_drive_raw": 0.0,
+        "selected_baseline_drive_raw": 0.0,
+        "selected_action_drive_raw": 0.0,
+        "selected_memory_drive_weighted": 0.0,
+        "selected_undirected_drive_weighted": 0.0,
+        "selected_baseline_drive_weighted": 0.0,
+        "selected_action_drive_weighted": 0.0,
+        "selected_memory_drive_share": 0.0,
+        "selected_undirected_drive_share": 0.0,
+        "selected_baseline_drive_share": 0.0,
+        "selected_action_drive_share": 0.0,
+        "selected_trace_penalty": 0.0,
+        "selected_total_support_pre_trace": 0.0,
+        "selected_total_support_post_trace": 0.0,
+    }
+    if attribution is None:
+        row.update(default_fields)
+        return row
+
+    row["admissible_node_count"] = int(getattr(attribution, "admissible_node_count", 0))
+    for field_name, default_value in default_fields.items():
+        if field_name == "admissible_node_count":
+            continue
+        row[field_name] = float(getattr(attribution, field_name, default_value))
+    return row
+
+
 def run_latent(
     dataset_latent: LoadedDataset,
     sensory_params: SensoryParams,
@@ -178,7 +220,7 @@ def run_latent(
     show_progress: bool = False,
     progress_desc: Optional[str] = None,
     progress_callback: Any = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Graph]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Graph, list[dict[str, float | int]]]:
     sensory_dataset = dataset_sensory or dataset_latent
     sensory_observations = sensory_dataset.observations
     sensory_actions = sensory_dataset.actions
@@ -237,6 +279,7 @@ def run_latent(
     frozen_sensory_bmus: list[int] = []
     latent_bmus: list[int] = []
     latent_node_counts: list[int] = []
+    attribution_rows: list[dict[str, float | int]] = []
 
     latent_iterator = iter_sequence(latent_observations, latent_actions, latent_collisions)
     if show_progress:
@@ -294,6 +337,14 @@ def run_latent(
             current_latent_bmu = 0
         latent_bmus.append(int(current_latent_bmu))
         latent_node_counts.append(int(latent_state.g.n))
+        attribution_rows.append(
+            _attribution_row_for_step(
+                step=len(latent_bmus),
+                latent_bmu=int(current_latent_bmu),
+                latent_node_count=int(latent_state.g.n),
+                attribution=getattr(latent_state, "last_bmu_attribution", None),
+            )
+        )
         previous_latent_bmu = latent_state.prev_bmu
         if show_progress and hasattr(latent_iterator, "set_postfix"):
             latent_iterator.set_postfix(nodes=int(latent_state.g.n))
@@ -320,6 +371,7 @@ def run_latent(
         np.asarray(latent_bmus, dtype=np.int32),
         np.asarray(latent_node_counts, dtype=np.int32),
         latent_state.g,
+        attribution_rows,
     )
 
 
@@ -422,7 +474,7 @@ def run_all_bundled(
             else None
         ),
     )
-    sensory_bmu, latent_bmu, latent_node_count, latent_graph = run_latent(
+    sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows = run_latent(
         dataset_latent,
         config.sensory_params,
         config.latent_params,
@@ -479,6 +531,17 @@ def run_all_bundled(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     latent_graph.to_npz(str(output_dir / f"{config.run_id}_latent_graph.npz"))
+    write_bundle_parquet(
+        output_dir=output_dir,
+        run_id=config.run_id,
+        bundle_name="attribution",
+        columns={
+            key: np.asarray([row[key] for row in attribution_rows])
+            for key in attribution_rows[0].keys()
+        } if attribution_rows else {"step": np.asarray([], dtype=np.int32)},
+        meta=meta,
+        embed_metadata_in_parquet=config.embed_metadata_in_parquet,
+    )
 
     return write_bundle_parquet(
         output_dir=output_dir,

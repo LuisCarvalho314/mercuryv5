@@ -12,6 +12,7 @@ from mercury_runs.application.study_service import (
     build_study_run_records,
     resolve_run_configurations,
     write_incomplete_report,
+    _write_study_artifacts,
     _render_study_dashboard,
 )
 from mercury_runs.domain.models import StudyDefaults
@@ -207,3 +208,49 @@ def test_write_incomplete_report_ignores_stale_runs_outside_manifest(tmp_path, m
     report_path = write_incomplete_report(study_directory, manifest_path)
 
     assert report_path.exists() is False
+
+
+def test_write_study_artifacts_generates_summary_and_plots(tmp_path, monkeypatch, capsys) -> None:
+    summary_path = tmp_path / "studies" / "demo" / "study_summary.parquet"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("summary", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _fake_write_study_summary(*, study_root: Path, study_name: str) -> Path:
+        captured["summary_args"] = (study_root, study_name)
+        return summary_path
+
+    def _fake_generate_study_history_plots(*, study_root: Path) -> dict[str, Path]:
+        captured["plot_study_root"] = study_root
+        return {"level=13|metric=precision|view=all": study_root / "plots" / "study_history" / "level_13" / "precision" / "all_vary" / "plot.png"}
+
+    monkeypatch.setattr("mercury_runs.application.study_service.write_study_summary", _fake_write_study_summary)
+    monkeypatch.setattr("mercury_runs.application.study_service.generate_study_history_plots", _fake_generate_study_history_plots)
+
+    output = _write_study_artifacts(study_root=tmp_path / "studies", study_name="demo")
+
+    assert output == summary_path
+    assert captured["summary_args"] == (tmp_path / "studies", "demo")
+    assert captured["plot_study_root"] == tmp_path / "studies" / "demo"
+    assert "Wrote study history plots" in capsys.readouterr().out
+
+
+def test_write_study_artifacts_keeps_summary_when_plots_fail(tmp_path, monkeypatch, capsys) -> None:
+    summary_path = tmp_path / "studies" / "demo" / "study_summary.parquet"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("summary", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "mercury_runs.application.study_service.write_study_summary",
+        lambda *, study_root, study_name: summary_path,
+    )
+
+    def _raise(*, study_root: Path) -> dict[str, Path]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("mercury_runs.application.study_service.generate_study_history_plots", _raise)
+
+    output = _write_study_artifacts(study_root=tmp_path / "studies", study_name="demo")
+
+    assert output == summary_path
+    assert "Study history plot generation failed: boom" in capsys.readouterr().out

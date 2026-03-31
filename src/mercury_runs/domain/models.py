@@ -14,10 +14,14 @@ class ArtifactLayout(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mercury_states_parquet: Path
+    mercury_attribution_parquet: Path
     mercury_paper_precision_json: Path
     mercury_computational_json: Path
     mercury_latent_graph_npz: Path
     mercury_internal_graph_png: Path
+    mercury_bmu_attribution_step_png: Path
+    mercury_bmu_attribution_edge_f1_png: Path
+    mercury_bmu_attribution_node_ratio_png: Path
     pocml_states_parquet: Path
     pocml_paper_precision_json: Path
     pocml_computational_json: Path
