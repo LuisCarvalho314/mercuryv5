@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import time
 from matplotlib import colors
 
-from src.utils.setup_logging import setup_logging
+from utils.setup_logging import setup_logging
 
 logger = logging.getLogger(__name__)
 class MazeEnvironmentVisualization:

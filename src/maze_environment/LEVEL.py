@@ -1,5 +1,3 @@
-levels = [""]
-
 level_0 = []
 level_1 = [
     "XXXXXXXXXXX",
@@ -213,27 +211,28 @@ level_22 = [
 #     min_row=1, max_row=17, min_col=1, max_col=17, values_only=True
 # ):
 #     level_10.append(value)
-levels.append(level_0)
-levels.append(level_1)
-levels.append(level_2)
-levels.append(level_3)
-levels.append(level_4)
-levels.append(level_5)
-levels.append(level_6)
-levels.append(level_7)
-levels.append(level_8)
-levels.append(level_9)
-levels.append(level_10)
-levels.append(level_11)
-levels.append(level_12)
-levels.append(level_13)
-levels.append(level_14)
-levels.append(level_15)
-levels.append(level_16)
-levels.append(level_17)
-levels.append(level_18)
-levels.append(level_19)
-levels.append(level_20)
-levels.append(level_21)
-levels.append(level_22)
-
+levels = [
+    level_0,
+    level_1,
+    level_2,
+    level_3,
+    level_4,
+    level_5,
+    level_6,
+    level_7,
+    level_8,
+    level_9,
+    level_10,
+    level_11,
+    level_12,
+    level_13,
+    level_14,
+    level_15,
+    level_16,
+    level_17,
+    level_18,
+    level_19,
+    level_20,
+    level_21,
+    level_22,
+]

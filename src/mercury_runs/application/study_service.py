@@ -422,10 +422,20 @@ def _format_progress_row(*, record: Dict[str, Any], track_name: str, progress: D
         filled = int(width * ratio)
         bar = "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
         percent = f"{int(ratio * 100):3d}%"
-    nodes = f" nodes={extra.get('nodes')}" if isinstance(extra, dict) and extra.get("nodes") is not None else ""
+    node_suffix = ""
+    if isinstance(extra, dict):
+        sensory_nodes = extra.get("sensory_nodes")
+        latent_nodes = extra.get("latent_nodes")
+        nodes = extra.get("nodes")
+        if sensory_nodes is not None:
+            node_suffix += f" sensory_nodes={sensory_nodes}"
+        if latent_nodes is not None:
+            node_suffix += f" latent_nodes={latent_nodes}"
+        elif nodes is not None:
+            node_suffix += f" nodes={nodes}"
     method = str(record["config"].get("method", "mercury"))
     identity = f"{record['run_id']} {method:<7}" if show_identity else " " * (len(record["run_id"]) + 8)
-    return f"{identity} {track_name:<15} {stage:<20} {bar:<14} {percent:<4} {message}{nodes}".rstrip()
+    return f"{identity} {track_name:<15} {stage:<20} {bar:<14} {percent:<4} {message}{node_suffix}".rstrip()
 
 
 def _is_terminal_stage(stage: str | None) -> bool:

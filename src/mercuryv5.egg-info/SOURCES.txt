@@ -63,8 +63,12 @@ src/mercury_runs/application/study_service.py
 src/mercury_runs/domain/__init__.py
 src/mercury_runs/domain/models.py
 src/mercury_runs/infrastructure/__init__.py
+src/mercury_runs/infrastructure/computational.py
+src/mercury_runs/infrastructure/paper_precision.py
+src/mercury_runs/infrastructure/progress.py
 src/mercury_runs/infrastructure/reporting.py
 src/mercury_runs/infrastructure/runtime.py
+src/mercury_runs/infrastructure/state_columns.py
 src/mercury_runs/infrastructure/storage.py
 src/mercury_runs/infrastructure/wandb_logger.py
 src/mercury_runs/interfaces/__init__.py

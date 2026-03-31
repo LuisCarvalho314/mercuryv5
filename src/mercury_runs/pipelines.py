@@ -266,6 +266,7 @@ def run_latent(
                 current=int(sensory_index),
                 total=sensory_total,
                 message="Latent sensory pass",
+                extra={"sensory_nodes": int(sensory_state.gs.n)},
             )
 
     mem = init_mem(sensory_state.gs.n, memory_length)
@@ -356,7 +357,10 @@ def run_latent(
                 current=int(latent_index),
                 total=latent_total,
                 message="Latent pass",
-                extra={"nodes": int(latent_state.g.n)},
+                extra={
+                    "latent_nodes": int(latent_state.g.n),
+                    "sensory_nodes": int(sensory_state.gs.n),
+                },
             )
         if step_callback is not None:
             step_callback(

@@ -18,6 +18,43 @@ from pathlib import Path
 from typing import Optional
 
 
+def _expected_observations_for_level(level: int, agent_sensors: dict) -> set[tuple[int, ...]]:
+    env = MazeEnvironment(
+        level=levels[level],
+        plotting=False,
+        agent_sensors=agent_sensors,
+        seed=0,
+    )
+    expected: set[tuple[int, ...]] = set()
+    for row_index in range(env.maze.shape[0]):
+        for col_index in range(env.maze.shape[1]):
+            if int(env.maze[row_index, col_index]) != 0:
+                continue
+            env.agent_position = (row_index, col_index)
+            env.agent.position = (row_index, col_index)
+            observation = tuple(int(value) for value in np.asarray(env.agent.make_observation(env.maze)).reshape(-1))
+            expected.add(observation)
+    return expected
+
+
+def _cached_dataset_matches_level_geometry(parquet_path: Path, *, level: int, agent_sensors: dict) -> bool:
+    try:
+        frame = pl.read_parquet(parquet_path)
+    except Exception:
+        return False
+
+    observation_columns = [name for name in frame.columns if name.startswith("observation_")]
+    if not observation_columns:
+        return False
+
+    observed = {
+        tuple(int(value) for value in row)
+        for row in frame.select(observation_columns).unique().iter_rows()
+    }
+    expected = _expected_observations_for_level(level, agent_sensors)
+    return observed.issubset(expected)
+
+
 def _find_existing_dataset_run_id(
     output_dir: Path,
     *,
@@ -63,7 +100,12 @@ def _find_existing_dataset_run_id(
             if existing_run_id:
                 parquet_path = output_dir / f"{existing_run_id}.parquet"
                 if parquet_path.exists():
-                    return existing_run_id
+                    if _cached_dataset_matches_level_geometry(
+                        parquet_path,
+                        level=level,
+                        agent_sensors=agent_sensors,
+                    ):
+                        return existing_run_id
 
     return None
 

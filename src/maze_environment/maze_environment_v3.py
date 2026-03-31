@@ -5,9 +5,9 @@ from typing import Any, Optional
 import gymnasium as gym
 import numpy as np
 
-from src.maze_environment.agent import Agent
-from src.maze_environment.plots import MazeEnvironmentVisualization
-from src.utils.setup_logging import setup_logging
+from .agent import Agent
+from .plots import MazeEnvironmentVisualization
+from utils.setup_logging import setup_logging
 
 
 class MazeEnvironment(gym.Env):
