@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..analysis.study_history_plots import generate_study_history_plots
 from ..domain.models import HierarchicalStudyConfig, StudyDefaults, StudyGridConfig
 from ..infrastructure import (
     append_jsonl,
@@ -508,6 +509,19 @@ def _print_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int,
         print(dashboard, flush=True)
 
 
+def _write_study_artifacts(*, study_root: Path, study_name: str) -> Path:
+    summary_path = write_study_summary(study_root=study_root, study_name=study_name)
+    study_directory = study_root / study_name
+    try:
+        outputs = generate_study_history_plots(study_root=study_directory)
+    except Exception as exc:
+        print(f"Study history plot generation failed: {exc}")
+    else:
+        if outputs:
+            print(f"Wrote study history plots: {study_directory / 'plots' / 'study_history'}")
+    return summary_path
+
+
 def run_study(args: argparse.Namespace) -> None:
     defaults = StudyDefaults(study_root=args.study_root, study_name=args.study_name)
     study_root = Path(defaults.study_root)
@@ -584,7 +598,7 @@ def run_study(args: argparse.Namespace) -> None:
                 append_jsonl(errors_path, {"run_index": record["run_index"], "run_id": record["run_id"], "command": record["command"], "config": record["config"], "error": repr(exc)})
                 if not args.continue_on_error:
                     raise
-    summary_path = write_study_summary(study_root=study_root, study_name=defaults.study_name)
+    summary_path = _write_study_artifacts(study_root=study_root, study_name=defaults.study_name)
     print(f"Wrote: {summary_path}")
     incomplete_report = write_incomplete_report(study_directory, manifest_path)
     if incomplete_report.exists():
