@@ -30,9 +30,9 @@ from ..infrastructure.progress import load_progress, load_progress_tracks
 WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
     "baseline": {
         "weight_memory": 0.4,
-        "weight_undirected": 0.2,
-        "weight_base": 0.2,
-        "weight_action": 0.2,
+        "weight_undirected": 0.05,
+        "weight_base": 0.15,
+        "weight_action": 0.35,
     },
     "no_memory": {
         "weight_memory": 0.0,
@@ -43,12 +43,12 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
     "no_undirected": {
         "weight_memory": 0.5,
         "weight_undirected": 0.0,
-        "weight_base": 0.25,
-        "weight_action": 0.25,
+        "weight_base": 0.15,
+        "weight_action": 0.35,
     },
     "no_base": {
         "weight_memory": 0.5,
-        "weight_undirected": 0.25,
+        "weight_undirected": 0.0,
         "weight_base": 0.0,
         "weight_action": 0.25,
     },
@@ -60,9 +60,9 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
     },
     "memory_dominant": {
         "weight_memory": 0.7,
-        "weight_undirected": 0.1,
+        "weight_undirected": 0.05,
         "weight_base": 0.1,
-        "weight_action": 0.1,
+        "weight_action": 0.15,
     },
     "undirected_dominant": {
         "weight_memory": 0.1,

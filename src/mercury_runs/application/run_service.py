@@ -10,7 +10,7 @@ from ..algorithms.cscg import CSCGConfig, run_cscg
 from ..algorithms.mercury import MercuryConfig, run_mercury
 from ..algorithms.mercury.api import summarize_mercury_run
 from ..algorithms.pocml import POCMLConfig, run_pocml
-from ..analysis import generate_method_graph_plots
+from ..analysis import generate_bmu_attribution_plots, generate_method_graph_plots
 from ..domain.models import ArtifactLayout, RunStatusModel
 from ..infrastructure import (
     args_from_config,
@@ -259,6 +259,7 @@ def _run_mercury_stage(
     run_status.subsystems["mercury"].status = "completed"
     run_status.subsystems["mercury"].artifacts = {
         "states_parquet": str(layout.mercury_states_parquet),
+        "attribution_parquet": str(layout.mercury_attribution_parquet),
         "paper_precision_json": str(layout.mercury_paper_precision_json),
         "latent_graph_npz": str(layout.mercury_latent_graph_npz),
     }
@@ -529,6 +530,7 @@ def _generate_plot_artifacts(*, args: argparse.Namespace, run_root: Path, layout
         datasets_root=Path(args.datasets_root),
         artifacts={key: value for key, value in artifacts.items() if isinstance(value, str) and value},
     )
+    generate_bmu_attribution_plots(layout=layout)
 
 
 def execute_pipeline_run(

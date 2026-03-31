@@ -50,11 +50,34 @@ def test_run_all_bundled_accepts_mercury_valid_trajectory_flag(monkeypatch, tmp_
             np.asarray([0, 1], dtype=np.int32),
             np.asarray([1, 2], dtype=np.int32),
             _FakeGraph(),
+            [
+                {
+                    "step": 1,
+                    "latent_bmu": 0,
+                    "latent_node_count": 1,
+                    "admissible_node_count": 1,
+                    "selected_memory_drive_raw": 1.0,
+                    "selected_undirected_drive_raw": 0.0,
+                    "selected_baseline_drive_raw": 0.0,
+                    "selected_action_drive_raw": 0.0,
+                    "selected_memory_drive_weighted": 1.0,
+                    "selected_undirected_drive_weighted": 0.0,
+                    "selected_baseline_drive_weighted": 0.0,
+                    "selected_action_drive_weighted": 0.0,
+                    "selected_memory_drive_share": 1.0,
+                    "selected_undirected_drive_share": 0.0,
+                    "selected_baseline_drive_share": 0.0,
+                    "selected_action_drive_share": 0.0,
+                    "selected_trace_penalty": 0.0,
+                    "selected_total_support_pre_trace": 1.0,
+                    "selected_total_support_post_trace": 1.0,
+                }
+            ],
         )
 
     def _fake_write_bundle_parquet(**kwargs):
-        captured["bundle_columns"] = kwargs["columns"]
-        return tmp_path / "states.parquet"
+        captured.setdefault("bundle_writes", {})[kwargs["bundle_name"]] = kwargs["columns"]
+        return tmp_path / f"{kwargs['bundle_name']}.parquet"
 
     monkeypatch.setattr("mercury_runs.pipelines.load_level_parquet", _fake_load_level_parquet)
     monkeypatch.setattr("mercury_runs.pipelines.filter_mercury_dataset", _fake_filter)
@@ -80,11 +103,32 @@ def test_run_all_bundled_accepts_mercury_valid_trajectory_flag(monkeypatch, tmp_
     assert result == tmp_path / "states.parquet"
     assert captured["filters"] == 2
     assert captured["valid_trajectories_only"] is True
-    assert list(captured["bundle_columns"]) == [
+    assert list(captured["bundle_writes"]["states"]) == [
         "cartesian_proxy_bmu",
         "sensory_bmu",
         "latent_bmu",
         "latent_node_count",
+    ]
+    assert list(captured["bundle_writes"]["attribution"]) == [
+        "step",
+        "latent_bmu",
+        "latent_node_count",
+        "admissible_node_count",
+        "selected_memory_drive_raw",
+        "selected_undirected_drive_raw",
+        "selected_baseline_drive_raw",
+        "selected_action_drive_raw",
+        "selected_memory_drive_weighted",
+        "selected_undirected_drive_weighted",
+        "selected_baseline_drive_weighted",
+        "selected_action_drive_weighted",
+        "selected_memory_drive_share",
+        "selected_undirected_drive_share",
+        "selected_baseline_drive_share",
+        "selected_action_drive_share",
+        "selected_trace_penalty",
+        "selected_total_support_pre_trace",
+        "selected_total_support_post_trace",
     ]
 
 
@@ -126,11 +170,36 @@ def test_run_all_bundled_can_split_raw_sensory_from_valid_latent(monkeypatch, tm
             np.asarray([300, 300, 302], dtype=np.int32),
             np.asarray([1, 1, 2], dtype=np.int32),
             _FakeGraph(),
+            [
+                {
+                    "step": 1,
+                    "latent_bmu": 300,
+                    "latent_node_count": 1,
+                    "admissible_node_count": 1,
+                    "selected_memory_drive_raw": 1.0,
+                    "selected_undirected_drive_raw": 0.0,
+                    "selected_baseline_drive_raw": 0.0,
+                    "selected_action_drive_raw": 0.0,
+                    "selected_memory_drive_weighted": 1.0,
+                    "selected_undirected_drive_weighted": 0.0,
+                    "selected_baseline_drive_weighted": 0.0,
+                    "selected_action_drive_weighted": 0.0,
+                    "selected_memory_drive_share": 1.0,
+                    "selected_undirected_drive_share": 0.0,
+                    "selected_baseline_drive_share": 0.0,
+                    "selected_action_drive_share": 0.0,
+                    "selected_trace_penalty": 0.0,
+                    "selected_total_support_pre_trace": 1.0,
+                    "selected_total_support_post_trace": 1.0,
+                }
+            ],
         )
 
     def _fake_write_bundle_parquet(**kwargs):
-        captured["bundle_rows"] = {key: value.tolist() for key, value in kwargs["columns"].items()}
-        return tmp_path / "states.parquet"
+        captured.setdefault("bundle_rows", {})[kwargs["bundle_name"]] = {
+            key: value.tolist() for key, value in kwargs["columns"].items()
+        }
+        return tmp_path / f"{kwargs['bundle_name']}.parquet"
 
     monkeypatch.setattr("mercury_runs.pipelines.load_level_parquet", _fake_load_level_parquet)
     monkeypatch.setattr("mercury_runs.pipelines.filter_mercury_dataset", _fake_filter)
@@ -158,12 +227,13 @@ def test_run_all_bundled_can_split_raw_sensory_from_valid_latent(monkeypatch, tm
     assert captured["sensory_rows"] == 3
     assert captured["latent_rows"] == 3
     assert captured["latent_valid_only"] is True
-    assert captured["bundle_rows"] == {
+    assert captured["bundle_rows"]["states"] == {
         "cartesian_proxy_bmu": [100, 101, 102],
         "sensory_bmu": [200, 201, 202],
         "latent_bmu": [300, 300, 302],
         "latent_node_count": [1, 1, 2],
     }
+    assert captured["bundle_rows"]["attribution"]["latent_bmu"] == [300]
 
 
 def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
@@ -200,6 +270,7 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
         def __init__(self) -> None:
             self.g = type("LG", (), {"n": 2})()
             self.prev_bmu = 0
+            self.last_bmu_attribution = None
 
     training_iter = iter([2, 0, 2])
     frozen_iter = iter([0, 1, 0])
@@ -216,6 +287,28 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
 
     def _fake_latent_step(mem, memory_vectors, latent_state, action_bmu, latent_params, action_map, action_memory, state_memory):
         latent_state.prev_bmu = latent_counter["value"]
+        latent_state.last_bmu_attribution = type(
+            "Attr",
+            (),
+            {
+                "admissible_node_count": 2,
+                "selected_memory_drive_raw": 1.0,
+                "selected_undirected_drive_raw": 0.1,
+                "selected_baseline_drive_raw": 0.2,
+                "selected_action_drive_raw": 0.3,
+                "selected_memory_drive_weighted": 1.0,
+                "selected_undirected_drive_weighted": 0.1,
+                "selected_baseline_drive_weighted": 0.2,
+                "selected_action_drive_weighted": 0.3,
+                "selected_memory_drive_share": 0.625,
+                "selected_undirected_drive_share": 0.0625,
+                "selected_baseline_drive_share": 0.125,
+                "selected_action_drive_share": 0.1875,
+                "selected_trace_penalty": 0.0,
+                "selected_total_support_pre_trace": 1.6,
+                "selected_total_support_post_trace": 1.6,
+            },
+        )()
         latent_counter["value"] += 1
         return latent_state, 0, state_memory
 
@@ -238,7 +331,7 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
         parquet_path=Path("dummy.parquet"),
     )
 
-    sensory_bmu, latent_bmu, latent_node_count, latent_graph = run_latent(
+    sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows = run_latent(
         dataset,
         sensory_params=object(),
         latent_params=object(),
@@ -250,6 +343,8 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
     assert sensory_bmu.tolist() == [0, 1, 0]
     assert latent_bmu.tolist() == [0, 1, 2]
     assert latent_node_count.tolist() == [2, 2, 2]
+    assert len(attribution_rows) == 3
+    assert attribution_rows[0]["selected_memory_drive_weighted"] == 1.0
     assert action_map.step_calls == 3
     assert action_map.predict_calls == 3
 
