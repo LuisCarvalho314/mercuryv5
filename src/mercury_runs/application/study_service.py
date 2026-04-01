@@ -82,6 +82,12 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
         "weight_base": 0.1,
         "weight_action": 0.7,
     },
+    "only_memory": {
+        "weight_memory": 1,
+        "weight_undirected": 0,
+        "weight_base": 0,
+        "weight_action": 0,
+    },
 }
 
 
