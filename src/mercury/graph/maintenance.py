@@ -82,12 +82,13 @@ def age_maintenance(
 
 def update_ages(u: int, v: int, g: Graph) -> None:
     """
-    Increment ages on row `u` except column `v`.
+    Increment ages on row `u` except column `v`, then reset `(u, v)`.
 
     Operation
     ---------
     For each `j` with `g.adj[u, j] != 0` and `j != v`, perform
     `g.edge_features['age'][u, j, :] += 1`.
+    If the current edge `(u, v)` exists, set `g.edge_features['age'][u, v, :] = 0`.
 
     Parameters
     ----------
@@ -114,11 +115,16 @@ def update_ages(u: int, v: int, g: Graph) -> None:
     age = g.edge_features["age"]        # (n, n, E)
     n = g.n
     mask_row = (g.adj[u] != 0)          # (n,)
+    current_edge_exists = bool(mask_row[v])
     if 0 <= v < n:
         mask_row[v] = False
     if not np.any(mask_row):
+        if current_edge_exists:
+            age[u, v, :] = 0
         return
     age[u, mask_row, :] = age[u, mask_row, :] + 1  # broadcast over E
+    if current_edge_exists:
+        age[u, v, :] = 0
 
 
 def prune_old_edges(g: Graph, p: HasMaxAge) -> None:

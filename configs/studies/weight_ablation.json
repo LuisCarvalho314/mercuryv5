@@ -1,9 +1,9 @@
 {
   "environment": {
     "level": [
-      19, 20, 21
+      13
     ],
-    "num_steps": [60000],
+    "num_steps": [20000],
     "sensor": [
       "cardinal distance"
     ],
@@ -11,13 +11,13 @@
       1
     ],
     "seed": [
-      0, 1, 2
+      0
     ],
     "rand_prob": [
-      0.0, 0.1, 0.3
+      0.0, 0.3
     ],
     "mercury_valid_trajectories_only": [
-      false, true
+      false
     ],
     "pocml_valid_trajectories_only": [
       false
