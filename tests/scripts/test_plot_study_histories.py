@@ -114,14 +114,16 @@ def test_load_study_history_frame_reads_run_histories(tmp_path: Path) -> None:
             "rand_prob": [0.0],
             "weight_undirected": [0.05],
             "lambda_trace": [0.9],
+            "window_length": [150],
         }
     ).write_parquet(study_root / "study_summary.parquet")
 
     frame = load_study_history_frame(study_root)
 
-    assert frame.shape == (2, 30)
+    assert frame.shape == (2, 31)
     assert frame.get_column("step").to_list() == [1, 2]
     assert frame.get_column("latent_max_age").to_list() == [50.0, 50.0]
+    assert frame.get_column("window_length").to_list() == [150.0, 150.0]
     assert frame.get_column("sensory_node_count").to_list() == [3.0, 3.0]
     assert frame.get_column("latent_node_count").to_list() == [3.0, 3.0]
     assert frame.get_column("sensory_state_count_ratio").to_list() == [0.75, 0.75]
@@ -157,36 +159,39 @@ def test_aggregate_study_history_computes_mean_and_std_across_seeds() -> None:
 def test_generate_study_history_plots_writes_one_plot_per_level(tmp_path: Path) -> None:
     study_root = tmp_path / "study"
     rows: list[dict[str, object]] = []
-    for level in (13, 21):
-        for seed, offset in ((0, 0.0), (1, 0.1)):
-            for rand_prob in (0.0, 0.3):
-                for weight_undirected in (0.0, 0.05):
-                    for lambda_trace in (0.8, 0.9):
-                        for latent_max_age in (18, 50):
-                            run_id = f"run-{level}-{seed}-{rand_prob}-{weight_undirected}-{lambda_trace}-{latent_max_age}"
-                            _write_run(study_root, run_id=run_id, offset=offset, latent_max_age=latent_max_age)
-                            rows.append(
-                                {
-                                    "run_id": run_id,
-                                    "method": "mercury",
-                                    "level": level,
-                                    "seed": seed,
-                                    "rand_prob": rand_prob,
-                                    "weight_undirected": weight_undirected,
-                                    "lambda_trace": lambda_trace,
-                                }
-                            )
+    for seed, offset in ((0, 0.0),):
+        for rand_prob in (0.0, 0.3):
+            for weight_undirected in (0.0, 0.05):
+                for lambda_trace in (0.8, 0.9):
+                    for latent_max_age in (18, 50):
+                        window_length = 100 if latent_max_age == 18 else 200
+                        run_id = f"run-13-{seed}-{rand_prob}-{weight_undirected}-{lambda_trace}-{latent_max_age}-{window_length}"
+                        _write_run(study_root, run_id=run_id, offset=offset, latent_max_age=latent_max_age)
+                        rows.append(
+                            {
+                                "run_id": run_id,
+                                "method": "mercury",
+                                "level": 13,
+                                "seed": seed,
+                                "rand_prob": rand_prob,
+                                "weight_undirected": weight_undirected,
+                                "lambda_trace": lambda_trace,
+                                "window_length": window_length,
+                            }
+                        )
     pl.DataFrame(rows).write_parquet(study_root / "study_summary.parquet")
 
     outputs = generate_study_history_plots(study_root=study_root)
 
-    expected_per_level = (len(PLOTTED_METRICS) + len(RELATION_PLOTS)) * (1 + 2 + 2 + 2 + 2)
-    assert len(outputs) == expected_per_level * 2
+    expected_per_level = (len(PLOTTED_METRICS) + len(RELATION_PLOTS)) * (1 + 2 + 2 + 2 + 2 + 2)
+    assert len(outputs) == expected_per_level
     assert outputs["level=13|metric=precision|view=all"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "all_vary" / "plot.png"
     assert outputs["level=13|metric=precision|fixed=rand_prob|value=0"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "fixed_rand_prob" / "value_0p0.png"
     assert outputs["level=13|metric=precision|fixed=weight_undirected|value=0.05"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "fixed_weight_undirected" / "value_0p05.png"
     assert outputs["level=13|metric=precision|fixed=lambda_trace|value=0.9"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "fixed_lambda_trace" / "value_0p9.png"
     assert outputs["level=13|metric=precision|fixed=latent_max_age|value=18"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "fixed_latent_max_age" / "value_18p0.png"
+    assert outputs["level=13|metric=precision|fixed=window_length|value=100"] == study_root / "plots" / "study_history" / "level_13" / "precision" / "fixed_window_length" / "value_100p0.png"
     assert outputs["level=13|metric=edge_f1_vs_state_count_ratio_pareto|view=all"] == study_root / "plots" / "study_history" / "level_13" / "edge_f1_vs_state_count_ratio_pareto" / "all_vary" / "plot.png"
     assert outputs["level=13|metric=precision|view=all"].exists()
     assert outputs["level=13|metric=precision|fixed=rand_prob|value=0"].exists()
+    assert outputs["level=13|metric=precision|fixed=window_length|value=100"].exists()

@@ -58,10 +58,16 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
         "weight_base": 0.25,
         "weight_action": 0.0,
     },
-    "memory_dominant": {
-        "weight_memory": 0.7,
-        "weight_undirected": 0.05,
-        "weight_base": 0.1,
+    "memory_dominant_action_only": {
+        "weight_memory": 0.8,
+        "weight_undirected": 0.0,
+        "weight_base": 0.0,
+        "weight_action": 0.20,
+    },
+    "memory_dominant_action_base": {
+        "weight_memory": 0.8,
+        "weight_undirected": 0.0,
+        "weight_base": 0.05,
         "weight_action": 0.15,
     },
     "undirected_dominant": {
@@ -82,14 +88,13 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
         "weight_base": 0.1,
         "weight_action": 0.7,
     },
-    "only_memory": {
-        "weight_memory": 1,
-        "weight_undirected": 0,
-        "weight_base": 0,
-        "weight_action": 0,
-    },
+	"only_memory": {
+		"weight_memory": 1.0,
+        "weight_undirected": 0.0,
+        "weight_base": 0.0,
+        "weight_action": 0.0,
 }
-
+}
 
 def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
     return {

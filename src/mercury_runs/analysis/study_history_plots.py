@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +33,117 @@ RELATION_PLOTS: tuple[tuple[str, str, str, str], ...] = (
 
 CHANNELS: tuple[str, str] = ("sensory", "latent")
 LINESTYLES: dict[str, str] = {"sensory": "-", "latent": "--"}
-BASE_HYPERPARAMETER_COLUMNS: tuple[str, ...] = ("rand_prob", "weight_undirected", "lambda_trace")
-OPTIONAL_HYPERPARAMETER_COLUMNS: tuple[str, ...] = ("latent_max_age",)
+IDENTITY_COLUMNS: frozenset[str] = frozenset({"run_id", "method", "level", "seed", "step"})
+SUMMARY_EXCLUDED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "timestamp_utc",
+        "run_status",
+        "target_n1_accuracy",
+        "target_log_likelihood_mean",
+        "sensory_n1_accuracy",
+        "latent_n1_accuracy",
+        "sensory_log_likelihood_mean",
+        "latent_log_likelihood_mean",
+    }
+)
+SUMMARY_EXCLUDED_PREFIXES: tuple[str, ...] = ("paper_", "comp_", "pocml_", "cscg_")
+RUN_CONFIG_EXCLUDED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "study",
+        "_worker_run",
+        "method",
+        "max_workers",
+        "no_parallel",
+        "resume",
+        "continue_on_error",
+        "retry_failed",
+        "retry_incomplete",
+        "wandb",
+        "wandb_project",
+        "wandb_entity",
+        "wandb_group",
+        "wandb_tags",
+        "wandb_mode",
+        "wandb_job_type",
+        "wandb_log_artifacts",
+        "wandb_run_name",
+        "study_root",
+        "study_name",
+        "study_config",
+        "run_id",
+        "requested_run_id",
+        "datasets_root",
+        "reuse_existing_run",
+        "no_reuse_existing_run",
+        "no_reuse_existing_dataset",
+    }
+)
+
+
+def _history_metric_columns() -> frozenset[str]:
+    columns = set()
+    for metric_key, _ in PLOTTED_METRICS:
+        for channel in CHANNELS:
+            columns.add(f"{channel}_{metric_key}")
+            columns.add(f"{channel}_{metric_key}_mean")
+            columns.add(f"{channel}_{metric_key}_std")
+    for channel in CHANNELS:
+        columns.add(f"{channel}_node_count")
+        columns.add(f"{channel}_node_count_mean")
+        columns.add(f"{channel}_state_count_ratio")
+        columns.add(f"{channel}_state_count_ratio_mean")
+    columns.add("seed_count")
+    return frozenset(columns)
 
 
 def _slug(value: Any) -> str:
-    return str(value).replace(".", "p").replace("-", "m")
+    return str(value).replace(".", "p").replace("-", "m").replace("/", "_").replace(" ", "_")
+
+
+def _is_numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _normalize_param_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if _is_numeric(value):
+        return float(value)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _format_param_value(value: Any) -> str:
+    if _is_numeric(value):
+        return f"{float(value):g}"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _summary_hyperparameter_columns(summary: pl.DataFrame) -> tuple[str, ...]:
+    columns: list[str] = []
+    for column in summary.columns:
+        if column in IDENTITY_COLUMNS or column in SUMMARY_EXCLUDED_COLUMNS:
+            continue
+        if any(column.startswith(prefix) for prefix in SUMMARY_EXCLUDED_PREFIXES):
+            continue
+        columns.append(column)
+    return tuple(columns)
+
+
+def _run_config_plot_params(run_config: dict[str, Any], summary_columns: set[str]) -> dict[str, Any]:
+    extras: dict[str, Any] = {}
+    for key, raw_value in run_config.items():
+        if key in summary_columns or key in IDENTITY_COLUMNS or key in RUN_CONFIG_EXCLUDED_COLUMNS:
+            continue
+        value = _normalize_param_value(raw_value)
+        if value is not None:
+            extras[key] = value
+    return extras
 
 
 def _resolve_paper_precision_path(study_root: Path, run_id: str) -> Path | None:
@@ -64,11 +170,24 @@ def _resolve_run_config(study_root: Path, run_id: str) -> dict[str, Any]:
 
 
 def _hyperparameter_columns(frame: pl.DataFrame) -> tuple[str, ...]:
-    return (*BASE_HYPERPARAMETER_COLUMNS, *(column for column in OPTIONAL_HYPERPARAMETER_COLUMNS if column in frame.columns))
+    metric_columns = _history_metric_columns()
+    return tuple(column for column in frame.columns if column not in IDENTITY_COLUMNS and column not in metric_columns)
+
+
+def _varying_hyperparameter_columns(frame: pl.DataFrame) -> tuple[str, ...]:
+    varying: list[str] = []
+    for column in _hyperparameter_columns(frame):
+        series = frame.get_column(column)
+        unique_count = series.drop_nulls().n_unique()
+        if unique_count > 1:
+            varying.append(column)
+    return tuple(varying)
 
 
 def _load_history_rows(study_root: Path, summary: pl.DataFrame) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    summary_param_columns = _summary_hyperparameter_columns(summary)
+    summary_param_column_set = set(summary_param_columns)
     for record in summary.iter_rows(named=True):
         run_config = _resolve_run_config(study_root, str(record["run_id"]))
         history_path = _resolve_paper_precision_path(study_root, str(record["run_id"]))
@@ -82,16 +201,13 @@ def _load_history_rows(study_root: Path, summary: pl.DataFrame) -> list[dict[str
                 "level": int(record["level"]),
                 "seed": int(record["seed"]),
                 "step": int(item["step"]),
-                "rand_prob": float(record["rand_prob"]),
-                "weight_undirected": float(record["weight_undirected"]),
-                "lambda_trace": float(record["lambda_trace"]),
             }
-            for column in OPTIONAL_HYPERPARAMETER_COLUMNS:
-                value = record.get(column)
-                if value is None:
-                    value = run_config.get(column)
+            for column in summary_param_columns:
+                value = _normalize_param_value(record.get(column))
                 if value is not None:
-                    flattened[column] = float(value)
+                    flattened[column] = value
+            for column, value in _run_config_plot_params(run_config, summary_param_column_set).items():
+                flattened.setdefault(column, value)
             for metric_key, _ in PLOTTED_METRICS:
                 for channel in CHANNELS:
                     name = f"{channel}_{metric_key}"
@@ -146,16 +262,10 @@ def aggregate_study_history(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def _combo_label(record: dict[str, Any], varying: tuple[str, ...]) -> str:
-    labels = {
-        "rand_prob": f"rand={float(record['rand_prob']):g}",
-        "weight_undirected": f"w_u={float(record['weight_undirected']):g}",
-        "lambda_trace": f"lambda={float(record['lambda_trace']):g}",
-        "latent_max_age": f"max_age={float(record['latent_max_age']):g}",
-    }
-    return ", ".join(labels[name] for name in varying)
+    return ", ".join(f"{name}={_format_param_value(record[name])}" for name in varying)
 
 
-def _plot_path(output_dir: Path, *, level: int, metric_key: str, fixed_param: str | None = None, fixed_value: float | None = None) -> Path:
+def _plot_path(output_dir: Path, *, level: int, metric_key: str, fixed_param: str | None = None, fixed_value: Any | None = None) -> Path:
     metric_dir = output_dir / f"level_{level}" / metric_key
     if fixed_param is None:
         return metric_dir / "all_vary" / "plot.png"
@@ -168,19 +278,19 @@ def _filtered_level_frame(
     *,
     level: int,
     fixed_param: str | None = None,
-    fixed_value: float | None = None,
+    fixed_value: Any | None = None,
 ) -> tuple[pl.DataFrame, tuple[str, ...], str]:
     level_frame = aggregated.filter(pl.col("level") == int(level))
-    hyperparameter_columns = _hyperparameter_columns(level_frame)
-    title_suffix = "all hyperparameters varying"
+    title_suffix = "all inferred parameters varying"
     if fixed_param is None:
-        varying = hyperparameter_columns
-        return level_frame.sort(["step", *hyperparameter_columns]), varying, title_suffix
+        varying = _varying_hyperparameter_columns(level_frame)
+        return level_frame.sort(["step", *varying]), varying, title_suffix
     if fixed_value is None:
         raise ValueError("fixed_value is required when fixed_param is provided")
-    title_suffix = f"fixed {fixed_param}={float(fixed_value):g}"
-    varying = tuple(name for name in hyperparameter_columns if name != fixed_param)
-    filtered = level_frame.filter(pl.col(fixed_param) == float(fixed_value)).sort(["step", *hyperparameter_columns])
+    title_suffix = f"fixed {fixed_param}={_format_param_value(fixed_value)}"
+    filtered = level_frame.filter(pl.col(fixed_param) == fixed_value)
+    varying = _varying_hyperparameter_columns(filtered)
+    filtered = filtered.sort(["step", *varying])
     return filtered, varying, title_suffix
 
 
@@ -192,7 +302,7 @@ def plot_metric_history(
     metric_label: str,
     output_dir: Path,
     fixed_param: str | None = None,
-    fixed_value: float | None = None,
+    fixed_value: Any | None = None,
 ) -> Path | None:
     level_frame, varying, title_suffix = _filtered_level_frame(
         aggregated,
@@ -216,7 +326,7 @@ def plot_metric_history(
     for index, combo in enumerate(combos):
         combo_data = level_frame
         for key, value in combo.items():
-            combo_data = combo_data.filter(pl.col(key) == float(value))
+            combo_data = combo_data.filter(pl.col(key) == value)
         combo_data = combo_data.sort("step")
         if combo_data.is_empty():
             continue
@@ -279,7 +389,7 @@ def plot_metric_relation(
     plot_label: str,
     output_dir: Path,
     fixed_param: str | None = None,
-    fixed_value: float | None = None,
+    fixed_value: Any | None = None,
 ) -> Path | None:
     output_dir.mkdir(parents=True, exist_ok=True)
     level_frame, varying, title_suffix = _filtered_level_frame(
@@ -306,7 +416,7 @@ def plot_metric_relation(
     for index, combo in enumerate(combos):
         combo_data = level_frame
         for key, value in combo.items():
-            combo_data = combo_data.filter(pl.col(key) == float(value))
+            combo_data = combo_data.filter(pl.col(key) == value)
         combo_data = combo_data.sort("step")
         if combo_data.is_empty():
             continue
@@ -393,8 +503,11 @@ def generate_study_history_plots(*, study_root: Path, output_dir: Path | None = 
     history = load_study_history_frame(study_root)
     aggregated = aggregate_study_history(history)
     outputs: dict[str, Path] = {}
+    if destination.exists():
+        shutil.rmtree(destination)
 
     for level in sorted(aggregated.get_column("level").unique().to_list()):
+        level_parameters = _varying_hyperparameter_columns(aggregated.filter(pl.col("level") == int(level)))
         for metric_key, metric_label in PLOTTED_METRICS:
             full_key = f"level={int(level)}|metric={metric_key}|view=all"
             full_path = plot_metric_history(
@@ -407,7 +520,7 @@ def generate_study_history_plots(*, study_root: Path, output_dir: Path | None = 
             if full_path is not None:
                 outputs[full_key] = full_path
 
-            for fixed_param in _hyperparameter_columns(aggregated):
+            for fixed_param in level_parameters:
                 fixed_values = (
                     aggregated.filter(pl.col("level") == int(level))
                     .select(fixed_param)
@@ -424,11 +537,11 @@ def generate_study_history_plots(*, study_root: Path, output_dir: Path | None = 
                         metric_label=metric_label,
                         output_dir=Path(destination),
                         fixed_param=fixed_param,
-                        fixed_value=float(fixed_value),
+                        fixed_value=fixed_value,
                     )
                     if slice_path is not None:
                         outputs[
-                            f"level={int(level)}|metric={metric_key}|fixed={fixed_param}|value={float(fixed_value):g}"
+                            f"level={int(level)}|metric={metric_key}|fixed={fixed_param}|value={_format_param_value(fixed_value)}"
                         ] = slice_path
         for plot_key, y_metric_key, x_metric_key, plot_label in RELATION_PLOTS:
             full_key = f"level={int(level)}|metric={plot_key}|view=all"
@@ -444,7 +557,7 @@ def generate_study_history_plots(*, study_root: Path, output_dir: Path | None = 
             if full_path is not None:
                 outputs[full_key] = full_path
 
-            for fixed_param in _hyperparameter_columns(aggregated):
+            for fixed_param in level_parameters:
                 fixed_values = (
                     aggregated.filter(pl.col("level") == int(level))
                     .select(fixed_param)
@@ -463,10 +576,10 @@ def generate_study_history_plots(*, study_root: Path, output_dir: Path | None = 
                         plot_label=plot_label,
                         output_dir=Path(destination),
                         fixed_param=fixed_param,
-                        fixed_value=float(fixed_value),
+                        fixed_value=fixed_value,
                     )
                     if slice_path is not None:
                         outputs[
-                            f"level={int(level)}|metric={plot_key}|fixed={fixed_param}|value={float(fixed_value):g}"
+                            f"level={int(level)}|metric={plot_key}|fixed={fixed_param}|value={_format_param_value(fixed_value)}"
                         ] = slice_path
     return outputs
