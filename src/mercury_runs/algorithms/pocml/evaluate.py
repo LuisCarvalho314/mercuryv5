@@ -326,6 +326,7 @@ def compute_pocml_paper_precision_metrics_from_model(
         num_walks=int(config.paper_precision_num_walks),
         walk_length=int(config.paper_precision_walk_length),
         base_seed=int(config.paper_precision_seed),
+        valid_trajectories_only=bool(config.valid_trajectories_only),
     )
     inferred_walks: list[np.ndarray] = []
     gt_walks: list[np.ndarray] = []

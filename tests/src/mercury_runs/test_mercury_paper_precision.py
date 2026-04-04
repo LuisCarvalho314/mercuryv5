@@ -289,6 +289,114 @@ def test_mercury_paper_precision_passes_valid_trajectory_flag(monkeypatch, tmp_p
     assert captured["valid_trajectories_only"] is True
 
 
+def test_mercury_paper_precision_base_valid_flag_passes_walk_filter(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    class _Graph:
+        adj = np.zeros((2, 2), dtype=np.float32)
+        edge_features = {"action": np.zeros((2, 2, 1), dtype=np.int32)}
+
+    def _fake_walks(**kwargs):
+        captured.update(kwargs)
+        return [
+            type(
+                "Walk",
+                (),
+                {
+                    "observations": np.array([[0.0]], dtype=np.float32),
+                    "cartesian_observations": np.array([[0.0, 0.0]], dtype=np.float32),
+                    "actions": np.array([[1.0]], dtype=np.float32),
+                    "collisions": np.array([False]),
+                },
+            )()
+        ]
+
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.evaluate.generate_random_start_walks", _fake_walks)
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.evaluate.cartesian_state_ids", lambda positions: np.array([0], dtype=np.int32))
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate.exact_cartesian_state_ids_for_level",
+        lambda **kwargs: np.array([0], dtype=np.int32),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate.exact_cartesian_reference_positions",
+        lambda level_index: np.array([[0, 0], [0, 1]], dtype=np.int64),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate._run_mercury_snapshot_on_walk",
+        lambda *args, **kwargs: (np.array([0], dtype=np.int32), np.array([0], dtype=np.int32)),
+    )
+
+    compute_mercury_paper_precision_metrics(
+        config=_base_config(tmp_path).model_copy(update={"valid_trajectories_only": True}),
+        sensory_graph=_Graph(),
+        latent_graph=_Graph(),
+        action_map=object(),
+    )
+
+    assert captured["valid_trajectories_only"] is True
+
+
+def test_mercury_snapshot_replay_skips_latent_updates_on_collision_when_requested(monkeypatch) -> None:
+    walk = type(
+        "Walk",
+        (),
+        {
+            "observations": np.array([[0.0], [1.0], [2.0]], dtype=np.float32),
+            "actions": np.array([[1.0], [0.0], [1.0]], dtype=np.float32),
+            "collisions": np.array([False, True, False]),
+        },
+    )()
+    update_calls = {"update_memory": 0, "add_memory": 0, "latent_step": 0}
+
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate.sensory_step_predict_only",
+        lambda observation, state, params: (
+            setattr(state, "prev_bmu", int(float(np.asarray(observation)[0]))),
+            np.array([1.0], dtype=np.float32),
+        )[1:] and (state, np.array([1.0], dtype=np.float32)),
+    )
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.evaluate.init_global_context", lambda observation_dim: np.zeros((observation_dim,), dtype=np.float32))
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.evaluate.init_mem", lambda n, length: type("M", (), {"gs": type("G", (), {"n": n * length})()})())
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate._init_latent_state_compat",
+        lambda mem, n_actions: type("L", (), {"g": type("LG", (), {"n": 2})(), "mapping": None, "prev_bmu": 7})(),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate.update_memory",
+        lambda mem: update_calls.__setitem__("update_memory", update_calls["update_memory"] + 1) or mem,
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.evaluate.add_memory",
+        lambda mem, activation_vector: update_calls.__setitem__("add_memory", update_calls["add_memory"] + 1) or mem,
+    )
+
+    def _fake_latent_step(mem, latent_state, action_bmu, latent_params, state_memory):
+        update_calls["latent_step"] += 1
+        latent_state.prev_bmu += 1
+        return latent_state, None, state_memory
+
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.evaluate.latent_step_predict_only", _fake_latent_step)
+
+    class _ActionMap:
+        def predict(self, *, action=None):
+            return 0
+
+    sensory_bmu, latent_bmu = _run_mercury_snapshot_on_walk(
+        walk=walk,
+        sensory_graph=type("SG", (), {"n": 1})(),
+        latent_graph=type("LG", (), {"n": 2})(),
+        action_map=_ActionMap(),
+        sensory_params=object(),
+        latent_params=object(),
+        memory_length=2,
+        latent_valid_trajectories_only=True,
+    )
+
+    assert sensory_bmu.tolist() == [0, 1, 2]
+    assert latent_bmu.tolist() == [8, 8, 9]
+    assert update_calls == {"update_memory": 2, "add_memory": 2, "latent_step": 2}
+
+
 def test_mercury_paper_precision_reports_purity_and_link_error_for_identity_actions(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "mercury_runs.algorithms.mercury.evaluate.generate_random_start_walks",
@@ -535,6 +643,7 @@ def test_mercury_snapshot_replay_uses_predict_only_action_map(monkeypatch) -> No
         sensory_params=object(),
         latent_params=object(),
         memory_length=2,
+        latent_valid_trajectories_only=False,
     )
 
     assert calls["predict"] == 2

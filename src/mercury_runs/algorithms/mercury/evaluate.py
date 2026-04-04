@@ -106,6 +106,7 @@ def _run_mercury_snapshot_on_walk(
     sensory_params: SensoryParams,
     latent_params: LatentParams,
     memory_length: int,
+    latent_valid_trajectories_only: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     observation_dim = int(np.asarray(walk.observations).shape[1])
     sensory_state = SensoryState(
@@ -120,7 +121,6 @@ def _run_mercury_snapshot_on_walk(
     )
     latent_state.g = latent_graph
     latent_state.mapping = np.arange(latent_graph.n, dtype=np.int32)
-    previous_latent_bmu = None
     state_memory: list[int] = []
     sensory_bmus: list[int] = []
     latent_bmus: list[int] = []
@@ -136,8 +136,7 @@ def _run_mercury_snapshot_on_walk(
         sensory_graph_size = int(sensory_state.gs.n)
         if mem.gs.n != sensory_graph_size * int(memory_length):
             mem = init_mem(sensory_graph_size, length=int(memory_length))
-        # if previous_latent_bmu is None or not bool(collision):
-        if True:
+        if not (bool(latent_valid_trajectories_only) and bool(collision)):
             mem = update_memory(mem)
             mem = add_memory(mem, activation_vector)
             latent_state, _, state_memory = latent_step_predict_only(
@@ -148,11 +147,20 @@ def _run_mercury_snapshot_on_walk(
                 state_memory,
             )
         latent_bmus.append(int(latent_state.prev_bmu))
-        previous_latent_bmu = latent_state.prev_bmu
     return (
         np.asarray(sensory_bmus, dtype=np.int64),
         np.asarray(latent_bmus, dtype=np.int64),
     )
+
+
+def _resolve_mercury_paper_precision_trajectory_policy(config: Any) -> tuple[bool, bool]:
+    walk_valid_trajectories_only = bool(getattr(config, "valid_trajectories_only", False)) or bool(
+        getattr(config, "mercury_valid_trajectories_only", False)
+    )
+    latent_valid_trajectories_only = walk_valid_trajectories_only or bool(
+        getattr(config, "mercury_split_sensory_raw_latent_valid", False)
+    )
+    return walk_valid_trajectories_only, latent_valid_trajectories_only
 
 
 def compute_mercury_paper_precision_metrics(
@@ -165,6 +173,7 @@ def compute_mercury_paper_precision_metrics(
     progress_desc: str | None = None,
     progress_callback: Any = None,
 ) -> dict[str, Any]:
+    walk_valid_trajectories_only, latent_valid_trajectories_only = _resolve_mercury_paper_precision_trajectory_policy(config)
     walks = generate_random_start_walks(
         level=config.level,
         sensor=config.sensor,
@@ -174,7 +183,7 @@ def compute_mercury_paper_precision_metrics(
         num_walks=int(config.paper_precision_num_walks),
         walk_length=int(config.paper_precision_walk_length),
         base_seed=int(config.seed),
-        valid_trajectories_only=bool(getattr(config, "mercury_valid_trajectories_only", False)),
+        valid_trajectories_only=walk_valid_trajectories_only,
     )
     gt_walks: list[np.ndarray] = []
     gt_exact_walks: list[np.ndarray] = []
@@ -204,6 +213,7 @@ def compute_mercury_paper_precision_metrics(
             sensory_params=sensory_params,
             latent_params=latent_params,
             memory_length=int(config.memory_length),
+            latent_valid_trajectories_only=latent_valid_trajectories_only,
         )
         length = min(len(ground_truth_state_ids), len(sensory_bmu), len(latent_bmu))
         gt_walks.append(ground_truth_state_ids[:length].astype(np.int64, copy=False))
@@ -434,6 +444,7 @@ def write_mercury_paper_precision_payload(
     history: list[dict[str, Any]],
     schedule_unit: str,
 ) -> Path:
+    walk_valid_trajectories_only, latent_valid_trajectories_only = _resolve_mercury_paper_precision_trajectory_policy(config)
     payload = {
         "method": "mercury",
         "schema": "paper_precision_v1",
@@ -443,6 +454,8 @@ def write_mercury_paper_precision_payload(
             "rand_prob": float(config.rand_prob),
             "base_seed": int(config.seed),
             "valid_trajectories_only": bool(getattr(config, "mercury_valid_trajectories_only", False)),
+            "walk_valid_trajectories_only": walk_valid_trajectories_only,
+            "latent_valid_trajectories_only": latent_valid_trajectories_only,
             "ground_truth_state_series": "cartesian_state_id",
             "mode": str(config.paper_precision_mode),
             "eval_interval": int(config.paper_precision_eval_interval),

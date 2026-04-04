@@ -152,3 +152,34 @@ def test_cscg_paper_precision_reports_purity_and_link_error(monkeypatch, tmp_pat
     assert metrics["latent_action_conditioned_edge_recall"] == pytest.approx(1.0)
     assert metrics["latent_action_conditioned_edge_f1"] == pytest.approx(1.0)
     assert metrics["latent_sensorimotor_link_error"] == pytest.approx((0.0 + 1e-4) / (1.0 + 1e-4))
+
+
+def test_cscg_paper_precision_passes_valid_trajectory_flag(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def _fake_walks(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("mercury_runs.algorithms.cscg.evaluate.generate_random_start_walks", _fake_walks)
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.evaluate.exact_cartesian_reference_positions",
+        lambda level_index: np.array([[0, 0]], dtype=np.int64),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.evaluate.exact_valid_sensorimotor_transitions",
+        lambda **kwargs: set(),
+    )
+
+    compute_cscg_paper_precision_metrics_from_model(
+        model_npz={"T": np.ones((1, 1, 1), dtype=np.float32)},
+        n_clones=np.array([1], dtype=np.int64),
+        config=_base_config(tmp_path).model_copy(
+            update={"valid_trajectories_only": True, "paper_precision_num_walks": 1, "structure_metrics_enabled": False}
+        ),
+        obs_uniques=np.array([[0]], dtype=np.int64),
+        action_uniques=np.array([[1]], dtype=np.int64),
+        chmm_mod=_DecodeModule(),
+    )
+
+    assert captured["valid_trajectories_only"] is True

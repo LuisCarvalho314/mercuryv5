@@ -11,6 +11,7 @@ import pytest
 from mercury_runs.algorithms.pocml.api import run_pocml
 from mercury_runs.algorithms.pocml.config import POCMLConfig
 from mercury_runs.algorithms.pocml.evaluate import (
+    compute_pocml_paper_precision_metrics_from_model,
     compute_ground_truth_observation_prediction_accuracy,
     evaluate_pocml_sequence,
     load_pocml_checkpoint,
@@ -648,3 +649,33 @@ def test_filter_valid_pocml_rows_can_preserve_collision_steps() -> None:
     assert actions.tolist() == [[0], [1], [2]]
     assert gt.tolist() == [5, 6, 7]
     assert stats == {"raw_steps": 3, "filtered_steps": 3, "dropped_collision_steps": 0}
+
+
+def test_pocml_paper_precision_passes_valid_trajectory_flag(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def _fake_walks(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("mercury_runs.algorithms.pocml.evaluate.generate_random_start_walks", _fake_walks)
+
+    compute_pocml_paper_precision_metrics_from_model(
+        model=object(),
+        config=POCMLConfig(
+            datasets_root=tmp_path,
+            output_root=tmp_path / "out",
+            run_id="run-pocml-paper",
+            level=0,
+            sensor="cartesian",
+            ground_truth_states_parquet=tmp_path / "ground_truth.parquet",
+            valid_trajectories_only=True,
+            paper_precision_num_walks=1,
+            paper_precision_walk_length=2,
+        ),
+        obs_uniques=np.array([[0]], dtype=np.int64),
+        action_uniques=np.array([[1]], dtype=np.int64),
+        torch_module=_FakeTorch,
+    )
+
+    assert captured["valid_trajectories_only"] is True
