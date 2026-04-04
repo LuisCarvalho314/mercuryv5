@@ -146,7 +146,10 @@ def _run_mercury_snapshot_on_walk(
                 latent_params,
                 state_memory,
             )
-        latent_bmus.append(int(latent_state.prev_bmu))
+        current_latent_bmu = latent_state.prev_bmu
+        if current_latent_bmu is None:
+            current_latent_bmu = 0
+        latent_bmus.append(int(current_latent_bmu))
     return (
         np.asarray(sensory_bmus, dtype=np.int64),
         np.asarray(latent_bmus, dtype=np.int64),

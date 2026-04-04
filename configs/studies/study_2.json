@@ -5,7 +5,7 @@
     "sensor_range": [1],
     "seed": [0],
     "rand_prob": [0, 0.3],
-    "num_steps": [60000],
+    "num_steps": [10000],
     "datasets_root": ["datasets"],
     "valid_trajectories_only": [false],
     "mercury_valid_trajectories_only": [false],
