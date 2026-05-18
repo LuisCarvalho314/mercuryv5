@@ -10,6 +10,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
 import matplotlib
+import numpy as np
 import polars as pl
 
 matplotlib.use("Agg", force=True)
@@ -18,6 +19,7 @@ from matplotlib import pyplot as plt
 
 PLOTTED_METRICS: tuple[tuple[str, str], ...] = (
     ("precision", "State Precision"),
+    ("state_recall", "State Recall"),
     ("edge_precision", "Edge Precision"),
     ("edge_recall", "Edge Recall"),
     ("edge_f1", "Edge F1"),
@@ -116,6 +118,19 @@ def _normalize_param_value(value: Any) -> Any:
     return None
 
 
+def state_recall_from_cooccurrence(matrix: Any) -> float | None:
+    if matrix is None:
+        return None
+    cooccurrence = matrix.to_list() if hasattr(matrix, "to_list") else matrix
+    values = np.asarray(cooccurrence, dtype=float)
+    if values.ndim != 2 or values.size == 0:
+        return None
+    total = float(values.sum())
+    if total <= 0.0:
+        return None
+    return float(values.max(axis=0).sum() / total)
+
+
 def _format_param_value(value: Any) -> str:
     if _is_numeric(value):
         return f"{float(value):g}"
@@ -208,6 +223,16 @@ def _load_history_rows(study_root: Path, summary: pl.DataFrame) -> list[dict[str
                     flattened[column] = value
             for column, value in _run_config_plot_params(run_config, summary_param_column_set).items():
                 flattened.setdefault(column, value)
+            for channel in CHANNELS:
+                scalar_name = f"{channel}_state_recall"
+                scalar_value = item.get(scalar_name)
+                if scalar_value is not None:
+                    flattened[scalar_name] = float(scalar_value)
+                    continue
+                matrix_name = f"{channel}_exact_state_cooccurrence_matrix"
+                recall = state_recall_from_cooccurrence(item.get(matrix_name))
+                if recall is not None:
+                    flattened[scalar_name] = recall
             for metric_key, _ in PLOTTED_METRICS:
                 for channel in CHANNELS:
                     name = f"{channel}_{metric_key}"

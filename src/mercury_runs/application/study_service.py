@@ -125,6 +125,7 @@ def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
                     "activation_threshold": [0.95],
                     "ambiguity_threshold": [10],
                     "ambiguity_decay": [0.99],
+                    "ambiguity_counter_mode": ["action"],
                     "am_lr": [0.001],
                     "am_key": [0],
                     "weight_memory": [0.4],

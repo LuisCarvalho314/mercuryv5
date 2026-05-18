@@ -1,13 +1,208 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import polars as pl
 
 from ..domain.models import PIPELINE_SCHEMA_VERSION
 from .paper_precision import summarize_paper_precision_artifact
 from .runtime import stable_hash, utc_now
 from .storage import baseline_enabled
+
+
+MAX_WANDB_HISTORY_ROWS = 2000
+RAW_STATE_COLUMNS = frozenset(
+    {
+        "cartesian_proxy_bmu",
+        "ground_truth_bmu",
+        "sensory_bmu",
+        "latent_bmu",
+    }
+)
+PAPER_PRECISION_HISTORY_COLUMNS = frozenset(
+    {
+        "sensory_precision",
+        "sensory_recall",
+        "latent_precision",
+        "latent_recall",
+        "sensory_edge_precision",
+        "sensory_edge_recall",
+        "sensory_edge_f1",
+        "latent_edge_precision",
+        "latent_edge_recall",
+        "latent_edge_f1",
+        "sensory_mean_total_variation",
+        "latent_mean_total_variation",
+        "sensory_action_conditioned_edge_precision",
+        "sensory_action_conditioned_edge_recall",
+        "sensory_action_conditioned_edge_f1",
+        "latent_action_conditioned_edge_precision",
+        "latent_action_conditioned_edge_recall",
+        "latent_action_conditioned_edge_f1",
+        "sensory_action_conditioned_mean_total_variation",
+        "latent_action_conditioned_mean_total_variation",
+    }
+)
+
+
+def _numeric_columns(frame: pl.DataFrame, *, exclude: set[str] | frozenset[str] | None = None) -> list[str]:
+    exclude = exclude or frozenset()
+    numeric_types = {
+        pl.Int8,
+        pl.Int16,
+        pl.Int32,
+        pl.Int64,
+        pl.UInt8,
+        pl.UInt16,
+        pl.UInt32,
+        pl.UInt64,
+        pl.Float32,
+        pl.Float64,
+    }
+    return [
+        column
+        for column, dtype in frame.schema.items()
+        if dtype in numeric_types and column not in exclude
+    ]
+
+
+def _log_parquet_history_to_wandb(
+    run: Any,
+    parquet_path: Path,
+    *,
+    namespace: str,
+    exclude_columns: set[str] | frozenset[str] | None = None,
+) -> None:
+    if not parquet_path.exists():
+        return
+    frame = pl.read_parquet(parquet_path)
+    if frame.is_empty():
+        return
+    has_step_column = "step" in frame.columns
+    metric_columns = _numeric_columns(
+        frame,
+        exclude=frozenset({"step"}) | frozenset(exclude_columns or ()),
+    )
+    if not metric_columns:
+        return
+    step_metric_name = f"{namespace}/step"
+    if hasattr(run, "define_metric"):
+        run.define_metric(step_metric_name)
+        run.define_metric(f"{namespace}/*", step_metric=step_metric_name)
+
+    stride = max(1, int(frame.height // MAX_WANDB_HISTORY_ROWS))
+    sampled = frame if has_step_column else frame.with_row_index("step", offset=1)
+    if stride > 1:
+        sampled = sampled.filter(((pl.col("step") - 1) % stride) == 0)
+
+    for row in sampled.select(["step", *metric_columns]).iter_rows(named=True):
+        step = int(row.pop("step"))
+        payload = {step_metric_name: step}
+        payload.update(
+            {
+                f"{namespace}/{key}": value
+                for key, value in row.items()
+                if isinstance(value, (int, float)) and value is not None
+            }
+        )
+        if payload:
+            run.log(payload)
+
+
+def _log_states_history_to_wandb(run: Any, states_path: Path, *, namespace: str) -> None:
+    _log_parquet_history_to_wandb(
+        run,
+        states_path,
+        namespace=namespace,
+        exclude_columns=RAW_STATE_COLUMNS,
+    )
+
+
+def _wandb_scalar_value(value: Any) -> Any:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)):
+        return value
+    return None
+
+
+def _paper_precision_summary_payload(payload: dict[str, Any], *, namespace: str) -> dict[str, Any]:
+    metrics = dict(payload.get("metrics") or {})
+    summary: dict[str, Any] = {}
+    for key, value in metrics.items():
+        scalar_value = _wandb_scalar_value(value)
+        if scalar_value is not None:
+            summary[f"{namespace}/{key}"] = scalar_value
+        elif isinstance(value, (list, dict)):
+            summary[f"{namespace}/{key}_json"] = json.dumps(value)
+    protocol = dict(payload.get("protocol") or {})
+    for key in ("num_walks", "walk_length", "mode", "eval_interval", "num_points", "schedule_unit", "x_axis_unit"):
+        if key in protocol:
+            summary[f"{namespace}/{key}"] = protocol[key]
+    return summary
+
+
+def _paper_precision_history_payload(row: dict[str, Any], *, namespace: str) -> dict[str, Any]:
+    logged_row: dict[str, Any] = {}
+    for key in sorted(PAPER_PRECISION_HISTORY_COLUMNS):
+        value = row.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        logged_row[f"{namespace}/{key}"] = value
+        if key.endswith("_edge_f1"):
+            logged_row[f"{namespace}/{key.removesuffix('_f1')}_fscore"] = value
+    return logged_row
+
+
+def _log_paper_precision_to_wandb(
+    run: Any,
+    paper_precision_path: Path,
+    *,
+    subsystem_name: str,
+    final_observed_samples: int | None = None,
+) -> None:
+    if not paper_precision_path.exists():
+        return
+    payload = json.loads(paper_precision_path.read_text(encoding="utf-8"))
+    namespace = f"{subsystem_name}/paper_precision"
+    run.summary.update(_paper_precision_summary_payload(payload, namespace=namespace))
+
+    scalar_summary = {
+        key: value
+        for key, value in summarize_paper_precision_artifact(paper_precision_path).items()
+        if isinstance(value, (int, float)) and value is not None
+    }
+    history = payload.get("history") or []
+    if not history and scalar_summary:
+        try:
+            observed_samples = int(final_observed_samples or 0)
+        except (TypeError, ValueError):
+            observed_samples = 0
+        history = [{"observed_samples": observed_samples, **scalar_summary}]
+
+    step_metric_name = f"{namespace}/observed_samples"
+    if hasattr(run, "define_metric"):
+        run.define_metric(step_metric_name)
+        run.define_metric(f"{namespace}/*", step_metric=step_metric_name)
+
+    stride = max(1, int(len(history) // MAX_WANDB_HISTORY_ROWS))
+    for index, row in enumerate(history):
+        if index % stride != 0:
+            continue
+        if not isinstance(row, dict):
+            continue
+        observed_samples = row.get("observed_samples", row.get("step", index + 1))
+        if not isinstance(observed_samples, (int, float)):
+            continue
+        logged_row = {step_metric_name: observed_samples}
+        logged_row.update(_paper_precision_history_payload(row, namespace=namespace))
+        if len(logged_row) > 1:
+            run.log(logged_row)
 
 
 def maybe_log_wandb(
@@ -73,9 +268,27 @@ def maybe_log_wandb(
         for subsystem_name in ("mercury", "pocml", "cscg"):
             paper_precision_path = ((subsystems.get(subsystem_name) or {}).get("artifacts") or {}).get("paper_precision_json")
             if paper_precision_path:
-                run.summary.update(
-                    {f"{subsystem_name}/paper_{k}": v for k, v in summarize_paper_precision_artifact(Path(paper_precision_path)).items()}
+                _log_paper_precision_to_wandb(
+                    run,
+                    Path(paper_precision_path),
+                    subsystem_name=subsystem_name,
+                    final_observed_samples=(run_config.get("run_payload") or {}).get("num_steps"),
                 )
+        mercury_states_path = ((subsystems.get("mercury") or {}).get("artifacts") or {}).get("states_parquet")
+        if mercury_states_path:
+            _log_states_history_to_wandb(
+                run,
+                Path(mercury_states_path),
+                namespace="mercury/states",
+            )
+        mercury_attribution_path = ((subsystems.get("mercury") or {}).get("artifacts") or {}).get("attribution_parquet")
+        if mercury_attribution_path:
+            _log_parquet_history_to_wandb(
+                run,
+                Path(mercury_attribution_path),
+                namespace="mercury/attribution",
+                exclude_columns=frozenset({"latent_bmu"}),
+            )
         if bool(getattr(args, "wandb_log_artifacts", True)):
             artifact = wandb.Artifact(name=f"{run_id}-artifacts", type="run-artifacts")
             artifact_paths: List[str] = []

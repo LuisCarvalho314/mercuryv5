@@ -172,16 +172,21 @@ def compute_fixed_map_precision_details(
     if z_hat.shape[0] != z_true.shape[0]:
         raise ValueError("Inferred and ground-truth state sequences must have matching lengths.")
     if z_hat.size == 0:
+        recall_name = metric_name.replace("precision", "recall")
         return {
             metric_name: 0.0,
+            recall_name: 0.0,
             "evaluation_steps": 0,
             "inferred_state_count": 0,
             "ground_truth_state_count": 0,
             "cooccurrence_matrix": [],
         }
     cooccurrence = compute_cooccurrence_matrix(z_hat.tolist(), z_true.tolist())
+    total = float(z_hat.shape[0])
+    recall_name = metric_name.replace("precision", "recall")
     return {
         metric_name: float(compute_precision(z_hat.tolist(), z_true.tolist())),
+        recall_name: float(np.max(cooccurrence, axis=0).sum() / total) if total > 0.0 else 0.0,
         "evaluation_steps": int(z_hat.shape[0]),
         "inferred_state_count": int(len(np.unique(z_hat))),
         "ground_truth_state_count": int(len(np.unique(z_true))),

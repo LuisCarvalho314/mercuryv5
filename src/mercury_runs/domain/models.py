@@ -138,6 +138,7 @@ class StudyGridConfig(BaseModel):
     activation_threshold: float = Field(ge=0.0, le=1.0)
     ambiguity_threshold: int = Field(ge=0)
     ambiguity_decay: float = Field(default=0.99, ge=0.0, le=1.0)
+    ambiguity_counter_mode: Literal["action", "node"] = "action"
     am_lr: float = Field(ge=0.0)
     am_key: int = Field(ge=0)
     window_length: int = Field(gt=0)

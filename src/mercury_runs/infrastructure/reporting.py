@@ -423,6 +423,7 @@ def write_study_summary(study_root: Path, study_name: str) -> Path:
             "sensory_weighting": (run_config.run_payload.get("sensory") or {}).get("sensory_weighting"),
             "ambiguity_threshold": (run_config.run_payload.get("latent") or {}).get("ambiguity_threshold"),
             "ambiguity_decay": (run_config.run_payload.get("latent") or {}).get("ambiguity_decay"),
+            "ambiguity_counter_mode": (run_config.run_payload.get("latent") or {}).get("ambiguity_counter_mode"),
             "trace_decay": (run_config.run_payload.get("latent") or {}).get("trace_decay"),
             "lambda_trace": (run_config.run_payload.get("latent") or {}).get("lambda_trace"),
             "weight_memory": (run_config.run_payload.get("latent") or {}).get("weight_memory"),

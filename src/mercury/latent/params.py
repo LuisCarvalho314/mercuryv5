@@ -16,6 +16,7 @@ class LatentParams:
     gaussian_shape: int = 2
     ambiguity_threshold: int = 10
     ambiguity_decay: float = 0.99
+    ambiguity_counter_mode: str = "action"
 
     # ------------------------------------------------------------------
     # Trace dynamics

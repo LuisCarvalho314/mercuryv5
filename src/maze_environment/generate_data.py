@@ -1,18 +1,16 @@
 # generate_data.py
 
-import datetime
-import json
 import os
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
 
-from .maze_environment_v3 import MazeEnvironment
 from .LEVEL import levels
-from .schemas import AgentConfig, MazeTrajectory, MazeDataset
+from .maze_environment_v3 import MazeEnvironment
+from .schemas import AgentConfig, MazeDataset, MazeTrajectory
 
+import datetime
 import json
 from pathlib import Path
 from typing import Optional
@@ -64,6 +62,7 @@ def _find_existing_dataset_run_id(
     rand_prob: float,
     num_steps: int,
     valid_trajectories_only: bool,
+    random_start: bool,
 ) -> Optional[str]:
     """
     Returns an existing run_id if a dataset with identical params exists in output_dir.
@@ -95,6 +94,7 @@ def _find_existing_dataset_run_id(
             and float(metadata.get("random_prob")) == float(rand_prob)
             and int(metadata.get("num_steps")) == int(num_steps)
             and bool(metadata.get("valid_trajectories_only", False)) == bool(valid_trajectories_only)
+            and bool(metadata.get("random_start", False)) == bool(random_start)
         ):
             existing_run_id = metadata.get("run_id")
             if existing_run_id:
@@ -145,16 +145,18 @@ def _build_run_id(
     rand_prob: float,
     num_steps: int,
     valid_trajectories_only: bool,
+    random_start: bool,
     timestamp_compact: str,
 ) -> str:
     sensor_name = agent_sensors["sensor"]
     sensor_range = agent_sensors.get("range", None)
     validity_tag = "validonly" if valid_trajectories_only else "allsteps"
+    start_tag = "randomstart" if random_start else "fixedstart"
 
     if sensor_name == "cardinal distance":
-        return f"level{level}_{sensor_name}_range{sensor_range}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{timestamp_compact}"
+        return f"level{level}_{sensor_name}_range{sensor_range}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{start_tag}_{timestamp_compact}"
 
-    return f"level{level}_{sensor_name}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{timestamp_compact}"
+    return f"level{level}_{sensor_name}_seed{seed}_p{rand_prob}_steps{num_steps}_{validity_tag}_{start_tag}_{timestamp_compact}"
 
 
 def _infer_action_column_names(action_width: int) -> list[str]:
@@ -169,6 +171,31 @@ def _dataset_to_dict(dataset: MazeDataset) -> dict[str, Any]:
     if hasattr(dataset, "model_dump"):
         return dataset.model_dump()
     return dataset.dict()
+
+
+def _accessible_positions(env: MazeEnvironment) -> list[tuple[int, int]]:
+    positions: list[tuple[int, int]] = []
+    for row_index in range(env.maze.shape[0]):
+        for col_index in range(env.maze.shape[1]):
+            if int(env.maze[row_index, col_index]) == 0:
+                positions.append((row_index, col_index))
+    if not positions:
+        raise ValueError("Cannot choose a random start because the maze has no accessible positions.")
+    return positions
+
+
+def _set_agent_position(env: MazeEnvironment, position: tuple[int, int]) -> None:
+    env.agent_position = position
+    env.agent.position = position
+
+
+def _initialise_start_position(env: MazeEnvironment, *, random_start: bool) -> tuple[int, int]:
+    if not random_start:
+        return tuple(int(value) for value in env.agent_position)
+
+    start_position = env.rng.choice(_accessible_positions(env))
+    _set_agent_position(env, start_position)
+    return tuple(int(value) for value in start_position)
 
 
 def _rollout(env: MazeEnvironment, num_steps: int, rand_prob: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
@@ -271,7 +298,18 @@ def _json_safe(value):
     return value
 
 
-def _write_artifacts(output_dir, run_id, frame, dataset, *, valid_trajectories_only: bool, generation_stats: dict[str, int], compression="zstd"):
+def _write_artifacts(
+    output_dir,
+    run_id,
+    frame,
+    dataset,
+    *,
+    valid_trajectories_only: bool,
+    random_start: bool,
+    initial_agent_position: tuple[int, int],
+    generation_stats: dict[str, int],
+    compression="zstd",
+):
     import json
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +335,8 @@ def _write_artifacts(output_dir, run_id, frame, dataset, *, valid_trajectories_o
         "random_prob": dataset.random_prob,
         "num_steps": dataset.num_steps,
         "valid_trajectories_only": bool(valid_trajectories_only),
+        "random_start": bool(random_start),
+        "initial_agent_position": [int(value) for value in initial_agent_position],
         "generation_stats": {key: int(value) for key, value in generation_stats.items()},
         "artifact": {"parquet": parquet_path.name},
         "table": {
@@ -329,6 +369,7 @@ def generate_data(
     rand_prob: float = 0.3,
     num_steps: int = 20_000,
     valid_trajectories_only: bool = False,
+    random_start: bool = False,
     output_root: str | Path = "../../datasets",
     reuse_existing: bool = True,
 ) -> dict[str, str]:
@@ -363,6 +404,7 @@ def generate_data(
                 rand_prob=rand_prob,
                 num_steps=num_steps,
                 valid_trajectories_only=bool(valid_trajectories_only),
+                random_start=bool(random_start),
             )
             if existing_run_id is not None:
                 run_ids[sensor_key] = existing_run_id
@@ -377,6 +419,7 @@ def generate_data(
             rand_prob=rand_prob,
             num_steps=num_steps,
             valid_trajectories_only=bool(valid_trajectories_only),
+            random_start=bool(random_start),
             timestamp_compact=timestamp_utc_compact,
         )
 
@@ -385,6 +428,10 @@ def generate_data(
             plotting=False,
             agent_sensors=agent_sensors,
             seed=seed,
+        )
+        initial_agent_position = _initialise_start_position(
+            env,
+            random_start=bool(random_start),
         )
 
         if valid_trajectories_only:
@@ -421,6 +468,8 @@ def generate_data(
             frame=frame,
             dataset=dataset,
             valid_trajectories_only=bool(valid_trajectories_only),
+            random_start=bool(random_start),
+            initial_agent_position=initial_agent_position,
             generation_stats=generation_stats,
         )
 

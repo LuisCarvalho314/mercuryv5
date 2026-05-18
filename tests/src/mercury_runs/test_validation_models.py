@@ -112,3 +112,4 @@ def test_study_grid_config_defaults_algorithm_valid_trajectory_flags() -> None:
     assert config.mercury_split_sensory_raw_latent_valid is False
     assert config.pocml_valid_trajectories_only is False
     assert config.cscg_valid_trajectories_only is False
+    assert config.ambiguity_counter_mode == "action"

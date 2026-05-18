@@ -311,6 +311,7 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
         latent_max_age=18,
         ambiguity_threshold=10,
         ambiguity_decay=0.99,
+        ambiguity_counter_mode="node",
         trace_decay=0.99,
         lambda_trace=0.05,
         weight_memory=0.4,
@@ -387,6 +388,7 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
     assert payload["latent"]["weight_base"] == 0.2
     assert payload["latent"]["weight_action"] == 0.2
     assert payload["latent"]["ambiguity_decay"] == 0.99
+    assert payload["latent"]["ambiguity_counter_mode"] == "node"
     assert payload["latent"]["lambda_trace"] == 0.05
     assert "mixture_alpha" not in payload["latent"]
     assert "mixture_beta" not in payload["latent"]

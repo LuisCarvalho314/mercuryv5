@@ -3,7 +3,8 @@ import pytest
 
 import mercury.latent.state as latent_state_mod
 from mercury.graph.core import Graph
-from mercury.latent.state import _register_features, _update_edges_with_actions
+from mercury.latent.params import LatentParams
+from mercury.latent.state import _register_features, _update_ambiguity_counter, _update_edges_with_actions
 
 
 def test_update_edges_with_actions_uses_passed_beta(monkeypatch):
@@ -33,7 +34,7 @@ def test_update_edges_with_actions_uses_passed_beta(monkeypatch):
 
     recorded: dict[str, float] = {}
 
-    def fake_update_edge(g_in, u, v, prior_row, observed_row, action_bmu, beta, gaussian_shape):
+    def fake_update_edge(g_in, u, v, prior_row, observed_row, action_bmu, beta, gaussian_shape, **kwargs):
         recorded["beta"] = float(beta)
         return g_in
 
@@ -51,3 +52,44 @@ def test_update_edges_with_actions_uses_passed_beta(monkeypatch):
 
     assert out is g
     assert recorded["beta"] == pytest.approx(0.37)
+
+
+def test_ambiguity_counter_action_mode_updates_selected_action_only():
+    g = Graph(directed=True)
+    _register_features(g, mem_len=4, n_actions=3)
+    g.add_node()
+    g.node_features["ambiguity_score"][0, 1] = 5.0
+    g.node_features["ambiguity_score_node"][0] = 7.0
+
+    score = _update_ambiguity_counter(
+        g,
+        prev_bmu=0,
+        action_bmu=1,
+        preds_size=2,
+        cfg=LatentParams(ambiguity_decay=0.5, ambiguity_counter_mode="action"),
+    )
+
+    assert score == pytest.approx(3.5)
+    assert g.node_features["ambiguity_score"][0, 1] == pytest.approx(3.5)
+    assert g.node_features["ambiguity_score"][0, 0] == pytest.approx(0.0)
+    assert g.node_features["ambiguity_score_node"][0] == pytest.approx(7.0)
+
+
+def test_ambiguity_counter_node_mode_updates_node_counter_only():
+    g = Graph(directed=True)
+    _register_features(g, mem_len=4, n_actions=3)
+    g.add_node()
+    g.node_features["ambiguity_score"][0, 1] = 5.0
+    g.node_features["ambiguity_score_node"][0] = 7.0
+
+    score = _update_ambiguity_counter(
+        g,
+        prev_bmu=0,
+        action_bmu=1,
+        preds_size=2,
+        cfg=LatentParams(ambiguity_decay=0.5, ambiguity_counter_mode="node"),
+    )
+
+    assert score == pytest.approx(4.5)
+    assert g.node_features["ambiguity_score_node"][0] == pytest.approx(4.5)
+    assert g.node_features["ambiguity_score"][0, 1] == pytest.approx(5.0)

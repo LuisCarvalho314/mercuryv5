@@ -41,6 +41,8 @@ def _write_run(
                         "step": 1,
                         "sensory_precision": 0.2 + offset,
                         "latent_precision": 0.4 + offset,
+                        "sensory_exact_state_cooccurrence_matrix": [[2, 0], [0, 1], [1, 3]],
+                        "latent_exact_state_cooccurrence_matrix": [[3, 1], [0, 4]],
                         "sensory_inferred_state_count": 3,
                         "sensory_ground_truth_state_count": 4,
                         "latent_inferred_state_count": 3,
@@ -66,6 +68,8 @@ def _write_run(
                         "step": 2,
                         "sensory_precision": 0.25 + offset,
                         "latent_precision": 0.45 + offset,
+                        "sensory_exact_state_cooccurrence_matrix": [[4, 1], [0, 3]],
+                        "latent_exact_state_cooccurrence_matrix": [[1, 0], [2, 5]],
                         "sensory_inferred_state_count": 3,
                         "sensory_ground_truth_state_count": 4,
                         "latent_inferred_state_count": 3,
@@ -120,7 +124,7 @@ def test_load_study_history_frame_reads_run_histories(tmp_path: Path) -> None:
 
     frame = load_study_history_frame(study_root)
 
-    assert frame.shape == (2, 31)
+    assert frame.shape == (2, 33)
     assert frame.get_column("step").to_list() == [1, 2]
     assert frame.get_column("latent_max_age").to_list() == [50.0, 50.0]
     assert frame.get_column("window_length").to_list() == [150.0, 150.0]
@@ -128,6 +132,8 @@ def test_load_study_history_frame_reads_run_histories(tmp_path: Path) -> None:
     assert frame.get_column("latent_node_count").to_list() == [3.0, 3.0]
     assert frame.get_column("sensory_state_count_ratio").to_list() == [0.75, 0.75]
     assert frame.get_column("latent_state_count_ratio").to_list() == [0.75, 0.75]
+    assert frame.get_column("sensory_state_recall").to_list() == [5 / 7, 7 / 8]
+    assert frame.get_column("latent_state_recall").to_list() == [7 / 8, 7 / 8]
     for metric_key, _ in PLOTTED_METRICS:
         assert f"sensory_{metric_key}" in frame.columns
         assert f"latent_{metric_key}" in frame.columns

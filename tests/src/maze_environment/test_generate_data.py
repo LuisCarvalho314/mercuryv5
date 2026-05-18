@@ -1,16 +1,31 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from maze_environment.generate_data import generate_data
 
 
+class FakeAgent:
+    def __init__(self) -> None:
+        self.position = (0, 0)
+
+    def make_observation(self, maze):
+        return self.position
+
+
 class FakeMazeEnvironment:
     def __init__(self, *, level, plotting=False, agent_sensors=None, seed=0):
         self.agent_sensors = agent_sensors or {"sensor": "cartesian"}
+        self.maze = np.zeros((2, 3), dtype=np.uint8)
+        self.agent_position = (0, 0)
+        self.agent = FakeAgent()
+        self.agent.position = self.agent_position
+        self.rng = random.Random(seed)
         self._steps = iter(
             [
                 ((0, 0), [1, 0, 0, 0], True),
@@ -113,3 +128,71 @@ def test_generate_data_does_not_reuse_default_dataset_for_valid_only_requests(mo
         _metadata_path(tmp_path, level=0, sensor="cartesian", run_id=strict_run_ids["cartesian"]).read_text(encoding="utf-8")
     )
     assert strict_metadata["valid_trajectories_only"] is True
+
+
+def test_generate_data_random_start_records_seed_controlled_initial_position(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("maze_environment.generate_data.MazeEnvironment", FakeMazeEnvironment)
+
+    run_ids = generate_data(
+        level=0,
+        seed=5,
+        rand_prob=0.2,
+        num_steps=3,
+        random_start=True,
+        output_root=tmp_path,
+        reuse_existing=False,
+    )
+
+    expected_positions = [(row, col) for row in range(2) for col in range(3)]
+    expected_start = list(random.Random(5).choice(expected_positions))
+
+    cart_metadata = json.loads(
+        _metadata_path(tmp_path, level=0, sensor="cartesian", run_id=run_ids["cartesian"]).read_text(encoding="utf-8")
+    )
+    sensory_metadata = json.loads(
+        _metadata_path(
+            tmp_path,
+            level=0,
+            sensor="cardinal distance",
+            sensor_range=1,
+            run_id=run_ids["cardinal distance:range=1"],
+        ).read_text(encoding="utf-8")
+    )
+
+    assert cart_metadata["random_start"] is True
+    assert cart_metadata["initial_agent_position"] == expected_start
+    assert cart_metadata["initial_agent_position"] != [0, 0]
+    assert sensory_metadata["initial_agent_position"] == expected_start
+
+
+def test_generate_data_does_not_reuse_fixed_start_dataset_for_random_start_requests(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("maze_environment.generate_data.MazeEnvironment", FakeMazeEnvironment)
+
+    fixed_run_ids = generate_data(
+        level=0,
+        seed=1,
+        rand_prob=0.2,
+        num_steps=3,
+        random_start=False,
+        output_root=tmp_path,
+        reuse_existing=True,
+    )
+    random_run_ids = generate_data(
+        level=0,
+        seed=1,
+        rand_prob=0.2,
+        num_steps=3,
+        random_start=True,
+        output_root=tmp_path,
+        reuse_existing=True,
+    )
+
+    assert fixed_run_ids["cartesian"] != random_run_ids["cartesian"]
+    fixed_metadata = json.loads(
+        _metadata_path(tmp_path, level=0, sensor="cartesian", run_id=fixed_run_ids["cartesian"]).read_text(encoding="utf-8")
+    )
+    random_metadata = json.loads(
+        _metadata_path(tmp_path, level=0, sensor="cartesian", run_id=random_run_ids["cartesian"]).read_text(encoding="utf-8")
+    )
+    assert fixed_metadata["random_start"] is False
+    assert random_metadata["random_start"] is True

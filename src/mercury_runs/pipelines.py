@@ -14,15 +14,30 @@ from data_helper.csv_loader import iter_sequence
 from mercury.action_map.adapter import ActionMap
 from mercury.graph.core import Graph
 from mercury.latent.params import LatentParams
-from mercury.latent.state import init_latent_state, latent_step
+from mercury.latent.state import (
+    active_edge_ages,
+    active_node_ages,
+    bmu_memory_depth,
+    distribution_summary,
+    init_latent_state,
+    latent_step,
+)
 from mercury.memory.state import add_memory, init_mem, update_memory
 from mercury.sensory.params import SensoryParams
 from mercury.sensory.state import init_state, sensory_step, sensory_step_frozen
 
-from .algorithms.mercury.prepare import filter_mercury_dataset
 from .io_parquet import LoadedDataset, ParquetConfig, load_level_parquet
 from .save_results import write_bundle_parquet
 from .schemas_results import ResultBundleMeta, SourceDatasetRef
+
+
+def filter_mercury_dataset(*, dataset: LoadedDataset, valid_trajectories_only: bool) -> LoadedDataset:
+    from .algorithms.mercury.prepare import filter_mercury_dataset as _filter_mercury_dataset
+
+    return _filter_mercury_dataset(
+        dataset=dataset,
+        valid_trajectories_only=valid_trajectories_only,
+    )
 
 
 class ActionMapParamsConfig(BaseModel):
@@ -207,6 +222,84 @@ def _attribution_row_for_step(
     return row
 
 
+def _structural_metric_row_for_step(
+    *,
+    step: int,
+    latent_state: Any,
+    latent_bmu: int,
+    memory_length: int,
+) -> dict[str, Any]:
+    graph = latent_state.g
+    node_ages = active_node_ages(graph, step)
+    edge_ages = active_edge_ages(graph, step)
+    row: dict[str, Any] = {
+        "bmu_memory_depth": int(bmu_memory_depth(graph, latent_bmu, memory_length)),
+        "clone_created_count": int(getattr(latent_state, "last_clone_created_count", 0)),
+        "clone_created_cumulative": int(getattr(latent_state, "clone_created_count", 0)),
+        "edge_prune_count": int(getattr(latent_state, "last_edge_prune_count", 0)),
+        "edge_prune_cumulative": int(getattr(latent_state, "edge_prune_count", 0)),
+        "node_prune_count": int(getattr(latent_state, "last_node_prune_count", 0)),
+        "node_prune_cumulative": int(getattr(latent_state, "node_prune_count", 0)),
+        "node_age_distribution": node_ages.astype(np.int32, copy=False).tolist(),
+        "edge_age_distribution": edge_ages.astype(np.int32, copy=False).tolist(),
+    }
+    row.update(distribution_summary(node_ages, "node_age"))
+    row.update(distribution_summary(edge_ages, "edge_age"))
+    return row
+
+
+def _empty_structural_metric_arrays(length: int) -> dict[str, np.ndarray | list[list[int]]]:
+    return {
+        "bmu_memory_depth": np.zeros((length,), dtype=np.int32),
+        "clone_created_count": np.zeros((length,), dtype=np.int32),
+        "clone_created_cumulative": np.zeros((length,), dtype=np.int32),
+        "edge_prune_count": np.zeros((length,), dtype=np.int32),
+        "edge_prune_cumulative": np.zeros((length,), dtype=np.int32),
+        "node_prune_count": np.zeros((length,), dtype=np.int32),
+        "node_prune_cumulative": np.zeros((length,), dtype=np.int32),
+        "node_age_mean": np.zeros((length,), dtype=np.float32),
+        "node_age_median": np.zeros((length,), dtype=np.float32),
+        "node_age_std": np.zeros((length,), dtype=np.float32),
+        "node_age_q25": np.zeros((length,), dtype=np.float32),
+        "node_age_q75": np.zeros((length,), dtype=np.float32),
+        "node_age_q90": np.zeros((length,), dtype=np.float32),
+        "edge_age_mean": np.zeros((length,), dtype=np.float32),
+        "edge_age_median": np.zeros((length,), dtype=np.float32),
+        "edge_age_std": np.zeros((length,), dtype=np.float32),
+        "edge_age_q25": np.zeros((length,), dtype=np.float32),
+        "edge_age_q75": np.zeros((length,), dtype=np.float32),
+        "edge_age_q90": np.zeros((length,), dtype=np.float32),
+        "node_age_distribution": [[] for _ in range(length)],
+        "edge_age_distribution": [[] for _ in range(length)],
+    }
+
+
+def _structural_metric_columns(rows: list[dict[str, Any]], length: int) -> dict[str, Any]:
+    if not rows:
+        return _empty_structural_metric_arrays(length)
+    columns: dict[str, Any] = {}
+    keys = list(rows[0].keys())
+    int_keys = {
+        "bmu_memory_depth",
+        "clone_created_count",
+        "clone_created_cumulative",
+        "edge_prune_count",
+        "edge_prune_cumulative",
+        "node_prune_count",
+        "node_prune_cumulative",
+    }
+    list_keys = {"node_age_distribution", "edge_age_distribution"}
+    for key in keys:
+        values = [row[key] for row in rows[:length]]
+        if key in list_keys:
+            columns[key] = values
+        elif key in int_keys:
+            columns[key] = np.asarray(values, dtype=np.int32)
+        else:
+            columns[key] = np.asarray(values, dtype=np.float32)
+    return columns
+
+
 def run_latent(
     dataset_latent: LoadedDataset,
     sensory_params: SensoryParams,
@@ -220,7 +313,7 @@ def run_latent(
     show_progress: bool = False,
     progress_desc: Optional[str] = None,
     progress_callback: Any = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Graph, list[dict[str, float | int]]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Graph, list[dict[str, float | int]], list[dict[str, Any]]]:
     sensory_dataset = dataset_sensory or dataset_latent
     sensory_observations = sensory_dataset.observations
     sensory_actions = sensory_dataset.actions
@@ -281,6 +374,7 @@ def run_latent(
     latent_bmus: list[int] = []
     latent_node_counts: list[int] = []
     attribution_rows: list[dict[str, float | int]] = []
+    structural_metric_rows: list[dict[str, Any]] = []
 
     latent_iterator = iter_sequence(latent_observations, latent_actions, latent_collisions)
     if show_progress:
@@ -346,6 +440,14 @@ def run_latent(
                 attribution=getattr(latent_state, "last_bmu_attribution", None),
             )
         )
+        structural_metric_rows.append(
+            _structural_metric_row_for_step(
+                step=len(latent_bmus),
+                latent_state=latent_state,
+                latent_bmu=int(current_latent_bmu),
+                memory_length=memory_length,
+            )
+        )
         previous_latent_bmu = latent_state.prev_bmu
         if show_progress and hasattr(latent_iterator, "set_postfix"):
             latent_iterator.set_postfix(nodes=int(latent_state.g.n))
@@ -376,6 +478,7 @@ def run_latent(
         np.asarray(latent_node_counts, dtype=np.int32),
         latent_state.g,
         attribution_rows,
+        structural_metric_rows,
     )
 
 
@@ -478,7 +581,7 @@ def run_all_bundled(
             else None
         ),
     )
-    sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows = run_latent(
+    latent_result = run_latent(
         dataset_latent,
         config.sensory_params,
         config.latent_params,
@@ -491,6 +594,18 @@ def run_all_bundled(
         progress_desc="Mercury Latent",
         progress_callback=progress_callback,
     )
+    if len(latent_result) == 5:
+        sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows = latent_result
+        structural_metric_rows = []
+    else:
+        (
+            sensory_bmu,
+            latent_bmu,
+            latent_node_count,
+            latent_graph,
+            attribution_rows,
+            structural_metric_rows,
+        ) = latent_result
 
     length = min(
         int(ground_truth_bmu.shape[0]),
@@ -502,6 +617,7 @@ def run_all_bundled(
     sensory_bmu = sensory_bmu[:length]
     latent_bmu = latent_bmu[:length]
     latent_node_count = latent_node_count[:length]
+    structural_metric_columns = _structural_metric_columns(structural_metric_rows, length)
 
     source_ref = SourceDatasetRef(
         level=config.level,
@@ -556,6 +672,7 @@ def run_all_bundled(
             "sensory_bmu": sensory_bmu,
             "latent_bmu": latent_bmu,
             "latent_node_count": latent_node_count,
+            **structural_metric_columns,
         },
         meta=meta,
         embed_metadata_in_parquet=config.embed_metadata_in_parquet,

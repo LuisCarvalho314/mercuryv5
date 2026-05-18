@@ -109,6 +109,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--latent_max_age", type=int, default=18)
     parser.add_argument("--ambiguity_threshold", type=int, default=10)
     parser.add_argument("--ambiguity_decay", type=float, default=0.99)
+    parser.add_argument("--ambiguity_counter_mode", type=str, default="action", choices=["action", "node"])
     parser.add_argument("--trace_decay", type=float, default=0.99)
     parser.add_argument("--lambda_trace", type=float, default=0.05)
     parser.add_argument("--weight_memory", type=float, default=0.6)

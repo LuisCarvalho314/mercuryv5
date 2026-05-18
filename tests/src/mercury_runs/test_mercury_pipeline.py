@@ -103,12 +103,15 @@ def test_run_all_bundled_accepts_mercury_valid_trajectory_flag(monkeypatch, tmp_
     assert result == tmp_path / "states.parquet"
     assert captured["filters"] == 2
     assert captured["valid_trajectories_only"] is True
-    assert list(captured["bundle_writes"]["states"]) == [
+    assert list(captured["bundle_writes"]["states"])[:4] == [
         "cartesian_proxy_bmu",
         "sensory_bmu",
         "latent_bmu",
         "latent_node_count",
     ]
+    assert "bmu_memory_depth" in captured["bundle_writes"]["states"]
+    assert "node_age_distribution" in captured["bundle_writes"]["states"]
+    assert "edge_age_distribution" in captured["bundle_writes"]["states"]
     assert list(captured["bundle_writes"]["attribution"]) == [
         "step",
         "latent_bmu",
@@ -196,8 +199,11 @@ def test_run_all_bundled_can_split_raw_sensory_from_valid_latent(monkeypatch, tm
         )
 
     def _fake_write_bundle_parquet(**kwargs):
+        def _to_list(value):
+            return value.tolist() if hasattr(value, "tolist") else list(value)
+
         captured.setdefault("bundle_rows", {})[kwargs["bundle_name"]] = {
-            key: value.tolist() for key, value in kwargs["columns"].items()
+            key: _to_list(value) for key, value in kwargs["columns"].items()
         }
         return tmp_path / f"{kwargs['bundle_name']}.parquet"
 
@@ -227,12 +233,17 @@ def test_run_all_bundled_can_split_raw_sensory_from_valid_latent(monkeypatch, tm
     assert captured["sensory_rows"] == 3
     assert captured["latent_rows"] == 3
     assert captured["latent_valid_only"] is True
-    assert captured["bundle_rows"]["states"] == {
+    assert {
+        key: captured["bundle_rows"]["states"][key]
+        for key in ["cartesian_proxy_bmu", "sensory_bmu", "latent_bmu", "latent_node_count"]
+    } == {
         "cartesian_proxy_bmu": [100, 101, 102],
         "sensory_bmu": [200, 201, 202],
         "latent_bmu": [300, 300, 302],
         "latent_node_count": [1, 1, 2],
     }
+    assert captured["bundle_rows"]["states"]["clone_created_cumulative"] == [0, 0, 0]
+    assert captured["bundle_rows"]["states"]["node_age_distribution"] == [[], [], []]
     assert captured["bundle_rows"]["attribution"]["latent_bmu"] == [300]
 
 
@@ -331,7 +342,7 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
         parquet_path=Path("dummy.parquet"),
     )
 
-    sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows = run_latent(
+    sensory_bmu, latent_bmu, latent_node_count, latent_graph, attribution_rows, structural_metric_rows = run_latent(
         dataset,
         sensory_params=object(),
         latent_params=object(),
@@ -345,6 +356,8 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
     assert latent_node_count.tolist() == [2, 2, 2]
     assert len(attribution_rows) == 3
     assert attribution_rows[0]["selected_memory_drive_weighted"] == 1.0
+    assert len(structural_metric_rows) == 3
+    assert structural_metric_rows[0]["bmu_memory_depth"] == 0
     assert action_map.step_calls == 3
     assert action_map.predict_calls == 3
 

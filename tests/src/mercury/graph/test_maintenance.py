@@ -85,6 +85,23 @@ def test_mercury_age_maintenance_prunes_and_compacts():
     assert int(g_after.edge_features["age"][0, 1, 0]) == 0
 
 
+def test_mercury_age_maintenance_can_return_prune_stats():
+    g = make_graph(n=3)
+    g.register_edge_feature("edge_created_at", dim=1, dtype=np.int32, init_value=-1)
+    p = MaintenanceParams(max_age=2)
+
+    g.add_edge(0, 1, edge_feat={"age": np.array([0], np.int32), "edge_created_at": np.array([0], np.int32)})
+    g.add_edge(0, 2, edge_feat={"age": np.array([1], np.int32), "edge_created_at": np.array([0], np.int32)})
+    g.add_edge(1, 0, edge_feat={"age": np.array([0], np.int32), "edge_created_at": np.array([0], np.int32)})
+
+    g_after, old_to_new, stats = age_maintenance(u=0, v=1, g=g, p=p, return_stats=True)
+
+    assert stats.edge_prune_count == 1
+    assert stats.node_prune_count == 1
+    assert np.array_equal(old_to_new, np.array([0, 1, -1], np.int32))
+    assert g_after.n == 2
+
+
 def test_mercury_age_maintenance_no_prune_when_under_threshold():
     g = make_graph(n=3)
     p = MaintenanceParams(max_age=1000)

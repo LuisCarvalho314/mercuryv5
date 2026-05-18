@@ -1,32 +1,3 @@
-from .algorithms import (
-    CSCGConfig,
-    MercuryConfig,
-    POCMLConfig,
-    compute_cscg_paper_precision,
-    compute_cscg_precision,
-    compute_mercury_paper_precision,
-    compute_mercury_precision,
-    compute_pocml_paper_precision,
-    compute_pocml_precision,
-    evaluate_pocml_sequence,
-    generate_mercury_datasets,
-    run_cscg,
-    run_mercury,
-    run_pocml,
-)
-from .application import execute_pipeline_run, run_single, run_study
-from .domain import (
-    ArtifactLayout,
-    PIPELINE_SCHEMA_VERSION,
-    RunConfigModel,
-    RunIdentity,
-    RunStatusModel,
-    StudyDefaults,
-    StudyGridConfig,
-    SubsystemStatus,
-)
-from .interfaces import main, parse_arguments
-
 __all__ = [
     "ArtifactLayout",
     "CSCGConfig",
@@ -56,3 +27,47 @@ __all__ = [
     "run_single",
     "run_study",
 ]
+
+
+def __getattr__(name: str):
+    if name in {
+        "CSCGConfig",
+        "MercuryConfig",
+        "POCMLConfig",
+        "compute_cscg_paper_precision",
+        "compute_cscg_precision",
+        "compute_mercury_paper_precision",
+        "compute_mercury_precision",
+        "compute_pocml_paper_precision",
+        "compute_pocml_precision",
+        "evaluate_pocml_sequence",
+        "generate_mercury_datasets",
+        "run_cscg",
+        "run_mercury",
+        "run_pocml",
+    }:
+        from . import algorithms
+
+        return getattr(algorithms, name)
+    if name in {"execute_pipeline_run", "run_single", "run_study"}:
+        from . import application
+
+        return getattr(application, name)
+    if name in {
+        "ArtifactLayout",
+        "PIPELINE_SCHEMA_VERSION",
+        "RunConfigModel",
+        "RunIdentity",
+        "RunStatusModel",
+        "StudyDefaults",
+        "StudyGridConfig",
+        "SubsystemStatus",
+    }:
+        from . import domain
+
+        return getattr(domain, name)
+    if name in {"main", "parse_arguments"}:
+        from . import interfaces
+
+        return getattr(interfaces, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

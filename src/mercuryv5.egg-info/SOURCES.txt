@@ -57,6 +57,8 @@ src/mercury_runs/algorithms/pocml/train.py
 src/mercury_runs/analysis/__init__.py
 src/mercury_runs/analysis/bmu_attribution_plots.py
 src/mercury_runs/analysis/graph_plots.py
+src/mercury_runs/analysis/plotting.py
+src/mercury_runs/analysis/study_dataset.py
 src/mercury_runs/analysis/study_history_plots.py
 src/mercury_runs/application/__init__.py
 src/mercury_runs/application/run_service.py
@@ -64,6 +66,7 @@ src/mercury_runs/application/status_service.py
 src/mercury_runs/application/study_service.py
 src/mercury_runs/domain/__init__.py
 src/mercury_runs/domain/models.py
+src/mercury_runs/domain/plotting_schema.py
 src/mercury_runs/infrastructure/__init__.py
 src/mercury_runs/infrastructure/computational.py
 src/mercury_runs/infrastructure/paper_precision.py

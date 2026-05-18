@@ -23,6 +23,12 @@ class HasMaxAge(Protocol):
 
 
 @dataclass(frozen=True)
+class MaintenanceStats:
+    edge_prune_count: int = 0
+    node_prune_count: int = 0
+
+
+@dataclass(frozen=True)
 class MaintenanceParams:
     """
     Hyperparameters for edge-age maintenance.
@@ -43,7 +49,8 @@ def age_maintenance(
     g: Graph,
     p: HasMaxAge,
     exclude: Optional[Iterable[int]] = None,
-) -> Tuple[Graph, Array]:
+    return_stats: bool = False,
+) -> Tuple[Graph, Array] | Tuple[Graph, Array, MaintenanceStats]:
     """
     Age edges from node `u`, prune old edges, drop isolated nodes.
 
@@ -61,7 +68,7 @@ def age_maintenance(
     assert "age" in g.edge_features, "Graph has no 'age' edge feature"
 
     update_ages(u, v, g)
-    prune_old_edges(g, p)
+    edge_prune_count = prune_old_edges(g, p)
 
     # normalize exclude
     if exclude is None:
@@ -76,7 +83,13 @@ def age_maintenance(
 
     keep_nodes = np.asarray(sorted(base_keep), dtype=np.int32)
 
-    return remove_lonely_nodes(g, exclude=keep_nodes)
+    g_after, mapping = remove_lonely_nodes(g, exclude=keep_nodes)
+    if return_stats:
+        return g_after, mapping, MaintenanceStats(
+            edge_prune_count=int(edge_prune_count),
+            node_prune_count=int(np.count_nonzero(mapping == -1)),
+        )
+    return g_after, mapping
 
 
 
@@ -127,7 +140,7 @@ def update_ages(u: int, v: int, g: Graph) -> None:
         age[u, v, :] = 0
 
 
-def prune_old_edges(g: Graph, p: HasMaxAge) -> None:
+def prune_old_edges(g: Graph, p: HasMaxAge) -> int:
     """
     Remove edges whose age is at or above the threshold.
 
@@ -146,8 +159,7 @@ def prune_old_edges(g: Graph, p: HasMaxAge) -> None:
 
     Returns
     -------
-    None
-        Modifies `g` in place.
+        Number of edges pruned. Modifies `g` in place.
 
     Raises
     ------
@@ -157,10 +169,16 @@ def prune_old_edges(g: Graph, p: HasMaxAge) -> None:
     age = g.edge_features["age"]               # (n, n, E)
     prune_mask = age[..., 0] >= int(p.max_age) # (n, n)
     if not np.any(prune_mask):
-        return
+        return 0
+    edge_prune_count = int(np.count_nonzero(prune_mask & (g.adj != 0.0)))
     g.adj[prune_mask] = 0.0
     age[prune_mask, :] = 0
     g.edge_features["age"] = age
+    if "edge_created_at" in g.edge_features:
+        created_at = g.edge_features["edge_created_at"]
+        created_at[prune_mask, :] = -1
+        g.edge_features["edge_created_at"] = created_at
+    return edge_prune_count
 
 
 def remove_lonely_nodes(

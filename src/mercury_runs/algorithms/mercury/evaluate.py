@@ -253,11 +253,13 @@ def compute_mercury_paper_precision_metrics(
     )
     metrics: dict[str, Any] = {
         "sensory_precision": sensory_details["sensory_precision"],
+        "sensory_recall": sensory_details["sensory_recall"],
         "sensory_evaluation_steps": sensory_details["evaluation_steps"],
         "sensory_inferred_state_count": sensory_details["inferred_state_count"],
         "sensory_ground_truth_state_count": sensory_details["ground_truth_state_count"],
         "sensory_cooccurrence_matrix": sensory_details["cooccurrence_matrix"],
         "latent_precision": latent_details["latent_precision"],
+        "latent_recall": latent_details["latent_recall"],
         "latent_evaluation_steps": latent_details["evaluation_steps"],
         "latent_inferred_state_count": latent_details["inferred_state_count"],
         "latent_ground_truth_state_count": latent_details["ground_truth_state_count"],

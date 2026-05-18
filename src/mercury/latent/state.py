@@ -36,6 +36,12 @@ class LatentState:
     preds: List = field(default_factory=list)
     prev_activations : np.ndarray | None = None
     last_bmu_attribution: Any | None = None
+    clone_created_count: int = 0
+    edge_prune_count: int = 0
+    node_prune_count: int = 0
+    last_clone_created_count: int = 0
+    last_edge_prune_count: int = 0
+    last_node_prune_count: int = 0
 
     @property
     def mem_adj(self) -> Array:
@@ -69,7 +75,7 @@ class _LatentBMUComputation:
     updated_trace: np.ndarray
     attribution: LatentBMUAttribution
 
-def _register_features(g: Graph, mem_len: int, n_actions: int) -> Graph:
+def _register_features(g: Graph, mem_len: int, n_actions: int = 1) -> Graph:
     """
     Register required features.
 
@@ -87,8 +93,11 @@ def _register_features(g: Graph, mem_len: int, n_actions: int) -> Graph:
     g.register_node_feature("activation", 1, init_value=0)
     g.register_node_feature("mem_adj", mem_len, init_value=0)
     g.register_node_feature("ambiguity_score", n_actions, init_value=0)
+    g.register_node_feature("ambiguity_score_node", 1, init_value=0)
+    g.register_node_feature("node_created_at", 1, dtype=np.int32, init_value=0)
     g.register_edge_feature("age", 1, dtype=np.int32, init_value=0)
     g.register_edge_feature("action", 1, dtype=np.int32, init_value=0)
+    g.register_edge_feature("edge_created_at", 1, dtype=np.int32, init_value=-1)
     return g
 
 
@@ -106,6 +115,38 @@ def init_latent_state(ms: MemoryState, n_actions: int = 1) -> LatentState:
     return LatentState(g, mapping = np.arange(g.n))
 
 
+def _ambiguity_counter_mode(cfg: LatentParams) -> str:
+    mode = str(getattr(cfg, "ambiguity_counter_mode", "action")).strip().lower()
+    if mode not in {"action", "node"}:
+        raise ValueError(f"Unsupported ambiguity_counter_mode {mode!r}; expected 'action' or 'node'.")
+    return mode
+
+
+def _update_ambiguity_counter(g: Graph, *, prev_bmu: int, action_bmu: int, preds_size: int, cfg: LatentParams) -> float:
+    mode = _ambiguity_counter_mode(cfg)
+    if mode == "node":
+        ambiguity_score = float(g.node_features["ambiguity_score_node"][prev_bmu])
+        ambiguity_score = float(cfg.ambiguity_decay) * ambiguity_score
+        if preds_size > 1:
+            ambiguity_score += 1.0
+        g.node_features["ambiguity_score_node"][prev_bmu] = ambiguity_score
+        return ambiguity_score
+
+    ambiguity_score = float(g.node_features["ambiguity_score"][prev_bmu, action_bmu])
+    ambiguity_score = float(cfg.ambiguity_decay) * ambiguity_score
+    if preds_size > 1:
+        ambiguity_score += 1.0
+    g.node_features["ambiguity_score"][prev_bmu, action_bmu] = ambiguity_score
+    return ambiguity_score
+
+
+def _reset_ambiguity_counter(g: Graph, *, prev_bmu: int, action_bmu: int, cfg: LatentParams) -> None:
+    if _ambiguity_counter_mode(cfg) == "node":
+        g.node_features["ambiguity_score_node"][prev_bmu] = 0
+    else:
+        g.node_features["ambiguity_score"][prev_bmu, action_bmu] = 0
+
+
 
 def _add_node(
     g: Graph,
@@ -113,6 +154,7 @@ def _add_node(
     u: int,
     t: int = 0,
     mem_adj: Array | None = None,
+    created_step: int = 0,
 ) -> Graph:
     """
     Add a new latent node corresponding to memory unit u at timestep t.
@@ -147,10 +189,13 @@ def _add_node(
                 if g.node_features["ambiguity_score"].ndim > 1
                 else np.array(0.0, dtype=np.float32)
             ),
+            "ambiguity_score_node": np.array(0.0, dtype=np.float32),
+            "node_created_at": np.array(int(created_step), dtype=np.int32),
         },
         edge_defaults_for_new_node={
             "age": np.array([0], dtype=np.int32),
             "action": np.array([0], dtype=np.int32),
+            "edge_created_at": np.array([-1], dtype=np.int32),
         },
     )
 
@@ -1396,15 +1441,21 @@ def _update_edge(
     action_bmu: int,
     beta: float,
     gaussian_shape: float,
+    created_step: int = 0,
 ) -> Graph:
     dist = float(np.linalg.norm(prior_row - observed_row))
     sim = float(_calc_activation(dist, gaussian_shape))
     current = float(g.adj[u, v])
     new_w = current + float(beta) * (sim - current)
+    edge_was_absent = current == 0.0
+
+    edge_feat = {"action": np.array([int(action_bmu)], dtype=np.int32)}
+    if "edge_created_at" in g.edge_features and edge_was_absent:
+        edge_feat["edge_created_at"] = np.array([int(created_step)], dtype=np.int32)
 
     g.add_edge(
         u, v, weight=new_w,
-        edge_feat={"action": np.array([int(action_bmu)], dtype=np.int32)},
+        edge_feat=edge_feat,
     )
     return g
 
@@ -1487,13 +1538,15 @@ def _update_edges_with_actions(g: Graph,
                                action_bmu: int,
                                action_map: ActionMap,
                                gaussian_shape: int,
-                               beta : float) -> Graph:
+                               beta : float,
+                               created_step: int = 0) -> Graph:
     observed_row = np.asarray(action_map.state.codebook[action_bmu],
                               np.float32)
     prior_row = _edge_action_row(g, prev_bmu, bmu, am=action_map)
     g = _update_edge(
         g, prev_bmu, bmu, prior_row, observed_row,
         action_bmu=action_bmu, beta=beta, gaussian_shape=gaussian_shape,
+        created_step=created_step,
     )
     return g
 
@@ -1585,17 +1638,18 @@ def _resolve_prev_with_memory_replay(
     max_replay: int,
     cfg: LatentParams,
     preds: Array,
-) -> tuple[Graph, int, int]:
+) -> tuple[Graph, int, int, int]:
 
 
 
 
 
     replay_state = deepcopy(state)
+    clone_created_count = 0
 
     L = int(ms.length)
     if state.step_idx < 2*L:
-        return replay_state.g, int(prev_bmu), bmu
+        return replay_state.g, int(prev_bmu), bmu, clone_created_count
 
     am = list(action_mem)[-L:]              # oldest → newest
     mem_vec = np.asarray(mem_vec[-2*L:])
@@ -1621,8 +1675,14 @@ def _resolve_prev_with_memory_replay(
             # if nov >= 0.35:
             if True:
                 g_new, bmu_refined, created = add_temporal_edge_at_first_gap_clone(
-                    replay_state.g, replay_mem, int(prev_bmu), preds
+                    replay_state.g,
+                    replay_mem,
+                    int(prev_bmu),
+                    preds,
+                    created_step=int(state.step_idx),
                 )
+                if created:
+                    clone_created_count += 1
                 # cfg.ambiguity_threshold += 1
                 replay_state.g = g_new
                 _align_prev_activations_to_graph(replay_state)
@@ -1684,13 +1744,14 @@ def _resolve_prev_with_memory_replay(
                 replay_state.g = _update_edges_with_actions(
                     replay_state.g, prev_bmu=prev_bmu, bmu=bmu,
                     action_bmu=action_bmu, action_map=action_map,
-                    gaussian_shape=cfg.gaussian_shape, beta=cfg.action_lr
+                    gaussian_shape=cfg.gaussian_shape, beta=cfg.action_lr,
+                    created_step=int(state.step_idx),
                 )
                 # print(bmus)
 
     # if bmu_refined not in seen_bmus:
     #     raise EnvironmentError("added bmu not seen in replay")
-    return replay_state.g, int(prev_bmu), bmu
+    return replay_state.g, int(prev_bmu), bmu, clone_created_count
 
 
 
@@ -1718,7 +1779,8 @@ def opposite_actions(action_map: ActionMap, action_mem: List[int] ) -> bool:
 
 
 def add_temporal_edge_at_first_gap_clone(g: Graph, ms: MemoryState, v: int,
-                                         preds: Array
+                                         preds: Array,
+                                         created_step: int = 0,
                                          ) -> tuple[Graph, int, bool]:
     """
     Oldest-first. Create a NEW node that extends v's mem_adj at the first zero column.
@@ -1769,8 +1831,78 @@ def add_temporal_edge_at_first_gap_clone(g: Graph, ms: MemoryState, v: int,
 
     # spawn new node with this mem_adj and set the temporal bit again via API
     new_idx = g.n
-    g = _add_node(g, ms, u=u, t=t0, mem_adj=row)    # _add_node will also set (u,t0)
+    g = _add_node(
+        g,
+        ms,
+        u=u,
+        t=t0,
+        mem_adj=row,
+        created_step=int(created_step),
+    )    # _add_node will also set (u,t0)
     return g, int(new_idx), True
+
+
+def bmu_memory_depth(g: Graph, bmu: int, memory_length: int) -> int:
+    if not hasattr(g, "node_features") or "mem_adj" not in g.node_features or g.n == 0:
+        return 0
+    bmu = int(bmu)
+    if not (0 <= bmu < g.n):
+        return 0
+    memory_length = int(memory_length)
+    if memory_length <= 0:
+        return 0
+    row = np.asarray(g.node_features["mem_adj"][bmu], dtype=np.float32).reshape(-1)
+    if row.size % memory_length != 0:
+        raise ValueError(
+            f"mem_adj width {row.size} not divisible by memory_length={memory_length}"
+        )
+    matrix = row.reshape(row.size // memory_length, memory_length)
+    active_lags = np.flatnonzero(np.any(matrix > 0.0, axis=0))
+    return int(active_lags[-1]) if active_lags.size else 0
+
+
+def active_node_ages(g: Graph, timestep: int) -> np.ndarray:
+    if not hasattr(g, "node_features") or "node_created_at" not in g.node_features or g.n == 0:
+        return np.asarray([], dtype=np.int32)
+    created_at = np.asarray(g.node_features["node_created_at"][: g.n], dtype=np.int32)
+    return np.maximum(int(timestep) - created_at, 0).astype(np.int32, copy=False)
+
+
+def active_edge_ages(g: Graph, timestep: int) -> np.ndarray:
+    if (
+        not hasattr(g, "edge_features")
+        or not hasattr(g, "adj")
+        or "edge_created_at" not in g.edge_features
+        or g.n == 0
+    ):
+        return np.asarray([], dtype=np.int32)
+    edge_exists = np.asarray(g.adj[: g.n, : g.n] != 0.0)
+    created_at = np.asarray(g.edge_features["edge_created_at"][: g.n, : g.n, 0], dtype=np.int32)
+    valid = edge_exists & (created_at >= 0)
+    if not np.any(valid):
+        return np.asarray([], dtype=np.int32)
+    return np.maximum(int(timestep) - created_at[valid], 0).astype(np.int32, copy=False)
+
+
+def distribution_summary(values: np.ndarray, prefix: str) -> dict[str, float]:
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_median": 0.0,
+            f"{prefix}_std": 0.0,
+            f"{prefix}_q25": 0.0,
+            f"{prefix}_q75": 0.0,
+            f"{prefix}_q90": 0.0,
+        }
+    return {
+        f"{prefix}_mean": float(np.mean(values)),
+        f"{prefix}_median": float(np.median(values)),
+        f"{prefix}_std": float(np.std(values)),
+        f"{prefix}_q25": float(np.quantile(values, 0.25)),
+        f"{prefix}_q75": float(np.quantile(values, 0.75)),
+        f"{prefix}_q90": float(np.quantile(values, 0.90)),
+    }
 
 
 def first_zero_col_node(g: Graph, ms: MemoryState, node_idx: int) -> int | None:
@@ -1854,6 +1986,9 @@ def latent_step(
     state_mem: List[int]
 ) -> tuple[LatentState, int, List[int]]:
     g = state.g
+    state.last_clone_created_count = 0
+    state.last_edge_prune_count = 0
+    state.last_node_prune_count = 0
 
     bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
 
@@ -1899,11 +2034,13 @@ def latent_step(
         # if is_current_aliased:
         #     print(True)
 
-        ambiguity_score = state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu]
-        ambiguity_score = float(cfg.ambiguity_decay) * float(ambiguity_score)
-        if preds.size > 1:
-            ambiguity_score += 1.0
-        state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu] = ambiguity_score
+        ambiguity_score = _update_ambiguity_counter(
+            state.g,
+            prev_bmu=int(state.prev_bmu),
+            action_bmu=int(action_bmu),
+            preds_size=int(preds.size),
+            cfg=cfg,
+        )
 
         if ambiguity_score > cfg.ambiguity_threshold:
             # print(f"ALIASED {state.prev_bmu}")
@@ -1920,7 +2057,12 @@ def latent_step(
             for i in range(g.n):
                 g = _remove_aliased_connections(g, i, resolved_prev)
 
-            state.g.node_features["ambiguity_score"][state.prev_bmu, action_bmu] = 0
+            _reset_ambiguity_counter(
+                state.g,
+                prev_bmu=int(state.prev_bmu),
+                action_bmu=int(action_bmu),
+                cfg=cfg,
+            )
 
             # g = _remove_aliased_connections(
             #     g,
@@ -1932,7 +2074,7 @@ def latent_step(
             state.g = g
 
 
-            g, resolved_prev, bmu_now = _resolve_prev_with_memory_replay(
+            g, resolved_prev, bmu_now, clone_created_count = _resolve_prev_with_memory_replay(
                 state=state,
                 ms=ms,
                 mem_vec=mem_vec,
@@ -1945,6 +2087,8 @@ def latent_step(
                 cfg=cfg,
                 preds=preds,
             )
+            state.last_clone_created_count += int(clone_created_count)
+            state.clone_created_count += int(clone_created_count)
 
             mapping = np.arange(g.n, dtype=np.int32)
 
@@ -1962,13 +2106,23 @@ def latent_step(
             action_bmu=action_bmu,
             action_map=action_map,
             gaussian_shape=cfg.gaussian_shape,
-            beta = cfg.action_lr
+            beta = cfg.action_lr,
+            created_step=int(state.step_idx),
         )
         #
         if state.step_idx % 1 == 0:
-            g, mapping = age_maintenance(resolved_prev,bmu_now,g,cfg,
-                                         exclude=np.arange(
-                                             ms.sensory_n_nodes))
+            g, mapping, maintenance_stats = age_maintenance(
+                resolved_prev,
+                bmu_now,
+                g,
+                cfg,
+                exclude=np.arange(ms.sensory_n_nodes),
+                return_stats=True,
+            )
+            state.last_edge_prune_count += int(maintenance_stats.edge_prune_count)
+            state.last_node_prune_count += int(maintenance_stats.node_prune_count)
+            state.edge_prune_count += int(maintenance_stats.edge_prune_count)
+            state.node_prune_count += int(maintenance_stats.node_prune_count)
 
 
             bmu_now = mapping[bmu_now]

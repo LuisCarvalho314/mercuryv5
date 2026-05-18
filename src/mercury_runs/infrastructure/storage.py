@@ -374,6 +374,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
             "max_age": args.latent_max_age,
             "ambiguity_threshold": args.ambiguity_threshold,
             "ambiguity_decay": args.ambiguity_decay,
+            "ambiguity_counter_mode": str(getattr(args, "ambiguity_counter_mode", "action")),
             "trace_decay": args.trace_decay,
             "lambda_trace": args.lambda_trace,
             "weight_memory": args.weight_memory,
