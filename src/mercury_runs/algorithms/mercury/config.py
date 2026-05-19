@@ -40,5 +40,6 @@ class MercuryConfig(BaseModel):
     structure_metrics_scope: str = "exact_level"
     structure_metrics_ground_truth_source: str = "empirical_walks"
     run_parameters: dict[str, Any] = Field(default_factory=dict)
+    random_start: bool = True
     embed_metadata_in_parquet: bool = True
     notes: Optional[str] = None

@@ -58,7 +58,6 @@ src/mercury_runs/analysis/__init__.py
 src/mercury_runs/analysis/bmu_attribution_plots.py
 src/mercury_runs/analysis/graph_plots.py
 src/mercury_runs/analysis/plotting.py
-src/mercury_runs/analysis/study_dataset.py
 src/mercury_runs/analysis/study_history_plots.py
 src/mercury_runs/application/__init__.py
 src/mercury_runs/application/run_service.py

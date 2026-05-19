@@ -369,7 +369,7 @@ def generate_data(
     rand_prob: float = 0.3,
     num_steps: int = 20_000,
     valid_trajectories_only: bool = False,
-    random_start: bool = False,
+    random_start: bool = True,
     output_root: str | Path = "../../datasets",
     reuse_existing: bool = True,
 ) -> dict[str, str]:

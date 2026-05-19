@@ -28,65 +28,29 @@ from ..infrastructure.progress import load_progress, load_progress_tracks
 
 
 WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
-    "baseline": {
-        "weight_memory": 0.4,
-        "weight_undirected": 0.05,
-        "weight_base": 0.15,
-        "weight_action": 0.35,
-    },
-    "no_memory": {
-        "weight_memory": 0.0,
-        "weight_undirected": 0.333333,
-        "weight_base": 0.333333,
-        "weight_action": 0.333334,
-    },
-    "no_undirected": {
-        "weight_memory": 0.5,
-        "weight_undirected": 0.0,
-        "weight_base": 0.15,
-        "weight_action": 0.35,
-    },
-    "no_base": {
-        "weight_memory": 0.5,
-        "weight_undirected": 0.0,
-        "weight_base": 0.0,
-        "weight_action": 0.25,
-    },
-    "no_action": {
-        "weight_memory": 0.5,
-        "weight_undirected": 0.25,
-        "weight_base": 0.25,
-        "weight_action": 0.0,
-    },
-    "memory_dominant_action_only": {
+    "memory_dominant_action_only_80": {
         "weight_memory": 0.8,
         "weight_undirected": 0.0,
         "weight_base": 0.0,
         "weight_action": 0.20,
     },
-    "memory_dominant_action_base": {
-        "weight_memory": 0.8,
+    "memory_dominant_action_only_90": {
+        "weight_memory": 0.9,
         "weight_undirected": 0.0,
-        "weight_base": 0.05,
-        "weight_action": 0.15,
+        "weight_base": 0.0,
+        "weight_action": 0.10,
     },
-    "undirected_dominant": {
-        "weight_memory": 0.1,
-        "weight_undirected": 0.7,
-        "weight_base": 0.1,
-        "weight_action": 0.1,
+    "memory_dominant_action_only_95": {
+        "weight_memory": 0.95,
+        "weight_undirected": 0.0,
+        "weight_base": 0.0,
+        "weight_action": 0.05,
     },
-    "base_dominant": {
-        "weight_memory": 0.1,
-        "weight_undirected": 0.1,
-        "weight_base": 0.7,
-        "weight_action": 0.1,
-    },
-    "action_dominant": {
-        "weight_memory": 0.1,
-        "weight_undirected": 0.1,
-        "weight_base": 0.1,
-        "weight_action": 0.7,
+    "memory_dominant_action_only_99": {
+        "weight_memory": 0.99,
+        "weight_undirected": 0.0,
+        "weight_base": 0.0,
+        "weight_action": 0.01,
     },
 	"only_memory": {
 		"weight_memory": 1.0,

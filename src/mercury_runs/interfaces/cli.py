@@ -123,6 +123,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--am_sigma", type=float, default=0.0)
     parser.add_argument("--am_key", type=int, default=0)
     parser.add_argument("--am_identity_for_one_hot", nargs="?", const=True, default=False, type=strtobool)
+    parser.add_argument(
+        "--random_start",
+        nargs="?",
+        const=True,
+        default=True,
+        type=strtobool,
+    )
     return parser.parse_args()
 
 

@@ -23,6 +23,7 @@ def generate_mercury_datasets(*, config: Any) -> Any:
             valid_trajectories_only=bool(config.valid_trajectories_only),
             output_root=datasets_root,
             reuse_existing=bool(config.reuse_existing_dataset),
+            random_start=bool(config.random_start),
         )
 
 
