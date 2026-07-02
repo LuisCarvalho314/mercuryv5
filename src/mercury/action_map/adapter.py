@@ -90,6 +90,33 @@ class ActionMap:
         codebook = np.eye(dim, dtype=np.float32)
         return cls(p, SOMState(codebook=codebook, bmu=0), identity_mapping=True)
 
+    def to_npz(self, path: str) -> None:
+        np.savez_compressed(
+            path,
+            n_codebook=np.asarray(self.params.n_codebook, dtype=np.int64),
+            dim=np.asarray(self.params.dim, dtype=np.int64),
+            lr=np.asarray(self.params.lr, dtype=np.float64),
+            sigma=np.asarray(self.params.sigma, dtype=np.float64),
+            codebook=np.asarray(self.state.codebook),
+            bmu=np.asarray(self.state.bmu, dtype=np.int64),
+            identity_mapping=np.asarray(bool(self.identity_mapping)),
+        )
+
+    @classmethod
+    def from_npz(cls, path: str) -> "ActionMap":
+        payload = np.load(path, allow_pickle=False)
+        params = SOMParams(
+            n_codebook=int(payload["n_codebook"]),
+            dim=int(payload["dim"]),
+            lr=float(payload["lr"]),
+            sigma=float(payload["sigma"]),
+        )
+        state = SOMState(
+            codebook=np.asarray(payload["codebook"], dtype=np.float32),
+            bmu=int(payload["bmu"]),
+        )
+        return cls(params=params, state=state, identity_mapping=bool(payload["identity_mapping"]))
+
     # ---------- API ----------
 
     def step(self, action: Array) -> Tuple[int, Array]:

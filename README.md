@@ -362,6 +362,22 @@ CLI options:
 
 When enabled, single runs log one W&B run with validated config, subsystem status, Mercury precision stats, native baseline metrics, and current-run artifacts only.
 Paper-style fixed-map precision is opt-in. Use `--paper_precision_mode final` for one post-training evaluation or `--paper_precision_mode per_iteration` to record training-time history. Mercury interprets `per_iteration` as step-interval evaluation along its online pass; CSCG and POCML use their native iteration units. The evaluation workload is configurable with `--paper_precision_num_walks` and `--paper_precision_walk_length`. When paper precision is enabled, `metrics/<method>/*_precision.png` visualizes paper precision; the rolling precision diagnostic remains in `*_precision.parquet`.
+
+Structure metrics compare learned graph connectivity against ground-truth transition structure after aligning learned nodes to ground-truth states. The mean total variation metric uses the learned adjacency or transition tensor, not consecutive decoded-state counts alone. Given a learned adjacency `W_hat`, dominant alignment `phi`, and learned-state occupancy `mu` on the evaluation walks, the aligned learned transition weight is:
+
+```text
+C_hat_aligned[i, j] =
+  sum_{u: phi(u)=i} mu[u] / sum_{v: phi(v)=i} mu[v]
+    * sum_{w: phi(w)=j} W_hat[u, w]
+```
+
+The ground-truth transition weight `C_gt` is either the empirical evaluation-walk transition count or the configured maze-topology support. Both matrices are row-normalized before TV is averaged across ground-truth states:
+
+```text
+TV = mean_i 0.5 * sum_j |P_hat_aligned(j | i) - P_gt(j | i)|
+```
+
+The action-conditioned variant repeats the same aligned projection over action-labelled learned graph edges or CSCG transition tensors, then averages TV over ground-truth state-action rows with valid ground-truth transitions.
 In study mode, each worker run logs its own W&B run and the parent process logs one aggregate study run.
 
 If W&B is not installed, runs continue and emit a warning instead of failing.

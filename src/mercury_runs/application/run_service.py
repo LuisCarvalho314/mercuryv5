@@ -6,12 +6,31 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+import numpy as np
+
 from ..algorithms.cscg import CSCGConfig, run_cscg
+from ..algorithms.cscg.evaluate import compute_cscg_paper_precision_metrics_from_model, write_cscg_paper_precision_payload
+from ..algorithms.cscg.prepare import import_cscg_module
 from ..algorithms.mercury import MercuryConfig, run_mercury
+from ..algorithms.mercury.evaluate import compute_mercury_paper_precision_metrics, write_mercury_paper_precision_payload
 from ..algorithms.mercury.api import summarize_mercury_run
+from ..algorithms.mercury_cscg_hybrid import MercuryCSCGHybridConfig, run_mercury_cscg_hybrid
 from ..algorithms.pocml import POCMLConfig, run_pocml
+from ..algorithms.sensory import (
+    SensoryConfig,
+    compute_sensory_paper_precision_metrics,
+    run_sensory,
+    write_sensory_paper_precision_payload,
+)
 from ..analysis import generate_bmu_attribution_plots, generate_method_graph_plots
 from ..domain.models import ArtifactLayout, RunStatusModel
+from ..infrastructure.paper_precision import exact_cartesian_state_ids_for_level
+from ..infrastructure.paper_precision_snapshots import (
+    list_paper_precision_snapshots,
+    load_cscg_paper_precision_snapshot,
+    load_mercury_paper_precision_snapshot,
+    load_sensory_paper_precision_snapshot,
+)
 from ..infrastructure import (
     args_from_config,
     artifact_layout,
@@ -25,6 +44,7 @@ from ..infrastructure import (
     computational_eval_enabled,
     computational_notes,
     PhaseTimer,
+    load_run_config_model,
     load_run_status_model,
     maybe_log_wandb,
     peak_rss_mb,
@@ -34,15 +54,29 @@ from ..infrastructure import (
     write_computational_artifact,
     utc_now,
 )
+from ..io_parquet import ParquetConfig, load_level_parquet
 from ..infrastructure.progress import write_progress
 from ..infrastructure.reporting import write_method_comparison_report
+from ..save_results import write_bundle_parquet
 from ..save_results import read_bundle_meta
+from ..schemas_results import ResultBundleMeta, SourceDatasetRef
 from .status_service import (
     build_run_status_model,
     mark_run_completed,
     mark_run_failed,
     persist_run_status,
 )
+
+
+def _sensor_dataset_key(sensor: str, sensor_range: int | None) -> str:
+    if sensor == "cardinal distance":
+        return f"{sensor}:range={sensor_range}"
+    return sensor
+
+
+def _run_bundles_root(run_root: Path, run_payload: dict) -> Path:
+    method = str(run_payload.get("method", "mercury"))
+    return run_root / "bundles" / method
 
 
 def _baseline_dataset_selection(states_parquet: Path) -> tuple[str, str | None]:
@@ -53,6 +87,102 @@ def _baseline_dataset_selection(states_parquet: Path) -> tuple[str, str | None]:
     if source.select == "run_id" and source.dataset_run_id:
         return "run_id", str(source.dataset_run_id)
     return "latest", None
+
+
+def _generate_standalone_dataset_run_ids(
+    *,
+    args: argparse.Namespace,
+    reuse_existing_dataset: bool,
+    num_steps: int | None = None,
+) -> dict[str, str]:
+    from src.maze_environment.generate_data import generate_data
+
+    return generate_data(
+        level=args.level,
+        seed=args.seed,
+        rand_prob=args.rand_prob,
+        num_steps=(int(num_steps) if num_steps is not None else args.num_steps),
+        valid_trajectories_only=bool(args.valid_trajectories_only),
+        output_root=Path(args.datasets_root),
+        reuse_existing=bool(reuse_existing_dataset),
+        random_start=bool(args.random_start),
+    )
+
+
+def _hybrid_total_cscg_baseline_steps(args: argparse.Namespace) -> int:
+    return int(args.num_steps)
+
+
+def _hybrid_online_train_steps(args: argparse.Namespace) -> int:
+    return int(args.num_steps) * int(args.cscg_n_iter)
+
+
+def _baseline_cscg_n_iter_for_budget(args: argparse.Namespace) -> int:
+    if str(args.cscg_training_mode).strip().lower() != "online_em":
+        return int(args.cscg_n_iter)
+    batches_per_epoch = max(1, int(np.ceil(float(args.num_steps) / float(args.cscg_batch_size))))
+    return batches_per_epoch * int(args.cscg_n_iter)
+
+
+def _write_exact_ground_truth_states(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    run_payload: dict,
+    layout: ArtifactLayout,
+    dataset_run_ids: dict[str, str],
+) -> Path:
+    cartesian_run_id = dataset_run_ids.get("cartesian")
+    cartesian_dataset = load_level_parquet(
+        ParquetConfig(
+            root=Path(args.datasets_root),
+            level=args.level,
+            sensor="cartesian",
+            sensor_range=None,
+            select=("run_id" if cartesian_run_id else "latest"),
+            run_id=cartesian_run_id,
+        )
+    )
+    ground_truth_state_ids = np.asarray(
+        exact_cartesian_state_ids_for_level(
+            level_index=int(args.level),
+            positions=np.asarray(cartesian_dataset.observations),
+        ),
+        dtype=np.int32,
+    )
+    meta = ResultBundleMeta(
+        run_id=run_id,
+        timestamp_utc=utc_now(),
+        source=SourceDatasetRef(
+            level=int(args.level),
+            sensor="cartesian",
+            sensor_range=None,
+            select=("run_id" if cartesian_run_id else "latest"),
+            dataset_run_id=cartesian_run_id,
+            dataset_parquet_name=cartesian_dataset.parquet_path.name,
+        ),
+        sensory_params=dict(run_payload.get("sensory") or {}),
+        latent_params=None,
+        action_map_params=dict(run_payload.get("action_map") or {}),
+        memory_length=None,
+        run_parameters={
+            "ground_truth": {
+                "series_name": "ground_truth_state_id",
+                "source": "exact_cartesian_state_ids_for_level",
+            },
+            "dataset_runs": dataset_run_ids,
+        },
+        source_dataset_metadata=dict(cartesian_dataset.source_metadata),
+        ground_truth_dataset_metadata=dict(cartesian_dataset.source_metadata),
+        notes=f"standalone_ground_truth study={args.study_name}",
+    )
+    return write_bundle_parquet(
+        output_dir=layout.ground_truth_states_parquet.parent,
+        run_id=run_id,
+        bundle_name="ground_truth_states",
+        columns={"ground_truth_state_id": ground_truth_state_ids},
+        meta=meta,
+    )
 
 
 def _computational_profile(run_payload: dict) -> str:
@@ -66,6 +196,8 @@ def _computational_deployable_paths(method: str, layout: ArtifactLayout) -> list
         return [layout.pocml_states_parquet, layout.pocml_embeddings_npz, layout.pocml_model_checkpoint_pt]
     if method == "cscg":
         return [layout.cscg_states_parquet, layout.cscg_model_npz]
+    if method == "sensory":
+        return [layout.sensory_states_parquet, layout.sensory_graph_npz, layout.sensory_action_map_npz]
     return []
 
 
@@ -92,6 +224,19 @@ def _computational_total_paths(method: str, layout: ArtifactLayout) -> list[Path
             layout.cscg_internal_graph_png,
             layout.cscg_paper_precision_json,
         ]
+    if method == "mercury_cscg_hybrid":
+        return [
+            layout.mercury_cscg_hybrid_states_parquet,
+            layout.mercury_cscg_hybrid_model_npz,
+            layout.mercury_cscg_hybrid_paper_precision_json,
+        ]
+    if method == "sensory":
+        return [
+            layout.sensory_states_parquet,
+            layout.sensory_graph_npz,
+            layout.sensory_action_map_npz,
+            layout.sensory_paper_precision_json,
+        ]
     return []
 
 
@@ -102,6 +247,10 @@ def _computational_artifact_path(method: str, layout: ArtifactLayout) -> Path:
         return layout.pocml_computational_json
     if method == "cscg":
         return layout.cscg_computational_json
+    if method == "sensory":
+        return layout.sensory_computational_json
+    if method == "mercury_cscg_hybrid":
+        return layout.mercury_cscg_hybrid_computational_json
     raise ValueError(f"Unsupported method for computational artifact: {method}")
 
 
@@ -114,8 +263,10 @@ def _track_for_stage(method: str, stage: str) -> str:
         return "eval" if stage == "native_eval" else "train"
     if method == "pocml":
         return "train" if stage == "train" else "eval"
-    if method == "cscg":
+    if method in {"cscg", "mercury_cscg_hybrid"}:
         return "train" if stage.startswith("train_") else "eval"
+    if method == "sensory":
+        return "eval" if stage == "native_eval" else "train"
     return "lifecycle"
 
 
@@ -124,7 +275,9 @@ def _resolve_eval_steps(method: str, native_metrics: Dict[str, Any]) -> int | No
         return int(((native_metrics.get("latent") or {}).get("steps"))) if ((native_metrics.get("latent") or {}).get("steps")) is not None else None
     if method == "pocml":
         return int(native_metrics.get("next_obs_steps")) if native_metrics.get("next_obs_steps") is not None else None
-    if method == "cscg":
+    if method in {"cscg", "mercury_cscg_hybrid"}:
+        return int(native_metrics.get("steps")) if native_metrics.get("steps") is not None else None
+    if method == "sensory":
         return int(native_metrics.get("steps")) if native_metrics.get("steps") is not None else None
     return None
 
@@ -155,8 +308,8 @@ def _write_computational_metrics(
         "n_train_steps_measured": train_steps,
         "n_eval_steps_measured": eval_steps,
     }
-    include_jit_note = method == "cscg"
-    if method == "cscg":
+    include_jit_note = method in {"cscg", "mercury_cscg_hybrid"}
+    if method in {"cscg", "mercury_cscg_hybrid"}:
         raw_metrics["jit_warmup_wall_time_seconds"] = float(timing.get("jit_warmup", 0.0))
         raw_metrics["steady_state_train_wall_time_seconds"] = float(timing.get("train", 0.0))
         raw_metrics["steady_state_eval_wall_time_seconds"] = float(timing.get("eval", 0.0))
@@ -233,6 +386,8 @@ def _run_mercury_stage(
             valid_trajectories_only=bool(args.valid_trajectories_only),
             mercury_valid_trajectories_only=bool(args.mercury_valid_trajectories_only),
             mercury_split_sensory_raw_latent_valid=bool(args.mercury_split_sensory_raw_latent_valid),
+            mercury_input_mode=str(run_payload.get("mercury_input_mode", getattr(args, "mercury_input_mode", "pretrained_raw"))),
+            random_start=bool(args.random_start),
             reuse_existing_dataset=reuse_existing_dataset,
             reuse_existing_run=reuse_existing_run,
             sensory=run_payload["sensory"],
@@ -241,11 +396,13 @@ def _run_mercury_stage(
             paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
             paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
             paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
+            paper_precision_eval_checkpoints=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_checkpoints"),
             paper_precision_num_points=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_points"),
             paper_precision_num_walks=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_walks", 100)),
             paper_precision_walk_length=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("walk_length", 10_000)),
             structure_metrics_enabled=bool(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("enabled", True))),
             structure_metrics_epsilon=float(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("epsilon", 1e-6))),
+            structure_metrics_epsilons=(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("thresholds"))),
             structure_metrics_scope=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("scope", "exact_level"))),
             structure_metrics_ground_truth_source=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("ground_truth_source", "empirical_walks"))),
             run_parameters={
@@ -261,9 +418,10 @@ def _run_mercury_stage(
         "states_parquet": str(layout.mercury_states_parquet),
         "attribution_parquet": str(layout.mercury_attribution_parquet),
         "paper_precision_json": str(layout.mercury_paper_precision_json),
+        "paper_precision_snapshots_dir": str(Path(layout.run_status_json).parent / "snapshots" / "mercury" / "paper_precision"),
         "latent_graph_npz": str(layout.mercury_latent_graph_npz),
     }
-    run_status.subsystems["mercury"].native_metrics = summarize_mercury_run(states_parquet)
+    run_status.subsystems["mercury"].native_metrics = summarize_mercury_run(states_parquet, datasets_root=Path(args.datasets_root))
     _write_computational_metrics(
         method="mercury",
         layout=layout,
@@ -287,6 +445,255 @@ def _run_mercury_stage(
     return states_parquet
 
 
+def _run_sensory_stage(
+    *,
+    args: argparse.Namespace,
+    bundles_root: Path,
+    run_id: str,
+    run_payload: dict,
+    run_status: RunStatusModel,
+    layout: ArtifactLayout,
+    dataset_run_id: str | None,
+) -> Path:
+    timer = PhaseTimer()
+    if computational_eval_enabled(run_payload):
+        write_progress(
+            run_root=Path(layout.run_status_json).parent,
+            run_id=run_id,
+            method="sensory",
+            track="computational",
+            stage="computational_start",
+            current=0,
+            total=1,
+            message="Starting computational measurement",
+        )
+
+    def _progress_callback(*, stage: str, current: int | None = None, total: int | None = None, message: str | None = None, extra: dict | None = None) -> None:
+        write_progress(
+            run_root=Path(layout.run_status_json).parent,
+            run_id=run_id,
+            method="sensory",
+            track=_track_for_stage("sensory", stage),
+            stage=stage,
+            current=current,
+            total=total,
+            message=message,
+            extra=extra,
+        )
+
+    _progress_callback(stage="sensory.start", message="Starting Sensory")
+    states_parquet = run_sensory(
+        SensoryConfig(
+            datasets_root=Path(args.datasets_root),
+            output_root=bundles_root,
+            run_id=run_id,
+            level=args.level,
+            sensor=args.sensor,
+            sensor_range=args.sensor_range,
+            seed=args.seed,
+            rand_prob=args.rand_prob,
+            num_steps=args.num_steps,
+            window_length=args.window_length,
+            valid_trajectories_only=bool(args.valid_trajectories_only),
+            observation_mode=str(run_payload.get("sensory_observation_mode", getattr(args, "sensory_observation_mode", "raw"))),
+            dataset_select=("run_id" if dataset_run_id else "latest"),
+            dataset_run_id=dataset_run_id,
+            random_start=bool(args.random_start),
+            reuse_existing_dataset=True,
+            sensory=run_payload["sensory"],
+            action_map=run_payload["action_map"],
+            paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
+            paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
+            paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
+            paper_precision_eval_checkpoints=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_checkpoints"),
+            paper_precision_num_points=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_points"),
+            paper_precision_num_walks=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_walks", 100)),
+            paper_precision_walk_length=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("walk_length", 10_000)),
+            structure_metrics_enabled=bool(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("enabled", True))),
+            structure_metrics_epsilon=float(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("epsilon", 1e-6))),
+            structure_metrics_epsilons=(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("thresholds"))),
+            structure_metrics_scope=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("scope", "exact_level"))),
+            structure_metrics_ground_truth_source=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("ground_truth_source", "empirical_walks"))),
+            run_parameters={
+                "run_payload": run_payload,
+                "study": {"study_root": args.study_root, "study_name": args.study_name},
+            },
+            notes=f"study={args.study_name}",
+        ),
+        progress_callback=_progress_callback,
+    )
+    run_status.subsystems["sensory"].status = "completed"
+    run_status.subsystems["sensory"].artifacts = {
+        "states_parquet": str(layout.sensory_states_parquet),
+        "paper_precision_json": str(layout.sensory_paper_precision_json),
+        "paper_precision_snapshots_dir": str(Path(layout.run_status_json).parent / "snapshots" / "sensory" / "paper_precision"),
+        "sensory_graph_npz": str(layout.sensory_graph_npz),
+        "action_map_npz": str(layout.sensory_action_map_npz),
+        "observation_vocabulary_npz": str(layout.sensory_observation_vocabulary_npz),
+    }
+    run_status.subsystems["sensory"].native_metrics = read_native_metrics_from_bundle(Path(states_parquet), "sensory_eval")
+    _write_computational_metrics(
+        method="sensory",
+        layout=layout,
+        run_payload=run_payload,
+        run_status=run_status,
+        timing=timer.finish(),
+        train_steps=int(args.num_steps),
+        native_metrics=run_status.subsystems["sensory"].native_metrics,
+    )
+    if computational_eval_enabled(run_payload):
+        write_progress(
+            run_root=Path(layout.run_status_json).parent,
+            run_id=run_id,
+            method="sensory",
+            track="computational",
+            stage="computational_end",
+            current=1,
+            total=1,
+            message="Completed computational measurement",
+        )
+    return states_parquet
+
+
+def _run_mercury_cscg_hybrid_stage(
+    *,
+    args: argparse.Namespace,
+    run_root: Path,
+    run_id: str,
+    run_payload: dict,
+    run_status: RunStatusModel,
+    layout: ArtifactLayout,
+    dataset_select: str,
+    dataset_run_id: str | None,
+    reuse_existing_run: bool,
+    reuse_existing_dataset: bool,
+) -> Path:
+    timer = PhaseTimer()
+    steady_state_started = False
+    eval_started = False
+    if computational_eval_enabled(run_payload):
+        write_progress(
+            run_root=run_root,
+            run_id=run_id,
+            method="mercury_cscg_hybrid",
+            track="computational",
+            stage="computational_start",
+            current=0,
+            total=1,
+            message="Starting computational measurement",
+        )
+
+    def _progress_callback(*, stage: str, current: int | None = None, total: int | None = None, message: str | None = None, extra: dict | None = None) -> None:
+        nonlocal steady_state_started, eval_started
+        if stage == "jit_warmup_start":
+            timer.switch("jit_warmup")
+        elif stage == "jit_warmup_end" and not steady_state_started:
+            timer.switch("train")
+            steady_state_started = True
+        elif stage == "native_eval" and not eval_started:
+            timer.switch("eval")
+            eval_started = True
+        write_progress(
+            run_root=run_root,
+            run_id=run_id,
+            method="mercury_cscg_hybrid",
+            track=_track_for_stage("mercury_cscg_hybrid", stage),
+            stage=stage,
+            current=current,
+            total=total,
+            message=message,
+            extra=extra,
+        )
+
+    states_path = run_mercury_cscg_hybrid(
+        MercuryCSCGHybridConfig(
+            datasets_root=Path(args.datasets_root),
+            output_root=run_root / "bundles" / "mercury_cscg_hybrid",
+            run_id=run_id,
+            level=args.level,
+            sensor=args.sensor,
+            sensor_range=args.sensor_range,
+            ground_truth_states_parquet=layout.ground_truth_states_parquet,
+            memory_length=args.memory_length,
+            window_length=args.window_length,
+            seed=args.seed,
+            rand_prob=args.rand_prob,
+            num_steps=args.num_steps,
+            valid_trajectories_only=bool(args.valid_trajectories_only),
+            mercury_valid_trajectories_only=bool(args.mercury_valid_trajectories_only),
+            mercury_split_sensory_raw_latent_valid=bool(args.mercury_split_sensory_raw_latent_valid),
+            mercury_input_mode=str(run_payload.get("mercury_input_mode", getattr(args, "mercury_input_mode", "pretrained_raw"))),
+            random_start=bool(args.random_start),
+            reuse_existing_dataset=reuse_existing_dataset,
+            reuse_existing_run=reuse_existing_run,
+            sensory=run_payload["sensory"],
+            latent=run_payload["latent"],
+            action_map=run_payload["action_map"],
+            dataset_select=dataset_select,
+            dataset_run_id=dataset_run_id,
+            n_iter=args.cscg_n_iter,
+            pseudocount=args.cscg_pseudocount,
+            term_early=args.cscg_term_early,
+            train_algorithm=args.cscg_train_algorithm,
+            training_mode=args.cscg_training_mode,
+            batch_size=args.cscg_batch_size,
+            online_lambda=args.cscg_online_lambda,
+            mercury_prior_weight=float(getattr(args, "mercury_cscg_prior_weight", 1.0)),
+            paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
+            paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
+            paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
+            paper_precision_eval_checkpoints=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_checkpoints"),
+            paper_precision_num_points=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_points"),
+            paper_precision_num_walks=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_walks", 100)),
+            paper_precision_walk_length=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("walk_length", 10_000)),
+            paper_precision_seed=args.seed,
+            paper_precision_rand_prob=args.rand_prob,
+            paper_precision_sensory_params=run_payload["sensory"],
+            paper_precision_action_map_params=run_payload["action_map"],
+            structure_metrics_enabled=bool(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("enabled", True))),
+            structure_metrics_epsilon=float(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("epsilon", 1e-6))),
+            structure_metrics_epsilons=(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("thresholds"))),
+            structure_metrics_scope=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("scope", "exact_level"))),
+            structure_metrics_ground_truth_source=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("ground_truth_source", "empirical_walks"))),
+            notes=f"study={args.study_name}",
+        ),
+        progress_callback=_progress_callback,
+    )
+    run_status.subsystems["mercury_cscg_hybrid"].status = "completed"
+    run_status.subsystems["mercury_cscg_hybrid"].artifacts = {
+        "states_parquet": str(states_path),
+        "paper_precision_json": str(layout.mercury_cscg_hybrid_paper_precision_json),
+        "paper_precision_snapshots_dir": str(run_root / "snapshots" / "mercury_cscg_hybrid" / "paper_precision"),
+        "model_npz": str(layout.mercury_cscg_hybrid_model_npz),
+    }
+    run_status.subsystems["mercury_cscg_hybrid"].native_metrics = read_native_metrics_from_bundle(Path(states_path), "cscg_eval")
+    _write_computational_metrics(
+        method="mercury_cscg_hybrid",
+        layout=layout,
+        run_payload=run_payload,
+        run_status=run_status,
+        timing=timer.finish(),
+        train_steps=(
+            _hybrid_online_train_steps(args)
+            if str(args.cscg_training_mode).strip().lower() == "online_em"
+            else int(args.num_steps) + int(args.cscg_n_iter)
+        ),
+        native_metrics=run_status.subsystems["mercury_cscg_hybrid"].native_metrics,
+    )
+    if computational_eval_enabled(run_payload):
+        write_progress(
+            run_root=run_root,
+            run_id=run_id,
+            method="mercury_cscg_hybrid",
+            track="computational",
+            stage="computational_end",
+            current=1,
+            total=1,
+            message="Completed computational measurement",
+        )
+    return states_path
+
+
 def _run_baseline_stages(
     *,
     args: argparse.Namespace,
@@ -296,8 +703,13 @@ def _run_baseline_stages(
     run_payload: dict,
     run_status: RunStatusModel,
     layout: ArtifactLayout,
+    baseline_dataset_select: str | None = None,
+    baseline_dataset_run_id: str | None = None,
+    baseline_cscg_n_iter: int | None = None,
+    write_comparison: bool = True,
 ) -> None:
-    baseline_dataset_select, baseline_dataset_run_id = _baseline_dataset_selection(states_parquet)
+    if baseline_dataset_select is None:
+        baseline_dataset_select, baseline_dataset_run_id = _baseline_dataset_selection(states_parquet)
 
     if baseline_enabled(run_payload, "pocml"):
         pocml_timer = PhaseTimer()
@@ -366,6 +778,7 @@ def _run_baseline_stages(
                 paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
                 paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
                 paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
+                paper_precision_eval_checkpoints=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_checkpoints"),
                 paper_precision_num_points=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_points"),
                 paper_precision_num_walks=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_walks", 100)),
                 paper_precision_walk_length=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("walk_length", 10_000)),
@@ -375,6 +788,7 @@ def _run_baseline_stages(
                 paper_precision_action_map_params=run_payload["action_map"],
                 structure_metrics_enabled=bool(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("enabled", True))),
                 structure_metrics_epsilon=float(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("epsilon", 1e-6))),
+                structure_metrics_epsilons=(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("thresholds"))),
                 structure_metrics_scope=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("scope", "exact_level"))),
                 structure_metrics_ground_truth_source=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("ground_truth_source", "empirical_walks"))),
             ),
@@ -461,7 +875,7 @@ def _run_baseline_stages(
                 dataset_select=baseline_dataset_select,
                 dataset_run_id=baseline_dataset_run_id,
                 clones_per_obs=args.cscg_clones_per_obs,
-                n_iter=args.cscg_n_iter,
+                n_iter=(int(baseline_cscg_n_iter) if baseline_cscg_n_iter is not None else args.cscg_n_iter),
                 pseudocount=args.cscg_pseudocount,
                 term_early=args.cscg_term_early,
                 train_algorithm=args.cscg_train_algorithm,
@@ -472,6 +886,7 @@ def _run_baseline_stages(
                 paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
                 paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
                 paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
+                paper_precision_eval_checkpoints=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_checkpoints"),
                 paper_precision_num_points=(run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_points"),
                 paper_precision_num_walks=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("num_walks", 100)),
                 paper_precision_walk_length=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("walk_length", 10_000)),
@@ -481,6 +896,7 @@ def _run_baseline_stages(
                 paper_precision_action_map_params=run_payload["action_map"],
                 structure_metrics_enabled=bool(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("enabled", True))),
                 structure_metrics_epsilon=float(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("epsilon", 1e-6))),
+                structure_metrics_epsilons=(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("thresholds"))),
                 structure_metrics_scope=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("scope", "exact_level"))),
                 structure_metrics_ground_truth_source=str(((((run_payload.get("evaluation") or {}).get("paper_precision") or {}).get("structure_metrics") or {}).get("ground_truth_source", "empirical_walks"))),
             ),
@@ -490,6 +906,7 @@ def _run_baseline_stages(
         run_status.subsystems["cscg"].artifacts = {
             "states_parquet": str(cscg_states_path),
             "paper_precision_json": str(layout.cscg_paper_precision_json),
+            "paper_precision_snapshots_dir": str(run_root / "snapshots" / "cscg" / "paper_precision"),
             "model_npz": str(layout.cscg_model_npz),
         }
         run_status.subsystems["cscg"].native_metrics = read_native_metrics_from_bundle(Path(cscg_states_path), "cscg_eval")
@@ -499,7 +916,7 @@ def _run_baseline_stages(
             run_payload=run_payload,
             run_status=run_status,
             timing=cscg_timer.finish(),
-            train_steps=int(args.cscg_n_iter),
+            train_steps=(int(baseline_cscg_n_iter) if baseline_cscg_n_iter is not None else int(args.cscg_n_iter)),
             native_metrics=run_status.subsystems["cscg"].native_metrics,
         )
         if computational_eval_enabled(run_payload):
@@ -514,7 +931,7 @@ def _run_baseline_stages(
                 message="Completed computational measurement",
             )
 
-    if baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg"):
+    if write_comparison and (baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg")):
         write_method_comparison_report(
             run_root=run_root,
             run_id=run_id,
@@ -543,7 +960,7 @@ def execute_pipeline_run(
     reuse_existing_run: bool,
     reuse_existing_dataset: bool,
 ) -> RunStatusModel:
-    bundles_root = run_root / "bundles" / "mercury"
+    bundles_root = _run_bundles_root(run_root, run_payload)
     metrics_root = run_root / "metrics"
     layout = artifact_layout(run_root=run_root, run_id=run_id, run_payload=run_payload)
     run_status = build_run_status_model(
@@ -570,26 +987,126 @@ def execute_pipeline_run(
     )
     persist_run_status(run_status, layout.run_status_json)
     try:
-        states_parquet = _run_mercury_stage(
-            args=args,
-            bundles_root=bundles_root,
-            run_id=run_id,
-            run_payload=run_payload,
-            reuse_existing_run=reuse_existing_run,
-            reuse_existing_dataset=reuse_existing_dataset,
-            run_status=run_status,
-            layout=layout,
-        )
-        _run_baseline_stages(
-            args=args,
-            run_root=run_root,
-            run_id=run_id,
-            states_parquet=states_parquet,
-            run_payload=run_payload,
-            run_status=run_status,
-            layout=layout,
-        )
-        _generate_plot_artifacts(args=args, run_root=run_root, layout=layout, run_payload=run_payload)
+        method = str(run_payload.get("method", "mercury"))
+        if method == "mercury":
+            states_parquet = _run_mercury_stage(
+                args=args,
+                bundles_root=bundles_root,
+                run_id=run_id,
+                run_payload=run_payload,
+                reuse_existing_run=reuse_existing_run,
+                reuse_existing_dataset=reuse_existing_dataset,
+                run_status=run_status,
+                layout=layout,
+            )
+            _run_baseline_stages(
+                args=args,
+                run_root=run_root,
+                run_id=run_id,
+                states_parquet=states_parquet,
+                run_payload=run_payload,
+                run_status=run_status,
+                layout=layout,
+            )
+            _generate_plot_artifacts(args=args, run_root=run_root, layout=layout, run_payload=run_payload)
+        elif method == "sensory":
+            dataset_run_ids = _generate_standalone_dataset_run_ids(
+                args=args,
+                reuse_existing_dataset=reuse_existing_dataset,
+            )
+            dataset_run_id = dataset_run_ids.get(_sensor_dataset_key(args.sensor, args.sensor_range))
+            _run_sensory_stage(
+                args=args,
+                bundles_root=bundles_root,
+                run_id=run_id,
+                run_payload=run_payload,
+                run_status=run_status,
+                layout=layout,
+                dataset_run_id=dataset_run_id,
+            )
+        elif method in {"pocml", "cscg", "mercury_cscg_hybrid"}:
+            dataset_run_ids = _generate_standalone_dataset_run_ids(
+                args=args,
+                reuse_existing_dataset=reuse_existing_dataset,
+            )
+            ground_truth_states_parquet = _write_exact_ground_truth_states(
+                args=args,
+                run_id=run_id,
+                run_payload=run_payload,
+                layout=layout,
+                dataset_run_ids=dataset_run_ids,
+            )
+            dataset_run_id = dataset_run_ids.get(_sensor_dataset_key(args.sensor, args.sensor_range))
+            if method == "mercury_cscg_hybrid":
+                _run_mercury_cscg_hybrid_stage(
+                    args=args,
+                    run_root=run_root,
+                    run_id=run_id,
+                    run_payload=run_payload,
+                    run_status=run_status,
+                    layout=layout,
+                    dataset_select=("run_id" if dataset_run_id else "latest"),
+                    dataset_run_id=dataset_run_id,
+                    reuse_existing_run=reuse_existing_run,
+                    reuse_existing_dataset=reuse_existing_dataset,
+                )
+                baseline_states_parquet = ground_truth_states_parquet
+                baseline_select = "run_id" if dataset_run_id else "latest"
+                baseline_run_id = dataset_run_id
+                baseline_cscg_n_iter = None
+                if baseline_enabled(run_payload, "cscg"):
+                    baseline_total_steps = _hybrid_total_cscg_baseline_steps(args)
+                    baseline_dataset_run_ids = _generate_standalone_dataset_run_ids(
+                        args=args,
+                        reuse_existing_dataset=reuse_existing_dataset,
+                        num_steps=baseline_total_steps,
+                    )
+                    baseline_run_id = baseline_dataset_run_ids.get(_sensor_dataset_key(args.sensor, args.sensor_range))
+                    baseline_select = "run_id" if baseline_run_id else "latest"
+                    baseline_layout = layout.model_copy(
+                        update={
+                            "ground_truth_states_parquet": run_root
+                            / "ground_truth"
+                            / "baseline_cscg"
+                            / f"{run_id}_ground_truth_states.parquet"
+                        }
+                    )
+                    baseline_states_parquet = _write_exact_ground_truth_states(
+                        args=args,
+                        run_id=run_id,
+                        run_payload=run_payload,
+                        layout=baseline_layout,
+                        dataset_run_ids=baseline_dataset_run_ids,
+                    )
+                    baseline_cscg_n_iter = _baseline_cscg_n_iter_for_budget(args)
+                _run_baseline_stages(
+                    args=args,
+                    run_root=run_root,
+                    run_id=run_id,
+                    states_parquet=baseline_states_parquet,
+                    run_payload=run_payload,
+                    run_status=run_status,
+                    layout=layout,
+                    baseline_dataset_select=baseline_select,
+                    baseline_dataset_run_id=baseline_run_id,
+                    baseline_cscg_n_iter=baseline_cscg_n_iter,
+                    write_comparison=baseline_enabled(run_payload, "cscg"),
+                )
+            else:
+                _run_baseline_stages(
+                    args=args,
+                    run_root=run_root,
+                    run_id=run_id,
+                    states_parquet=ground_truth_states_parquet,
+                    run_payload=run_payload,
+                    run_status=run_status,
+                    layout=layout,
+                    baseline_dataset_select=("run_id" if dataset_run_id else "latest"),
+                    baseline_dataset_run_id=dataset_run_id,
+                    write_comparison=False,
+                )
+        else:
+            raise ValueError(f"Unsupported method: {method}")
         write_progress(
             run_root=run_root,
             run_id=run_id,
@@ -638,7 +1155,230 @@ def _run_worker_subprocess(*, args: argparse.Namespace, run_id: str) -> None:
     )
 
 
+def _paper_precision_config(args: argparse.Namespace, run_payload: dict) -> dict[str, Any]:
+    paper_precision = (run_payload.get("evaluation") or {}).get("paper_precision") or {}
+    structure_metrics = paper_precision.get("structure_metrics") or {}
+    thresholds = (
+        [float(value) for value in args.structure_metrics_epsilons]
+        if getattr(args, "structure_metrics_epsilons", None) is not None
+        else structure_metrics.get("thresholds")
+    )
+    return {
+        "paper_precision_enabled": True,
+        "paper_precision_mode": str(paper_precision.get("mode", "per_iteration")),
+        "paper_precision_eval_interval": int(paper_precision.get("eval_interval", 1)),
+        "paper_precision_eval_checkpoints": paper_precision.get("eval_checkpoints"),
+        "paper_precision_num_points": paper_precision.get("num_points"),
+        "paper_precision_num_walks": int(paper_precision.get("num_walks", 100)),
+        "paper_precision_walk_length": int(paper_precision.get("walk_length", 10_000)),
+        "structure_metrics_enabled": bool(structure_metrics.get("enabled", True)),
+        "structure_metrics_epsilon": float(structure_metrics.get("epsilon", 1e-6)),
+        "structure_metrics_epsilons": thresholds,
+        "structure_metrics_ignore_self_loops": bool(structure_metrics.get("ignore_self_loops", True)),
+        "structure_metrics_scope": str(structure_metrics.get("scope", "exact_level")),
+        "structure_metrics_ground_truth_source": str(structure_metrics.get("ground_truth_source", "empirical_walks")),
+    }
+
+
+def _normalize_one_hot_sensor_args(args: argparse.Namespace) -> None:
+    mercury_input_mode = str(getattr(args, "mercury_input_mode", "pretrained_raw")).strip().lower()
+    sensory_observation_mode = str(getattr(args, "sensory_observation_mode", "raw")).strip().lower()
+    needs_cardinal_observation = (
+        mercury_input_mode in {"pretrained_cscg_one_hot", "direct_cscg_one_hot"}
+        or sensory_observation_mode == "cscg_one_hot"
+    )
+    if not needs_cardinal_observation:
+        return
+    if str(getattr(args, "sensor", "cartesian")) == "cartesian" and getattr(args, "sensor_range", None) is None:
+        args.sensor = "cardinal distance"
+        args.sensor_range = 1
+        return
+    if str(getattr(args, "sensor", "")) != "cardinal distance":
+        raise ValueError("CSCG one-hot observations require --sensor 'cardinal distance'.")
+    if getattr(args, "sensor_range", None) is None:
+        args.sensor_range = 1
+
+
+def reevaluate_paper_precision_snapshots(args: argparse.Namespace) -> None:
+    source_run_id = args.snapshot_source_run_id or args.run_id
+    if not source_run_id:
+        raise ValueError("--snapshot_source_run_id or --run_id is required for snapshot re-evaluation")
+    run_root = Path(args.study_root) / args.study_name / str(source_run_id)
+    run_config = load_run_config_model(run_root / "run_config.json")
+    if run_config is None:
+        raise FileNotFoundError(f"Missing valid run_config.json for {run_root}")
+    run_payload = dict(run_config.run_payload)
+    method = str(args.method or run_payload.get("method", "mercury"))
+    run_id = str(run_config.run_id)
+    snapshots = list_paper_precision_snapshots(run_root, method)
+    if not snapshots:
+        raise FileNotFoundError(f"No {method} paper-precision snapshots found under {run_root / 'snapshots'}")
+
+    pp_config = _paper_precision_config(args, run_payload)
+    if method == "mercury":
+        config = MercuryConfig(
+            datasets_root=Path((run_config.cli_args or {}).get("datasets_root", args.datasets_root)),
+            results_root=run_root / "bundles" / "mercury",
+            run_id=run_id,
+            level=int(run_payload["level"]),
+            sensor=str(run_payload["sensor"]),
+            sensor_range=run_payload.get("sensor_range"),
+            memory_length=int(run_payload["memory_length"]),
+            window_length=int(run_payload["window_length"]),
+            seed=int(run_payload["seed"]),
+            rand_prob=float(run_payload["rand_prob"]),
+            num_steps=int(run_payload["num_steps"]),
+            valid_trajectories_only=bool(run_payload.get("valid_trajectories_only", False)),
+            mercury_valid_trajectories_only=bool(run_payload.get("mercury_valid_trajectories_only", False)),
+            mercury_split_sensory_raw_latent_valid=bool(run_payload.get("mercury_split_sensory_raw_latent_valid", False)),
+            random_start=bool(run_payload.get("random_start", True)),
+            sensory=dict(run_payload["sensory"]),
+            latent=dict(run_payload["latent"]),
+            action_map=dict(run_payload["action_map"]),
+            **pp_config,
+        )
+        history: list[dict[str, Any]] = []
+        for snapshot_path in snapshots:
+            snapshot = load_mercury_paper_precision_snapshot(snapshot_path)
+            meta = dict(snapshot["meta"])
+            metrics = compute_mercury_paper_precision_metrics(
+                config=config,
+                sensory_graph=snapshot["sensory_graph"],
+                latent_graph=snapshot["latent_graph"],
+                action_map=snapshot["action_map"],
+                obs_uniques=snapshot.get("obs_uniques"),
+            )
+            history.append(
+                {
+                    "step": int(meta.get("step", 0)),
+                    "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                    **metrics,
+                }
+            )
+        final_metrics = {key: value for key, value in history[-1].items() if key not in {"step", "observed_samples"}}
+        write_mercury_paper_precision_payload(
+            config=config,
+            metrics=final_metrics,
+            history=history,
+            schedule_unit="training_step",
+        )
+        return
+
+    if method == "cscg":
+        cscg_payload = ((run_payload.get("baselines") or {}).get("cscg") or {})
+        config = CSCGConfig(
+            datasets_root=Path((run_config.cli_args or {}).get("datasets_root", args.datasets_root)),
+            output_root=run_root / "bundles" / "cscg",
+            run_id=run_id,
+            level=int(run_payload["level"]),
+            sensor=str(run_payload["sensor"]),
+            sensor_range=run_payload.get("sensor_range"),
+            ground_truth_states_parquet=run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet",
+            window_length=int(run_payload["window_length"]),
+            valid_trajectories_only=bool(cscg_payload.get("valid_trajectories_only", False)),
+            clones_per_obs=int(cscg_payload.get("clones_per_obs", 10)),
+            n_iter=int(cscg_payload.get("n_iter", 1000)),
+            pseudocount=float(cscg_payload.get("pseudocount", 2e-3)),
+            term_early=bool(cscg_payload.get("term_early", True)),
+            train_algorithm=str(cscg_payload.get("train_algorithm", "em")),
+            training_mode=str(cscg_payload.get("training_mode", "full")),
+            batch_size=int(cscg_payload.get("batch_size", 1024)),
+            online_lambda=float(cscg_payload.get("online_lambda", 1.0)),
+            seed=int(cscg_payload.get("seed", run_payload["seed"])),
+            paper_precision_seed=int(run_payload["seed"]),
+            paper_precision_rand_prob=float(run_payload["rand_prob"]),
+            paper_precision_sensory_params=dict(run_payload["sensory"]),
+            paper_precision_action_map_params=dict(run_payload["action_map"]),
+            **pp_config,
+        )
+        chmm_mod = import_cscg_module(Path.cwd())
+        history = []
+        for snapshot_path in snapshots:
+            snapshot = load_cscg_paper_precision_snapshot(snapshot_path)
+            meta = dict(snapshot["meta"])
+            metrics = compute_cscg_paper_precision_metrics_from_model(
+                model_npz=snapshot["model_npz"],
+                n_clones=snapshot["n_clones"],
+                config=config,
+                obs_uniques=snapshot["obs_uniques"],
+                action_uniques=snapshot["action_uniques"],
+                chmm_mod=chmm_mod,
+            )
+            history.append(
+                {
+                    "stage": str(meta.get("stage", "em")),
+                    "iteration": int(meta.get("iteration", meta.get("step", 0))),
+                    "step": int(meta.get("step", 0)),
+                    "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                    **metrics,
+                }
+            )
+        final_metrics = {
+            key: value
+            for key, value in history[-1].items()
+            if key not in {"stage", "iteration", "step", "observed_samples"}
+        }
+        write_cscg_paper_precision_payload(
+            config=config,
+            metrics=final_metrics,
+            history=history,
+            mode=str(config.paper_precision_mode),
+        )
+        return
+
+    if method == "sensory":
+        config = SensoryConfig(
+            datasets_root=Path((run_config.cli_args or {}).get("datasets_root", args.datasets_root)),
+            output_root=run_root / "bundles" / "sensory",
+            run_id=run_id,
+            level=int(run_payload["level"]),
+            sensor=str(run_payload["sensor"]),
+            sensor_range=run_payload.get("sensor_range"),
+            seed=int(run_payload["seed"]),
+            rand_prob=float(run_payload["rand_prob"]),
+            num_steps=int(run_payload["num_steps"]),
+            window_length=int(run_payload["window_length"]),
+            valid_trajectories_only=bool(run_payload.get("valid_trajectories_only", False)),
+            observation_mode=str(run_payload.get("sensory_observation_mode", "raw")),
+            sensory=dict(run_payload["sensory"]),
+            action_map=dict(run_payload["action_map"]),
+            **pp_config,
+        )
+        history: list[dict[str, Any]] = []
+        for snapshot_path in snapshots:
+            snapshot = load_sensory_paper_precision_snapshot(snapshot_path)
+            meta = dict(snapshot["meta"])
+            metrics = compute_sensory_paper_precision_metrics(
+                config=config,
+                sensory_graph=snapshot["sensory_graph"],
+                action_map=snapshot["action_map"],
+                obs_uniques=snapshot.get("obs_uniques"),
+            )
+            history.append(
+                {
+                    "step": int(meta.get("step", 0)),
+                    "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                    **metrics,
+                }
+            )
+        final_metrics = {key: value for key, value in history[-1].items() if key not in {"step", "observed_samples"}}
+        write_sensory_paper_precision_payload(
+            config=config,
+            metrics=final_metrics,
+            history=history,
+            schedule_unit="training_step",
+        )
+        return
+
+    raise ValueError(f"Snapshot re-evaluation is not supported for method {method!r}")
+
+
 def run_single(args: argparse.Namespace) -> None:
+    _normalize_one_hot_sensor_args(args)
+    if bool(getattr(args, "reevaluate_paper_precision_snapshots", False)):
+        reevaluate_paper_precision_snapshots(args)
+        return
+
     if args.level is None:
         raise ValueError("--level is required for single-run mode")
 
@@ -663,7 +1403,7 @@ def run_single(args: argparse.Namespace) -> None:
     run_payload = dict(base_run_payload)
     run_payload["requested_run_id"] = identity.requested_run_id
     run_root = identity.run_root
-    bundles_root = run_root / "bundles" / "mercury"
+    bundles_root = _run_bundles_root(run_root, run_payload)
     metrics_root = run_root / "metrics"
     layout = artifact_layout(run_root=run_root, run_id=identity.run_id, run_payload=run_payload)
     run_root.mkdir(parents=True, exist_ok=True)
@@ -686,6 +1426,9 @@ def run_single(args: argparse.Namespace) -> None:
         existing_status.status = "reused"
         existing_status.finished_at_utc = utc_now()
         atomic_write_json(layout.run_status_json, existing_status.model_dump(mode="json"))
+        method = str(run_payload.get("method", "mercury"))
+        print(f"Reused {method} run: {identity.run_id}")
+        print(f"Run status: {layout.run_status_json}")
         maybe_log_wandb(
             args=args,
             run_id=identity.run_id,
@@ -728,6 +1471,20 @@ def run_single(args: argparse.Namespace) -> None:
     final_status = load_run_status_model(layout.run_status_json)
     if final_status is None:
         raise RuntimeError(f"Worker run {identity.run_id} completed without a valid run_status.json")
+    method = str(run_payload.get("method", "mercury"))
+    print(f"Completed {method} run: {identity.run_id}")
+    print(f"Run status: {layout.run_status_json}")
+    subsystem = final_status.subsystems.get(method)
+    if subsystem is not None:
+        states_path = subsystem.artifacts.get("states_parquet")
+        metrics_path = subsystem.artifacts.get("paper_precision_json")
+        snapshots_path = subsystem.artifacts.get("paper_precision_snapshots_dir")
+        if states_path:
+            print(f"States: {states_path}")
+        if metrics_path:
+            print(f"Paper precision: {metrics_path}")
+        if snapshots_path:
+            print(f"Snapshots: {snapshots_path}")
     maybe_log_wandb(
         args=args,
         run_id=identity.run_id,

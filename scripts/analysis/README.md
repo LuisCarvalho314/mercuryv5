@@ -21,6 +21,7 @@ uv run python scripts/analysis/plot_study_histories.py --study-root results/curr
 Notes:
 - These scripts are post-run tools only; execution and study orchestration live under `main.py` and `src/mercury_runs`.
 - `*_precision.png` now visualizes paper precision from `*_paper_precision.json`; if paper precision is disabled, no precision PNG is written.
+- `mean_total_variation` and `action_conditioned_mean_total_variation` are graph-structure metrics. They align learned nodes to ground-truth states, project learned adjacency or action-labelled transition tensors through that alignment, row-normalize the projected learned and ground-truth transition weights, and then compute mean TV. They are not computed directly from consecutive decoded-state transition counts alone.
 - unified graph plots are now generated automatically during runs; `plot_method_graphs.py` is for regeneration or repair.
 - `plot_method_graphs.py` reads `*_latent_graph.npz`, `*_embeddings.npz`, and `*_cscg_model.npz` when present, and writes per-method plots plus `plots/internal_graphs_comparison.png`.
 - Canonical fixed-map paper-style precision is written separately to `metrics/<method>/*_paper_precision.json` and summarized through `comparison_summary.json`.

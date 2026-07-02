@@ -95,6 +95,7 @@ def args_from_config(config: Dict[str, Any]) -> List[str]:
                 "structure_metrics_ignore_self_loops",
                 "mercury_valid_trajectories_only",
                 "mercury_split_sensory_raw_latent_valid",
+                "random_start",
                 "pocml_valid_trajectories_only",
                 "cscg_valid_trajectories_only",
             }:

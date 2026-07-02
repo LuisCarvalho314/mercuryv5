@@ -22,6 +22,12 @@ class ArtifactLayout(BaseModel):
     mercury_bmu_attribution_step_png: Path
     mercury_bmu_attribution_edge_f1_png: Path
     mercury_bmu_attribution_node_ratio_png: Path
+    sensory_states_parquet: Path
+    sensory_paper_precision_json: Path
+    sensory_computational_json: Path
+    sensory_graph_npz: Path
+    sensory_action_map_npz: Path
+    sensory_observation_vocabulary_npz: Path
     pocml_states_parquet: Path
     pocml_paper_precision_json: Path
     pocml_computational_json: Path
@@ -33,6 +39,11 @@ class ArtifactLayout(BaseModel):
     cscg_computational_json: Path
     cscg_model_npz: Path
     cscg_internal_graph_png: Path
+    mercury_cscg_hybrid_states_parquet: Path
+    mercury_cscg_hybrid_paper_precision_json: Path
+    mercury_cscg_hybrid_computational_json: Path
+    mercury_cscg_hybrid_model_npz: Path
+    ground_truth_states_parquet: Path
     internal_graphs_comparison_png: Path
     comparison_summary_json: Path
     run_config_json: Path
@@ -109,8 +120,10 @@ class StudyMethodsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mercury: StudyMethodConfig = Field(default_factory=lambda: StudyMethodConfig(enabled=True))
+    sensory: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
     pocml: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
     cscg: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
+    mercury_cscg_hybrid: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
 
 
 class HierarchicalStudyConfig(BaseModel):
@@ -124,7 +137,7 @@ class HierarchicalStudyConfig(BaseModel):
 class StudyGridConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    method: Literal["mercury", "pocml", "cscg"] = "mercury"
+    method: Literal["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"] = "mercury"
     level: int = Field(ge=0)
     sensor: str = Field(min_length=1)
     sensor_range: Optional[int] = Field(default=None, ge=0)
@@ -133,6 +146,8 @@ class StudyGridConfig(BaseModel):
     memory_length: int = Field(gt=0)
     mercury_valid_trajectories_only: bool = False
     mercury_split_sensory_raw_latent_valid: bool = False
+    mercury_input_mode: str = "pretrained_raw"
+    sensory_observation_mode: str = "raw"
     pocml_valid_trajectories_only: bool = False
     cscg_valid_trajectories_only: bool = False
     activation_threshold: float = Field(ge=0.0, le=1.0)

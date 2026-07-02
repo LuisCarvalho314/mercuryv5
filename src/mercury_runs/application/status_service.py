@@ -43,7 +43,15 @@ def build_run_status_model(
         },
         paths={"run_root": str(run_root), "bundles_root": str(bundles_root), "metrics_root": str(metrics_root)},
         subsystems={
-            "mercury": subsystem_status(name="mercury", status="pending"),
+            "mercury": subsystem_status(
+                name="mercury",
+                status="pending" if str(run_payload.get("method", "mercury")) == "mercury" else "skipped",
+            ),
+            "sensory": subsystem_status(
+                name="sensory",
+                status="pending" if str(run_payload.get("method", "mercury")) == "sensory" else "skipped",
+                config={"observation_mode": str(run_payload.get("sensory_observation_mode", "raw"))},
+            ),
             "pocml": subsystem_status(
                 name="pocml",
                 status="pending" if baseline_enabled(run_payload, "pocml") else "skipped",
@@ -53,6 +61,14 @@ def build_run_status_model(
                 name="cscg",
                 status="pending" if baseline_enabled(run_payload, "cscg") else "skipped",
                 config=((run_payload.get("baselines") or {}).get("cscg") or {}),
+            ),
+            "mercury_cscg_hybrid": subsystem_status(
+                name="mercury_cscg_hybrid",
+                status="pending" if str(run_payload.get("method", "mercury")) == "mercury_cscg_hybrid" else "skipped",
+                config={
+                    "cscg": ((run_payload.get("baselines") or {}).get("cscg") or {}),
+                    "mercury_input_mode": str(run_payload.get("mercury_input_mode", "pretrained_raw")),
+                },
             ),
         },
     )
@@ -84,9 +100,10 @@ def mark_run_failed(
     run_payload: Dict[str, Any],
     error: Exception,
 ) -> RunStatusModel:
-    if run_status.subsystems["mercury"].status == "pending":
-        run_status.subsystems["mercury"] = subsystem_status(
-            name="mercury",
+    method = str(run_payload.get("method", "mercury"))
+    if method in run_status.subsystems and run_status.subsystems[method].status == "pending":
+        run_status.subsystems[method] = subsystem_status(
+            name=method,
             status="failed",
             error=repr(error),
         )

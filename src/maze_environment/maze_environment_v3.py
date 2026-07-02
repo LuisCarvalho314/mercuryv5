@@ -74,8 +74,6 @@ class MazeEnvironment(gym.Env):
         self.agent_position, self.agent.action, collision = self.agent.take_action(self.maze, action=action)
         self.agent.make_observation(self.maze)
 
-        self.logger.debug("STEP")
-
         if self.visualization is not None:
             self.visualization.update_loop(self)
 

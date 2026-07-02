@@ -8,7 +8,8 @@ import pytest
 
 from mercury_runs.algorithms.cscg.api import run_cscg
 from mercury_runs.algorithms.cscg.config import CSCGConfig
-from mercury_runs.algorithms.cscg.prepare import filter_valid_cscg_rows
+from mercury_runs.algorithms.cscg.prepare import action_to_indices, filter_valid_cscg_rows, map_to_indices
+from mercury_runs.algorithms.cscg.train import run_cscg_online_em
 
 
 class _FakeCHMM:
@@ -81,6 +82,24 @@ def _fake_module():
             "updateC": staticmethod(_fake_updateC),
         },
     )
+
+
+def test_cscg_action_indices_preserve_environment_one_hot_order() -> None:
+    actions = np.array(
+        [
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=np.int64,
+    )
+
+    action_idx, action_values = action_to_indices(actions)
+
+    assert action_idx.tolist() == [3, 2, 1, 0]
+    assert action_values.tolist() == np.eye(4, dtype=np.int64).tolist()
+    assert map_to_indices(action_values, actions).tolist() == [3, 2, 1, 0]
 
 
 def _base_config(tmp_path: Path, train_algorithm: str) -> CSCGConfig:
@@ -343,6 +362,49 @@ def test_run_cscg_online_em_uses_streamed_batches(monkeypatch, tmp_path: Path) -
     assert paper_precision["config"].run_id == "run-em"
 
 
+def test_run_cscg_online_em_can_repeat_batches_with_initial_counts() -> None:
+    model = _FakeCHMM(n_clones=np.array([1], dtype=np.int64), x=np.array([0, 0]), a=np.array([0, 0]), pseudocount=0.0)
+    factory_calls = 0
+
+    def _batch_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return iter(
+            [
+                {
+                    "observations": np.array([0, 0], dtype=np.int64),
+                    "actions": np.array([0, 0], dtype=np.int64),
+                    "filtered_steps": 2,
+                },
+                {
+                    "observations": np.array([0, 0], dtype=np.int64),
+                    "actions": np.array([0, 0], dtype=np.int64),
+                    "filtered_steps": 2,
+                },
+            ]
+        )
+
+    callbacks: list[tuple[int, int]] = []
+    convergence = run_cscg_online_em(
+        model,
+        chmm_mod=_fake_module(),
+        batch_iterator_factory=_batch_factory,
+        map_observations=lambda values: values,
+        map_actions=lambda values: values,
+        online_lambda=1.0,
+        max_batches=5,
+        term_early=False,
+        initial_counts=np.ones_like(model.C, dtype=np.float32),
+        repeat_batches=True,
+        iteration_callback=lambda **kwargs: callbacks.append((int(kwargs["iteration"]), int(kwargs["step"]))),
+    )
+
+    assert convergence.shape[0] == 5
+    assert factory_calls == 3
+    assert callbacks == [(1, 2), (2, 4), (3, 6), (4, 8), (5, 10)]
+    assert model.C[0, 0, 0] == 6.0
+
+
 def test_run_cscg_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
@@ -439,7 +501,7 @@ def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, t
     )
     run_cscg(config)
 
-    assert [item["iteration"] for item in captured_payload["history"]] == [1, 2, 3]
+    assert [item["iteration"] for item in captured_payload["history"]] == [3, 1000]
 
 
 def test_run_cscg_online_em_with_viterbi_keeps_final_full_refinement(monkeypatch, tmp_path: Path) -> None:

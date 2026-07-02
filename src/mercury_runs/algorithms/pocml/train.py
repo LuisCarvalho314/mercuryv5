@@ -152,8 +152,10 @@ def train_pocml_model(*, config, paper_precision_callback=None, progress_callbac
         paper_precision_checkpoints = set(
             resolve_eval_checkpoints(
                 total_units=int(config.epochs),
+                schedule=config.paper_precision_schedule,
                 num_points=config.paper_precision_num_points,
                 eval_interval=int(config.paper_precision_eval_interval),
+                explicit_checkpoints=config.paper_precision_eval_checkpoints,
             )
         )
         loss_epochs: list[np.ndarray] = []

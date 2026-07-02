@@ -7,15 +7,19 @@ import polars as pl
 
 GROUND_TRUTH_PROXY_COLUMN = "cartesian_proxy_bmu"
 LEGACY_GROUND_TRUTH_PROXY_COLUMN = "ground_truth_bmu"
+GROUND_TRUTH_STATE_COLUMN = "ground_truth_state_id"
 
 
 def resolve_ground_truth_proxy_column(columns: list[str]) -> str:
+    if GROUND_TRUTH_STATE_COLUMN in columns:
+        return GROUND_TRUTH_STATE_COLUMN
     if GROUND_TRUTH_PROXY_COLUMN in columns:
         return GROUND_TRUTH_PROXY_COLUMN
     if LEGACY_GROUND_TRUTH_PROXY_COLUMN in columns:
         return LEGACY_GROUND_TRUTH_PROXY_COLUMN
     raise RuntimeError(
-        f"Missing proxy ground-truth column. Expected one of: {GROUND_TRUTH_PROXY_COLUMN}, {LEGACY_GROUND_TRUTH_PROXY_COLUMN}."
+        "Missing ground-truth column. Expected one of: "
+        f"{GROUND_TRUTH_STATE_COLUMN}, {GROUND_TRUTH_PROXY_COLUMN}, {LEGACY_GROUND_TRUTH_PROXY_COLUMN}."
     )
 
 

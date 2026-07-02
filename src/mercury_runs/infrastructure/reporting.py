@@ -18,7 +18,7 @@ from .storage import load_run_config_model, load_run_status_model, read_native_m
 
 def _target_method(run_payload: Dict[str, Any]) -> str:
     method = str(run_payload.get("method") or "").strip().lower()
-    if method in {"mercury", "pocml", "cscg"}:
+    if method in {"mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"}:
         return method
     baselines = run_payload.get("baselines") or {}
     if bool((baselines.get("pocml") or {}).get("enabled", False)) and not bool((baselines.get("cscg") or {}).get("enabled", False)):
@@ -65,6 +65,8 @@ def _target_computational_path(run_status, method: str) -> Optional[Path]:
 def _precision_reference(method: str, native_metrics: Dict[str, Any], paper_precision_stats: Dict[str, Any]) -> Optional[float]:
     if "latent_precision" in paper_precision_stats:
         return float(paper_precision_stats["latent_precision"])
+    if "sensory_precision" in paper_precision_stats:
+        return float(paper_precision_stats["sensory_precision"])
     if "capacity_precision" in paper_precision_stats:
         return float(paper_precision_stats["capacity_precision"])
     target = _target_metric_columns(method, native_metrics).get("target_n1_accuracy")
@@ -80,6 +82,17 @@ def _target_metric_columns(method: str, native_metrics: Dict[str, Any]) -> Dict[
             "latent_n1_accuracy": ((native_metrics.get("latent") or {}).get("n_step_observation_prediction_accuracy") or {}).get("n1"),
             "sensory_log_likelihood_mean": (native_metrics.get("sensory") or {}).get("trajectory_log_likelihood_mean"),
             "latent_log_likelihood_mean": (native_metrics.get("latent") or {}).get("trajectory_log_likelihood_mean"),
+        }
+    if method == "sensory":
+        return {
+            "target_n1_accuracy": None,
+            "target_log_likelihood_mean": None,
+            "sensory_n1_accuracy": None,
+            "latent_n1_accuracy": None,
+            "sensory_log_likelihood_mean": None,
+            "latent_log_likelihood_mean": None,
+            "sensory_node_count": native_metrics.get("num_sensory_nodes"),
+            "sensory_steps": native_metrics.get("steps"),
         }
     return {
         "target_n1_accuracy": ((native_metrics.get("n_step_observation_prediction_accuracy") or {}).get("n1")),
@@ -238,12 +251,12 @@ def rollout_n_step_observation_prediction_metrics(
     }
 
 
-def summarize_mercury_native_metrics(states_path: Path) -> Dict[str, Any]:
+def summarize_mercury_native_metrics(states_path: Path, datasets_root: Path = Path("datasets")) -> Dict[str, Any]:
     frame = pl.read_parquet(states_path).select("sensory_bmu", "latent_bmu")
     gt = load_ground_truth_proxy_states(states_path)
     sensory = frame.get_column("sensory_bmu").to_numpy().astype(np.int32, copy=False)
     latent = frame.get_column("latent_bmu").to_numpy().astype(np.int32, copy=False)
-    dataset_path = resolve_dataset_parquet_from_states(states_path)
+    dataset_path = resolve_dataset_parquet_from_states(states_path, datasets_root=datasets_root)
     actions = load_action_series(dataset_path).astype(np.int32, copy=False)
     length = min(len(gt), len(actions), len(sensory), len(latent))
     if length < 2:
@@ -269,8 +282,29 @@ def summarize_mercury_native_metrics(states_path: Path) -> Dict[str, Any]:
 
 
 def write_method_comparison_report(*, run_root: Path, run_id: str, run_payload: Dict[str, Any], subsystems: Dict[str, Dict[str, Any]]) -> Path:
+    target_method = _target_method(run_payload)
+    target_artifacts = (subsystems.get(target_method) or {}).get("artifacts") or {}
+    target_state_path_raw = target_artifacts.get("states_parquet")
+    target_states_path = Path(target_state_path_raw) if target_state_path_raw else None
+    target_paper_precision_raw = target_artifacts.get("paper_precision_json")
+    target_computational_raw = target_artifacts.get("computational_json")
+    target_paper_precision_path = Path(target_paper_precision_raw) if target_paper_precision_raw else None
+    target_computational_path = Path(target_computational_raw) if target_computational_raw else None
+    target_native_metrics = (
+        summarize_mercury_native_metrics(target_states_path)
+        if target_method == "mercury" and target_states_path is not None
+        else dict((subsystems.get(target_method) or {}).get("native_metrics") or {})
+    )
+    target_paper_precision = (
+        summarize_paper_precision_artifact(target_paper_precision_path)
+        if target_paper_precision_path is not None and target_paper_precision_path.exists()
+        else {}
+    )
+    target_computational = summarize_computational_raw(target_computational_path)
+
     mercury_artifacts = (subsystems.get("mercury") or {}).get("artifacts") or {}
-    mercury_states_path = Path(mercury_artifacts["states_parquet"])
+    mercury_state_path_raw = mercury_artifacts.get("states_parquet")
+    mercury_states_path = Path(mercury_state_path_raw) if mercury_state_path_raw else None
     pocml_artifacts = (subsystems.get("pocml") or {}).get("artifacts") or {}
     cscg_artifacts = (subsystems.get("cscg") or {}).get("artifacts") or {}
     pocml_state_path_raw = pocml_artifacts.get("states_parquet")
@@ -289,7 +323,11 @@ def write_method_comparison_report(*, run_root: Path, run_id: str, run_payload: 
     pocml_computational_path = Path(pocml_computational_raw) if pocml_computational_raw else None
     cscg_paper_precision_path = Path(cscg_paper_precision_raw) if cscg_paper_precision_raw else None
     cscg_computational_path = Path(cscg_computational_raw) if cscg_computational_raw else None
-    mercury_native_metrics = summarize_mercury_native_metrics(mercury_states_path)
+    mercury_native_metrics = (
+        summarize_mercury_native_metrics(mercury_states_path)
+        if mercury_states_path is not None and mercury_states_path.exists()
+        else {}
+    )
     mercury_paper_precision = (
         summarize_paper_precision_artifact(mercury_paper_precision_path)
         if mercury_paper_precision_path is not None and mercury_paper_precision_path.exists()
@@ -316,16 +354,22 @@ def write_method_comparison_report(*, run_root: Path, run_id: str, run_payload: 
         "generated_at_utc": utc_now(),
         "status": {
             "run": "completed",
+            "target_method": target_method,
+            "target": (subsystems.get(target_method) or {}).get("status"),
             "mercury": (subsystems.get("mercury") or {}).get("status"),
+            "mercury_cscg_hybrid": (subsystems.get("mercury_cscg_hybrid") or {}).get("status"),
             "pocml": (subsystems.get("pocml") or {}).get("status"),
             "cscg": (subsystems.get("cscg") or {}).get("status"),
         },
         "errors": {
+            "target": (subsystems.get(target_method) or {}).get("error"),
             "pocml": (subsystems.get("pocml") or {}).get("error"),
             "cscg": (subsystems.get("cscg") or {}).get("error"),
         },
         "inputs": {
-            "mercury_states_parquet": str(mercury_states_path),
+            "target_states_parquet": (str(target_states_path) if target_states_path is not None else None),
+            "target_paper_precision_json": (str(target_paper_precision_path) if target_paper_precision_path is not None else None),
+            "mercury_states_parquet": (str(mercury_states_path) if mercury_states_path is not None else None),
             "mercury_paper_precision_json": (str(mercury_paper_precision_path) if mercury_paper_precision_path is not None else None),
             "pocml_states_parquet": (str(pocml_states_path) if pocml_states_path is not None else None),
             "pocml_paper_precision_json": (str(pocml_paper_precision_path) if pocml_paper_precision_path is not None else None),
@@ -338,6 +382,35 @@ def write_method_comparison_report(*, run_root: Path, run_id: str, run_payload: 
             "sensor_range": run_payload["sensor_range"],
             "baselines": run_payload.get("baselines") or {},
         },
+        "target_method": target_method,
+        "target_native_metrics": target_native_metrics,
+        "target_paper_precision": target_paper_precision,
+        "target_computational": {
+            "raw": target_computational,
+            "derived": derive_efficiency_metrics(
+                raw_metrics=target_computational,
+                precision_value=_precision_reference(target_method, target_native_metrics, target_paper_precision),
+            ),
+            "notes": (read_computational_artifact(target_computational_path).get("notes") or []),
+        },
+        "mercury_cscg_hybrid_native_metrics": (
+            target_native_metrics if target_method == "mercury_cscg_hybrid" else {}
+        ),
+        "mercury_cscg_hybrid_paper_precision": (
+            target_paper_precision if target_method == "mercury_cscg_hybrid" else {}
+        ),
+        "mercury_cscg_hybrid_computational": (
+            {
+                "raw": target_computational,
+                "derived": derive_efficiency_metrics(
+                    raw_metrics=target_computational,
+                    precision_value=_precision_reference(target_method, target_native_metrics, target_paper_precision),
+                ),
+                "notes": (read_computational_artifact(target_computational_path).get("notes") or []),
+            }
+            if target_method == "mercury_cscg_hybrid"
+            else {"raw": {}, "derived": {}, "notes": []}
+        ),
         "mercury_native_metrics": mercury_native_metrics,
         "mercury_paper_precision": mercury_paper_precision,
         "mercury_computational": {
@@ -436,6 +509,8 @@ def write_study_summary(study_root: Path, study_name: str) -> Path:
             "am_lr": (run_config.run_payload.get("action_map") or {}).get("lr"),
             "am_sigma": (run_config.run_payload.get("action_map") or {}).get("sigma"),
             "am_key": (run_config.run_payload.get("action_map") or {}).get("key"),
+            "mercury_input_mode": run_config.run_payload.get("mercury_input_mode"),
+            "sensory_observation_mode": run_config.run_payload.get("sensory_observation_mode"),
             "run_status": run_status.status,
             **metric_columns,
         }
@@ -491,6 +566,8 @@ def write_study_summary(study_root: Path, study_name: str) -> Path:
     available_columns = set().union(*(row.keys() for row in summary_rows))
     if "paper_latent_precision" in available_columns:
         sort_column = "paper_latent_precision"
+    elif "paper_sensory_precision" in available_columns:
+        sort_column = "paper_sensory_precision"
     elif "paper_capacity_precision" in available_columns:
         sort_column = "paper_capacity_precision"
     else:

@@ -419,6 +419,7 @@ def write_pocml_paper_precision_payload(
             "capacity_dependent": True,
             "mode": mode,
             "eval_interval": int(config.paper_precision_eval_interval),
+            "eval_checkpoints": config.paper_precision_eval_checkpoints,
             "num_points": config.paper_precision_num_points,
             "resolved_capacities": [int(value) for value in resolved_capacities],
             "primary_capacity": int(primary_capacity),

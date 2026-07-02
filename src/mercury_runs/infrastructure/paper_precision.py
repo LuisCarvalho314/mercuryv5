@@ -20,21 +20,65 @@ DEFAULT_PAPER_PRECISION_NUM_WALKS = 100
 DEFAULT_PAPER_PRECISION_WALK_LENGTH = 10_000
 
 
-def resolve_eval_checkpoints(*, total_units: int, num_points: int | None, eval_interval: int) -> list[int]:
+def resolve_eval_checkpoints(
+    *,
+    total_units: int,
+    num_points: int | None,
+    eval_interval: int,
+    schedule: str = "linear",
+    min_checkpoint: int = 10,
+    explicit_checkpoints: Sequence[int] | None = None,
+) -> list[int]:
     total = int(total_units)
     if total <= 0:
         return []
-    if num_points is not None:
-        target_points = max(1, min(int(num_points), total))
-        checkpoints = np.linspace(1, total, num=target_points, dtype=np.int64).tolist()
+
+    if explicit_checkpoints is not None:
+        checkpoints = sorted({int(value) for value in explicit_checkpoints if 0 < int(value) <= total})
+        if not checkpoints:
+            raise ValueError("paper_precision_eval_checkpoints must contain at least one checkpoint within the run length.")
         if checkpoints[-1] != total:
             checkpoints.append(total)
+        return checkpoints
+
+    if num_points is not None:
+        target_points = max(1, min(int(num_points), total))
+
+        if schedule == "log":
+            start = max(1, min(int(min_checkpoint), total))
+            raw = np.geomspace(start, total, num=target_points)
+            checkpoints = np.rint(raw).astype(np.int64).tolist()
+        else:
+            checkpoints = np.linspace(1, total, num=target_points, dtype=np.int64).tolist()
+
         return sorted({int(value) for value in checkpoints if int(value) > 0})
+
     interval = max(1, int(eval_interval))
     checkpoints = list(range(interval, total + 1, interval))
-    if not checkpoints or checkpoints[-1] != total:
-        checkpoints.append(total)
+    checkpoints.append(total)
     return sorted({int(value) for value in checkpoints if int(value) > 0})
+
+def resolve_structure_metric_epsilons(config: Any) -> list[float]:
+    raw_values = getattr(config, "structure_metrics_epsilons", None)
+    if raw_values is None:
+        raw_values = [getattr(config, "structure_metrics_epsilon", 1e-6)]
+    elif isinstance(raw_values, (int, float)):
+        raw_values = [raw_values]
+
+    resolved: list[float] = []
+    for raw_value in raw_values:
+        value = float(raw_value)
+        if value < 0.0:
+            raise ValueError("Structure metric epsilons must be non-negative.")
+        if value not in resolved:
+            resolved.append(value)
+    if not resolved:
+        resolved.append(float(getattr(config, "structure_metrics_epsilon", 1e-6)))
+    return resolved
+
+
+def structure_epsilon_key(epsilon: float) -> str:
+    return f"{float(epsilon):.12g}"
 
 
 @dataclass(frozen=True)

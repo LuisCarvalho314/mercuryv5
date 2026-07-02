@@ -16,6 +16,7 @@ from .evaluate import (
     write_cscg_paper_precision_payload,
 )
 from .prepare import (
+    action_to_indices,
     collect_streaming_cscg_metadata,
     filter_valid_cscg_rows,
     fit_state_to_gt_map,
@@ -29,6 +30,7 @@ from .prepare import (
 )
 from .train import objective_scores, run_cscg_online_em, train_cscg_model
 from ...infrastructure.paper_precision import resolve_eval_checkpoints
+from ...infrastructure.paper_precision_snapshots import write_cscg_paper_precision_snapshot
 from ...infrastructure.runtime import progress_enabled
 
 
@@ -102,7 +104,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
             valid_trajectories_only=bool(config.valid_trajectories_only),
         )
         obs_idx_seed, obs_values = to_indices(observations)
-        act_idx_seed, action_values = to_indices(actions)
+        act_idx_seed, action_values = action_to_indices(actions)
         if obs_idx_seed.shape[0] < 3 or act_idx_seed.shape[0] < 3:
             raise ValueError("CSCG baseline could not align enough samples between dataset and ground truth.")
         n_obs = int(obs_idx_seed.max()) + 1
@@ -123,14 +125,27 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     em_eval_checkpoints = set(
         resolve_eval_checkpoints(
             total_units=em_schedule_total_units,
+            schedule = config.paper_precision_schedule,
             num_points=config.paper_precision_num_points,
             eval_interval=int(config.paper_precision_eval_interval),
+            explicit_checkpoints=config.paper_precision_eval_checkpoints,
         )
     )
     last_em_iteration = 0
     last_em_step = 0
 
     def _record_paper_precision(*, stage: str, iteration: int, current_step: int, observed_samples: int, model) -> None:
+        model_npz = {"T": np.asarray(model.T), "n_clones": n_clones}
+        write_cscg_paper_precision_snapshot(
+            config=config,
+            stage=stage,
+            iteration=int(iteration),
+            step=int(current_step),
+            observed_samples=int(observed_samples),
+            model_npz=model_npz,
+            obs_uniques=np.asarray(obs_values),
+            action_uniques=np.asarray(action_values),
+        )
         paper_precision_history.append(
             {
                 "stage": stage,
@@ -138,7 +153,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 "step": int(current_step),
                 "observed_samples": int(observed_samples),
                 **compute_cscg_paper_precision_metrics_from_model(
-                    model_npz={"T": np.asarray(model.T), "n_clones": n_clones},
+                    model_npz=model_npz,
                     n_clones=n_clones,
                     config=config,
                     obs_uniques=np.asarray(obs_values),
@@ -186,6 +201,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 online_lambda=float(config.online_lambda),
                 max_batches=int(config.n_iter),
                 term_early=bool(config.term_early),
+                repeat_batches=True,
                 iteration_callback=training_callback,
             )
         }

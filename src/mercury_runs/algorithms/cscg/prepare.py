@@ -104,10 +104,36 @@ def to_indices(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return inverse.astype(np.int64, copy=False), np.asarray(uniques)
 
 
+def _is_one_hot_actions(values: np.ndarray) -> bool:
+    action_array = np.asarray(values)
+    if action_array.ndim != 2 or action_array.shape[1] == 0:
+        return False
+    return bool(
+        np.allclose(action_array.sum(axis=1), 1.0)
+        and np.all(np.count_nonzero(action_array > 0.5, axis=1) == 1)
+    )
+
+
+def action_to_indices(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    action_array = np.asarray(values)
+    if _is_one_hot_actions(action_array):
+        action_width = int(action_array.shape[1])
+        return (
+            np.argmax(action_array, axis=1).astype(np.int64, copy=False),
+            np.eye(action_width, dtype=action_array.dtype),
+        )
+    return to_indices(action_array)
+
+
 def map_to_indices(reference_uniques: np.ndarray, values: np.ndarray) -> np.ndarray:
     if reference_uniques.ndim == 1:
         lookup = {value.item() if hasattr(value, "item") else value: idx for idx, value in enumerate(reference_uniques.tolist())}
         return np.asarray([lookup[row.item() if hasattr(row, "item") else row] for row in np.asarray(values).tolist()], dtype=np.int64)
+    if _is_one_hot_actions(np.asarray(values)) and np.asarray(reference_uniques).shape == (
+        np.asarray(values).shape[1],
+        np.asarray(values).shape[1],
+    ) and np.allclose(reference_uniques, np.eye(np.asarray(values).shape[1], dtype=np.asarray(reference_uniques).dtype)):
+        return np.argmax(np.asarray(values), axis=1).astype(np.int64, copy=False)
     lookup = {tuple(np.asarray(row).tolist()): idx for idx, row in enumerate(reference_uniques)}
     return np.asarray([lookup[tuple(np.asarray(row).tolist())] for row in np.asarray(values)], dtype=np.int64)
 
@@ -215,6 +241,7 @@ def collect_streaming_cscg_metadata(
     stats = {"raw_steps": 0, "filtered_steps": 0, "dropped_collision_steps": 0}
     obs_unique_rows: set[tuple[Any, ...] | Any] = set()
     action_unique_rows: set[tuple[Any, ...] | Any] = set()
+    one_hot_action_width: int | None = None
     obs_width: int | None = None
     action_width: int | None = None
     non_empty_batch_count = 0
@@ -234,6 +261,8 @@ def collect_streaming_cscg_metadata(
         actions = np.asarray(batch["actions"])
         obs_width = int(observations.shape[1]) if observations.ndim > 1 else 1
         action_width = int(actions.shape[1]) if actions.ndim > 1 else 1
+        if _is_one_hot_actions(actions):
+            one_hot_action_width = max(int(one_hot_action_width or 0), int(actions.shape[1]))
         if observations.ndim == 1:
             obs_unique_rows.update(observations.tolist())
         else:
@@ -250,7 +279,9 @@ def collect_streaming_cscg_metadata(
         obs_uniques = np.asarray(ordered_obs)
     else:
         obs_uniques = np.asarray(ordered_obs).reshape(-1, obs_width)
-    if action_width == 1:
+    if one_hot_action_width is not None:
+        action_uniques = np.eye(one_hot_action_width, dtype=np.asarray(ordered_actions).dtype)
+    elif action_width == 1:
         action_uniques = np.asarray(ordered_actions)
     else:
         action_uniques = np.asarray(ordered_actions).reshape(-1, action_width)

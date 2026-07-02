@@ -12,6 +12,7 @@ from .evaluate import summarize_mercury_run
 from .prepare import generate_mercury_datasets
 from .train import run_mercury_bundle
 from ...infrastructure.paper_precision import resolve_eval_checkpoints
+from ...infrastructure.paper_precision_snapshots import write_mercury_paper_precision_snapshot
 from ...infrastructure.runtime import progress_enabled
 
 
@@ -38,27 +39,40 @@ def run_mercury(
     paper_precision_checkpoints = set(
         resolve_eval_checkpoints(
             total_units=int(config.num_steps),
+            schedule=config.paper_precision_schedule,
             num_points=config.paper_precision_num_points,
             eval_interval=int(config.paper_precision_eval_interval),
+            explicit_checkpoints=config.paper_precision_eval_checkpoints,
         )
     )
 
-    def _paper_precision_callback(*, step: int, sensory_graph, latent_graph, action_map) -> None:
+    def _paper_precision_callback(*, step: int, sensory_graph, latent_graph, action_map, obs_uniques=None) -> None:
         if step == int(config.num_steps):
             final_snapshot.update(
                 sensory_graph=deepcopy(sensory_graph),
                 latent_graph=deepcopy(latent_graph),
                 action_map=deepcopy(action_map),
+                obs_uniques=(None if obs_uniques is None else deepcopy(obs_uniques)),
             )
         if paper_precision_mode != "per_iteration":
             return
         if int(step) not in paper_precision_checkpoints:
             return
+        write_mercury_paper_precision_snapshot(
+            config=config,
+            step=int(step),
+            observed_samples=int(step),
+            sensory_graph=sensory_graph,
+            latent_graph=latent_graph,
+            action_map=action_map,
+            obs_uniques=obs_uniques,
+        )
         metrics_kwargs = {
             "config": config,
             "sensory_graph": deepcopy(sensory_graph),
             "latent_graph": deepcopy(latent_graph),
             "action_map": deepcopy(action_map),
+            "obs_uniques": (None if obs_uniques is None else deepcopy(obs_uniques)),
             "show_progress": show_progress,
             "progress_desc": f"Mercury Paper Precision @ step {step}",
         }
@@ -97,6 +111,7 @@ def run_mercury(
                             "sensory_graph": final_snapshot.get("sensory_graph"),
                             "latent_graph": final_snapshot.get("latent_graph"),
                             "action_map": final_snapshot.get("action_map"),
+                            "obs_uniques": final_snapshot.get("obs_uniques"),
                             "show_progress": show_progress,
                             "progress_desc": "Mercury Paper Precision",
                             "progress_callback": (
@@ -127,6 +142,7 @@ def run_mercury(
                 "sensory_graph": final_snapshot["sensory_graph"],
                 "latent_graph": final_snapshot["latent_graph"],
                 "action_map": final_snapshot["action_map"],
+                "obs_uniques": final_snapshot.get("obs_uniques"),
                 "show_progress": show_progress,
                 "progress_desc": "Mercury Paper Precision",
             }

@@ -26,13 +26,15 @@ from ...infrastructure.paper_precision import (
     infer_num_actions_from_valid_transitions,
     map_values_with_reference,
     remap_position_walks_to_global_ids,
+    resolve_structure_metric_epsilons,
     resolve_dataset_parquet_from_bundle,
     support_action_transition_tensor,
+    structure_epsilon_key,
     write_paper_precision_artifact,
 )
 from ...io_parquet import ParquetConfig, load_level_parquet
 from ...infrastructure.reporting import rollout_n_step_observation_prediction_metrics
-from .prepare import filter_valid_cscg_rows, import_cscg_module
+from .prepare import action_to_indices, filter_valid_cscg_rows, import_cscg_module, map_to_indices
 
 
 def decode_cscg_states(model: Any, obs_idx: np.ndarray, act_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -108,7 +110,7 @@ def compute_cscg_paper_precision(*, config) -> Path:
         valid_trajectories_only=bool(config.valid_trajectories_only),
     )
     obs_uniques = np.unique(train_obs, axis=0)
-    action_uniques = np.unique(train_actions, axis=0)
+    _, action_uniques = action_to_indices(train_actions)
     model_npz = np.load(states_path.with_name(f"{config.run_id}_cscg_model.npz"))
     n_clones = np.asarray(model_npz["n_clones"], dtype=np.int64)
     chmm_mod = import_cscg_module(Path.cwd())
@@ -160,7 +162,7 @@ def compute_cscg_paper_precision_metrics_from_model(
             valid_trajectories_only=bool(config.valid_trajectories_only),
         )
         obs_idx = map_values_with_reference(reference_uniques=obs_uniques, values=filtered_obs).astype(np.int64, copy=False)
-        act_idx = map_values_with_reference(reference_uniques=action_uniques, values=filtered_actions).astype(np.int64, copy=False)
+        act_idx = map_to_indices(action_uniques, filtered_actions).astype(np.int64, copy=False)
         if obs_idx.shape[0] == 0 or act_idx.shape[0] == 0:
             skipped_short_walks += 1
             continue
@@ -221,7 +223,8 @@ def compute_cscg_paper_precision_metrics_from_model(
     if bool(getattr(config, "structure_metrics_enabled", True)):
         structure_scope = str(getattr(config, "structure_metrics_scope", "exact_level")).strip().lower()
         structure_source = str(getattr(config, "structure_metrics_ground_truth_source", "empirical_walks")).strip().lower()
-        structure_epsilon = float(getattr(config, "structure_metrics_epsilon", 1e-6))
+        structure_epsilons = resolve_structure_metric_epsilons(config)
+        structure_epsilon = float(structure_epsilons[0])
         ignore_self_loops = bool(getattr(config, "structure_metrics_ignore_self_loops", True))
         if structure_scope == "walk_local":
             true_structure_walks = remap_position_walks_to_global_ids(gt_position_walks)
@@ -251,19 +254,31 @@ def compute_cscg_paper_precision_metrics_from_model(
                 if structure_source == "maze_topology"
                 else None
             )
-        structure_metrics = compute_weighted_structure_metrics(
-            decoded_walks=inferred_walks,
-            true_walks=true_structure_walks,
-            W_hat=collapse_action_transition_tensor_to_adjacency(np.asarray(model_npz["T"], dtype=np.float64)),
-            n_true=n_true_states,
-            W_true=W_true,
-            epsilon=structure_epsilon,
-            ignore_self_loops=ignore_self_loops,
-        )
-        metrics["latent_mean_total_variation"] = structure_metrics["mean_total_variation"]
-        metrics["latent_edge_precision"] = structure_metrics["edge_precision"]
-        metrics["latent_edge_recall"] = structure_metrics["edge_recall"]
-        metrics["latent_edge_f1"] = structure_metrics["edge_f1"]
+        metrics_by_epsilon: dict[str, Any] = {}
+        transition_tensor = np.asarray(model_npz["T"], dtype=np.float64)
+        collapsed_adjacency = collapse_action_transition_tensor_to_adjacency(transition_tensor)
+        for epsilon in structure_epsilons:
+            structure_metrics = compute_weighted_structure_metrics(
+                decoded_walks=inferred_walks,
+                true_walks=true_structure_walks,
+                W_hat=collapsed_adjacency,
+                n_true=n_true_states,
+                W_true=W_true,
+                epsilon=float(epsilon),
+                ignore_self_loops=ignore_self_loops,
+            )
+            metrics_by_epsilon[structure_epsilon_key(float(epsilon))] = {
+                "latent_mean_total_variation": structure_metrics["mean_total_variation"],
+                "latent_edge_precision": structure_metrics["edge_precision"],
+                "latent_edge_recall": structure_metrics["edge_recall"],
+                "latent_edge_f1": structure_metrics["edge_f1"],
+            }
+        primary_structure_metrics = metrics_by_epsilon[structure_epsilon_key(structure_epsilon)]
+        metrics["latent_mean_total_variation"] = primary_structure_metrics["latent_mean_total_variation"]
+        metrics["latent_edge_precision"] = primary_structure_metrics["latent_edge_precision"]
+        metrics["latent_edge_recall"] = primary_structure_metrics["latent_edge_recall"]
+        metrics["latent_edge_f1"] = primary_structure_metrics["latent_edge_f1"]
+        metrics["metrics_by_structure_epsilon"] = metrics_by_epsilon
         valid_transitions = exact_valid_sensorimotor_transitions(level_index=int(config.level))
         n_actions = max(infer_num_actions_from_valid_transitions(valid_transitions), int(np.asarray(model_npz["T"]).shape[0]))
         if structure_scope == "walk_local":
@@ -296,20 +311,27 @@ def compute_cscg_paper_precision_metrics_from_model(
                     n_actions=n_actions,
                 )
             )
-        action_structure_metrics = compute_action_conditioned_structure_metrics(
-            decoded_walks=inferred_walks,
-            true_walks=true_structure_walks,
-            action_walks=gt_action_walks,
-            T_hat=support_action_transition_tensor(np.asarray(model_npz["T"], dtype=np.float64), epsilon=structure_epsilon),
-            n_true=n_true_states,
-            T_true=T_true,
-            epsilon=structure_epsilon,
-            ignore_self_loops=ignore_self_loops,
-        )
-        metrics["latent_action_conditioned_mean_total_variation"] = action_structure_metrics["mean_total_variation"]
-        metrics["latent_action_conditioned_edge_precision"] = action_structure_metrics["edge_precision"]
-        metrics["latent_action_conditioned_edge_recall"] = action_structure_metrics["edge_recall"]
-        metrics["latent_action_conditioned_edge_f1"] = action_structure_metrics["edge_f1"]
+        for epsilon in structure_epsilons:
+            action_structure_metrics = compute_action_conditioned_structure_metrics(
+                decoded_walks=inferred_walks,
+                true_walks=true_structure_walks,
+                action_walks=gt_action_walks,
+                T_hat=support_action_transition_tensor(transition_tensor, epsilon=float(epsilon)),
+                n_true=n_true_states,
+                T_true=T_true,
+                epsilon=float(epsilon),
+                ignore_self_loops=ignore_self_loops,
+            )
+            threshold_metrics = metrics["metrics_by_structure_epsilon"][structure_epsilon_key(float(epsilon))]
+            threshold_metrics["latent_action_conditioned_mean_total_variation"] = action_structure_metrics["mean_total_variation"]
+            threshold_metrics["latent_action_conditioned_edge_precision"] = action_structure_metrics["edge_precision"]
+            threshold_metrics["latent_action_conditioned_edge_recall"] = action_structure_metrics["edge_recall"]
+            threshold_metrics["latent_action_conditioned_edge_f1"] = action_structure_metrics["edge_f1"]
+        primary_action_metrics = metrics["metrics_by_structure_epsilon"][structure_epsilon_key(structure_epsilon)]
+        metrics["latent_action_conditioned_mean_total_variation"] = primary_action_metrics["latent_action_conditioned_mean_total_variation"]
+        metrics["latent_action_conditioned_edge_precision"] = primary_action_metrics["latent_action_conditioned_edge_precision"]
+        metrics["latent_action_conditioned_edge_recall"] = primary_action_metrics["latent_action_conditioned_edge_recall"]
+        metrics["latent_action_conditioned_edge_f1"] = primary_action_metrics["latent_action_conditioned_edge_f1"]
     state_to_gt = dominant_ground_truth_mapping_from_cooccurrence(exact_metrics["cooccurrence_matrix"])
     valid_transitions = exact_valid_sensorimotor_transitions(level_index=int(config.level))
     transitions = set()
@@ -348,9 +370,11 @@ def write_cscg_paper_precision_payload(*, config, metrics: dict[str, Any], histo
             "valid_trajectories_only": bool(config.valid_trajectories_only),
             "mode": mode,
             "eval_interval": int(config.paper_precision_eval_interval),
+            "eval_checkpoints": config.paper_precision_eval_checkpoints,
             "num_points": config.paper_precision_num_points,
             "schedule_unit": schedule_unit,
             "x_axis_unit": "observed_samples",
+            "structure_metrics_epsilons": resolve_structure_metric_epsilons(config),
         },
         "metrics": metrics,
         "history": history,

@@ -12,7 +12,7 @@ from mercury.sensory.state import init_state, sensory_step_predict_only
 from mercury_runs.algorithms.mercury.api import run_mercury
 from mercury_runs.algorithms.mercury.config import MercuryConfig
 from mercury_runs.algorithms.mercury.evaluate import _run_mercury_snapshot_on_walk, compute_mercury_paper_precision_metrics
-from mercury_runs.infrastructure.paper_precision import generate_random_start_walks
+from mercury_runs.infrastructure.paper_precision import generate_random_start_walks, resolve_eval_checkpoints
 from mercury_runs.pipelines import run_ground_truth_cartesian, run_latent
 
 
@@ -112,6 +112,51 @@ def test_run_mercury_per_iteration_uses_num_points_schedule(monkeypatch, tmp_pat
     run_mercury(config)
 
     assert [item["step"] for item in written["history"]] == [1, 5, 10]
+
+
+def test_resolve_eval_checkpoints_uses_manual_list_first() -> None:
+    assert resolve_eval_checkpoints(
+        total_units=10,
+        num_points=3,
+        eval_interval=2,
+        explicit_checkpoints=[8, 2, 2, 99],
+    ) == [2, 8, 10]
+
+
+def test_run_mercury_per_iteration_uses_manual_checkpoints(monkeypatch, tmp_path: Path) -> None:
+    written: dict = {}
+
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.generate_mercury_datasets", lambda **kwargs: {})
+
+    def _fake_run_bundle(*, config, dataset_run_ids, latent_step_callback=None, show_progress=True):
+        if latent_step_callback is not None:
+            for step in range(1, 11):
+                latent_step_callback(step=step, sensory_graph=object(), latent_graph=object(), action_map=object())
+        return tmp_path / "states.parquet"
+
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.run_mercury_bundle", _fake_run_bundle)
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.api._compute_mercury_precision", lambda **kwargs: None)
+    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.api.compute_mercury_paper_precision_metrics",
+        lambda **kwargs: {"sensory_precision": 0.5, "latent_precision": 0.75},
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_payload",
+        lambda **kwargs: written.update(kwargs),
+    )
+
+    config = _base_config(tmp_path).model_copy(
+        update={
+            "num_steps": 10,
+            "paper_precision_eval_checkpoints": [3, 7],
+            "paper_precision_num_points": 3,
+            "paper_precision_eval_interval": 2,
+        }
+    )
+    run_mercury(config)
+
+    assert [item["step"] for item in written["history"]] == [3, 7, 10]
 
 
 def test_run_mercury_final_uses_frozen_snapshot(monkeypatch, tmp_path: Path) -> None:

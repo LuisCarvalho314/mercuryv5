@@ -24,9 +24,13 @@ from mercury.latent.state import (
 )
 from mercury.memory.state import add_memory, init_mem, update_memory
 from mercury.sensory.params import SensoryParams
-from mercury.sensory.state import init_state, sensory_step, sensory_step_frozen
+from mercury.sensory.state import SensoryState, init_state, sensory_step, sensory_step_frozen
 
 from .io_parquet import LoadedDataset, ParquetConfig, load_level_parquet
+from .infrastructure.observation_encoding import (
+    encode_observations_with_vocabulary,
+    fit_cscg_one_hot_observations,
+)
 from .save_results import write_bundle_parquet
 from .schemas_results import ResultBundleMeta, SourceDatasetRef
 
@@ -63,6 +67,7 @@ class RunAllBundledConfig(BaseModel):
     ground_truth_dataset_run_id: Optional[str] = None
     mercury_valid_trajectories_only: bool = False
     mercury_split_sensory_raw_latent_valid: bool = False
+    mercury_input_mode: Literal["pretrained_raw", "pretrained_cscg_one_hot", "direct_cscg_one_hot"] = "pretrained_raw"
     memory_length: int = Field(gt=0)
     embed_metadata_in_parquet: bool = True
     sensory_params: SensoryParams
@@ -78,6 +83,11 @@ class RunAllBundledConfig(BaseModel):
             raise ValueError("dataset_select='run_id' requires dataset_run_id.")
         if self.sensor == "cardinal distance" and self.sensor_range is None:
             raise ValueError("sensor='cardinal distance' requires sensor_range.")
+        if self.mercury_input_mode in {"pretrained_cscg_one_hot", "direct_cscg_one_hot"}:
+            if self.sensor != "cardinal distance":
+                raise ValueError(f"mercury_input_mode={self.mercury_input_mode!r} requires sensor='cardinal distance'.")
+            if self.sensor_range is None:
+                raise ValueError(f"mercury_input_mode={self.mercury_input_mode!r} requires sensor_range.")
         return self
 
 
@@ -137,6 +147,54 @@ def _init_latent_state_compat(mem: Any, *, n_actions: int):
         return init_latent_state(mem, n_actions=n_actions)
     except TypeError:
         return init_latent_state(mem)
+
+
+def _one_hot_dataset(dataset: LoadedDataset, obs_uniques: np.ndarray) -> LoadedDataset:
+    encoded = encode_observations_with_vocabulary(
+        observations=np.asarray(dataset.observations),
+        obs_uniques=obs_uniques,
+    )
+    return LoadedDataset(
+        observations=encoded.observations,
+        actions=np.asarray(dataset.actions),
+        collisions=np.asarray(dataset.collisions),
+        source_metadata={
+            **dict(dataset.source_metadata),
+            "observation_mode": "cscg_one_hot",
+            "observation_vocabulary_size": int(np.asarray(obs_uniques).shape[0]),
+        },
+        parquet_path=dataset.parquet_path,
+    )
+
+
+def _build_identity_sensory_graph(n_symbols: int) -> Graph:
+    graph = Graph(directed=True)
+    graph.register_node_feature("weight", int(n_symbols))
+    graph.register_node_feature("context", int(n_symbols))
+    graph.register_node_feature("activation", 1)
+    graph.register_edge_feature("age", 1, dtype=np.int32, init_value=0)
+    graph.register_edge_feature("action", 1, dtype=np.int32, init_value=0)
+    basis = np.eye(int(n_symbols), dtype=np.float32)
+    for index in range(int(n_symbols)):
+        graph.add_node(
+            node_feat={
+                "weight": basis[index],
+                "context": np.zeros((int(n_symbols),), dtype=np.float32),
+                "activation": np.array(0.0, dtype=np.float32),
+            },
+            edge_defaults_for_new_node={
+                "age": np.array([0], dtype=np.int32),
+                "action": np.array([0], dtype=np.int32),
+            },
+        )
+    return graph
+
+
+def _set_identity_sensory_activation(graph: Graph, bmu: int) -> Graph:
+    activation = np.zeros((graph.n,), dtype=np.float32)
+    activation[int(bmu)] = 1.0
+    graph.set_node_feat("activation", activation)
+    return graph
 
 
 def run_ground_truth_cartesian(
@@ -309,6 +367,8 @@ def run_latent(
     step_callback: Any = None,
     dataset_sensory: LoadedDataset | None = None,
     latent_valid_trajectories_only: bool = False,
+    direct_one_hot_observations: bool = False,
+    obs_uniques: np.ndarray | None = None,
     *,
     show_progress: bool = False,
     progress_desc: Optional[str] = None,
@@ -325,42 +385,52 @@ def run_latent(
     observation_dim = int(sensory_observations.shape[1])
     action_dim = _action_dim(sensory_actions)
 
-    sensory_state = init_state(observation_dim)
     action_map = _build_action_map(action_dim, action_map_params)
-
-    sensory_iterator = iter_sequence(sensory_observations, sensory_actions, sensory_collisions)
-    if show_progress:
-        sensory_iterator = tqdm(
-            sensory_iterator,
-            total=int(sensory_observations.shape[0]),
-            desc=(f"{progress_desc or 'Mercury Latent'} Sensory"),
-            position=0,
+    if bool(direct_one_hot_observations):
+        if obs_uniques is None:
+            raise ValueError("direct_one_hot_observations requires obs_uniques.")
+        sensory_state = SensoryState(
+            gs=_build_identity_sensory_graph(observation_dim),
+            global_context=np.zeros((observation_dim,), dtype=np.float32),
+            mapping=np.arange(observation_dim, dtype=np.int32),
         )
+    else:
+        sensory_state = init_state(observation_dim)
+
     training_sensory_bmus: list[int] = []
-    sensory_total = int(sensory_observations.shape[0])
-    sensory_report_every = max(1, sensory_total // 100)
-    for sensory_index, (observation, action, collision) in enumerate(sensory_iterator, start=1):
-        action_vector = np.atleast_1d(action).astype(np.float32)
-        action_bmu, _ = action_map.step(action_vector)
-
-        sensory_state = sensory_step(
-            observation.astype(np.float32),
-            int(action_bmu),
-            sensory_state,
-            sensory_params,
-            action_map,
-        )
-        training_sensory_bmus.append(int(sensory_state.prev_bmu))
-        if progress_callback is not None and (
-            sensory_index == 1 or sensory_index == sensory_total or sensory_index % sensory_report_every == 0
-        ):
-            progress_callback(
-                stage="latent_sensory",
-                current=int(sensory_index),
-                total=sensory_total,
-                message="Latent sensory pass",
-                extra={"sensory_nodes": int(sensory_state.gs.n)},
+    if not bool(direct_one_hot_observations):
+        sensory_iterator = iter_sequence(sensory_observations, sensory_actions, sensory_collisions)
+        if show_progress:
+            sensory_iterator = tqdm(
+                sensory_iterator,
+                total=int(sensory_observations.shape[0]),
+                desc=(f"{progress_desc or 'Mercury Latent'} Sensory"),
+                position=0,
             )
+        sensory_total = int(sensory_observations.shape[0])
+        sensory_report_every = max(1, sensory_total // 100)
+        for sensory_index, (observation, action, collision) in enumerate(sensory_iterator, start=1):
+            action_vector = np.atleast_1d(action).astype(np.float32)
+            action_bmu, _ = action_map.step(action_vector)
+
+            sensory_state = sensory_step(
+                observation.astype(np.float32),
+                int(action_bmu),
+                sensory_state,
+                sensory_params,
+                action_map,
+            )
+            training_sensory_bmus.append(int(sensory_state.prev_bmu))
+            if progress_callback is not None and (
+                sensory_index == 1 or sensory_index == sensory_total or sensory_index % sensory_report_every == 0
+            ):
+                progress_callback(
+                    stage="latent_sensory",
+                    current=int(sensory_index),
+                    total=sensory_total,
+                    message="Latent sensory pass",
+                    extra={"sensory_nodes": int(sensory_state.gs.n)},
+                )
 
     mem = init_mem(sensory_state.gs.n, memory_length)
     latent_state = _init_latent_state_compat(mem, n_actions=_action_codebook_size(action_map, fallback=action_dim))
@@ -394,14 +464,34 @@ def run_latent(
             action_bmu, _ = action_map.step(action_vector)
             action_bmu = int(action_bmu)
 
-        sensory_state = sensory_step_frozen(
-            observation.astype(np.float32),
-            int(action_bmu),
-            sensory_state,
-            sensory_params,
-            action_map,
-        )
-        frozen_sensory_bmus.append(int(sensory_state.prev_bmu))
+        if bool(direct_one_hot_observations):
+            activation_vector = np.asarray(observation, dtype=np.float32)
+            if activation_vector.ndim != 1 or activation_vector.shape[0] != sensory_state.gs.n:
+                raise ValueError("direct one-hot Mercury requires one-hot observations with width equal to sensory graph size.")
+            if not np.isclose(float(activation_vector.sum()), 1.0) or np.count_nonzero(activation_vector > 0.5) != 1:
+                raise ValueError("direct one-hot Mercury requires one-hot observations.")
+            sensory_bmu = int(np.argmax(activation_vector))
+            if sensory_state.prev_bmu is not None:
+                sensory_state.gs.add_edge(
+                    int(sensory_state.prev_bmu),
+                    sensory_bmu,
+                    weight=float(sensory_state.gs.adj[int(sensory_state.prev_bmu), sensory_bmu]) + 1.0,
+                    edge_feat={"action": np.array([int(action_bmu)], dtype=np.int32)},
+                )
+            sensory_state.gs = _set_identity_sensory_activation(sensory_state.gs, sensory_bmu)
+            sensory_state.prev_bmu = sensory_bmu
+            sensory_state.step_idx += 1
+            frozen_sensory_bmus.append(sensory_bmu)
+        else:
+            sensory_state = sensory_step_frozen(
+                observation.astype(np.float32),
+                int(action_bmu),
+                sensory_state,
+                sensory_params,
+                action_map,
+            )
+            activation_vector = np.asarray(sensory_state.gs.node_features["activation"], dtype=np.float32)
+            frozen_sensory_bmus.append(int(sensory_state.prev_bmu))
 
         sensory_graph_size = int(sensory_state.gs.n)
         if mem.gs.n != sensory_graph_size * memory_length:
@@ -409,7 +499,6 @@ def run_latent(
 
         should_update_latent = not (bool(latent_valid_trajectories_only) and bool(collision))
         if should_update_latent:
-            activation_vector = np.asarray(sensory_state.gs.node_features["activation"], dtype=np.float32)
             mem = update_memory(mem)
             mem = add_memory(mem, activation_vector)
 
@@ -465,12 +554,18 @@ def run_latent(
                 },
             )
         if step_callback is not None:
-            step_callback(
-                step=int(len(latent_bmus)),
-                sensory_graph=sensory_state.gs,
-                latent_graph=latent_state.g,
-                action_map=action_map,
-            )
+            callback_kwargs = {
+                "step": int(len(latent_bmus)),
+                "sensory_graph": sensory_state.gs,
+                "latent_graph": latent_state.g,
+                "action_map": action_map,
+                "obs_uniques": obs_uniques,
+            }
+            try:
+                step_callback(**callback_kwargs)
+            except TypeError:
+                callback_kwargs.pop("obs_uniques", None)
+                step_callback(**callback_kwargs)
 
     return (
         np.asarray(frozen_sensory_bmus, dtype=np.int32),
@@ -494,6 +589,7 @@ def run_all_bundled(
     ground_truth_dataset_run_id: Optional[str] = None,
     mercury_valid_trajectories_only: bool = False,
     mercury_split_sensory_raw_latent_valid: bool = False,
+    mercury_input_mode: str = "pretrained_raw",
     memory_length: int = 10,
     embed_metadata_in_parquet: bool = True,
     sensory_params: SensoryParams,
@@ -519,6 +615,7 @@ def run_all_bundled(
                 "ground_truth_dataset_run_id": ground_truth_dataset_run_id,
                 "mercury_valid_trajectories_only": mercury_valid_trajectories_only,
                 "mercury_split_sensory_raw_latent_valid": mercury_split_sensory_raw_latent_valid,
+                "mercury_input_mode": mercury_input_mode,
                 "memory_length": memory_length,
                 "embed_metadata_in_parquet": embed_metadata_in_parquet,
                 "sensory_params": sensory_params,
@@ -557,6 +654,7 @@ def run_all_bundled(
     dataset_cartesian = dataset_cartesian_raw
     split_sensory_latent = bool(config.mercury_split_sensory_raw_latent_valid)
     latent_valid_trajectories_only = False
+    obs_uniques: np.ndarray | None = None
 
     if bool(config.mercury_valid_trajectories_only):
         dataset_sensory = filter_mercury_dataset(dataset=dataset_latent_raw, valid_trajectories_only=True)
@@ -565,6 +663,15 @@ def run_all_bundled(
         split_sensory_latent = False
     elif split_sensory_latent:
         latent_valid_trajectories_only = True
+
+    mercury_input_mode = str(config.mercury_input_mode).strip().lower()
+    if mercury_input_mode in {"pretrained_cscg_one_hot", "direct_cscg_one_hot"}:
+        fitted = fit_cscg_one_hot_observations(np.asarray(dataset_sensory.observations))
+        obs_uniques = fitted.obs_uniques
+        dataset_sensory = _one_hot_dataset(dataset_sensory, obs_uniques)
+        dataset_latent = _one_hot_dataset(dataset_latent, obs_uniques)
+    elif mercury_input_mode != "pretrained_raw":
+        raise ValueError(f"Unsupported mercury_input_mode: {config.mercury_input_mode!r}")
 
     action_map_params_dict = config.action_map_params.model_dump()
     output_dir = _results_output_dir(config.results_root, config.level, config.sensor, config.sensor_range)
@@ -590,6 +697,8 @@ def run_all_bundled(
         step_callback=latent_step_callback,
         dataset_sensory=dataset_sensory,
         latent_valid_trajectories_only=latent_valid_trajectories_only,
+        direct_one_hot_observations=(mercury_input_mode == "direct_cscg_one_hot"),
+        obs_uniques=obs_uniques,
         show_progress=show_progress,
         progress_desc="Mercury Latent",
         progress_callback=progress_callback,
@@ -638,10 +747,16 @@ def run_all_bundled(
         memory_length=config.memory_length,
         run_parameters={
             **dict(config.run_parameters),
+            "observation_vocabulary": (obs_uniques.tolist() if obs_uniques is not None else None),
             "ground_truth_proxy": {
                 "series_name": "cartesian_proxy_bmu",
                 "legacy_series_name": "ground_truth_bmu",
                 "description": "Sensory BMU sequence induced by cartesian observations; not raw cartesian coordinates.",
+            },
+            "execution": {
+                **dict((config.run_parameters or {}).get("execution") or {}),
+                "mercury_input_mode": mercury_input_mode,
+                "observation_vocabulary_size": (int(obs_uniques.shape[0]) if obs_uniques is not None else None),
             },
         },
         source_dataset_metadata=dataset_latent.source_metadata,

@@ -109,16 +109,16 @@ def test_level_13_true_action_conditioned_transitions_include_boundary_self_loop
     # State 0 corresponds to position (1, 1), a top-left corner in the open area.
     assert tuple(positions[0].tolist()) == (1, 1)
     assert np.flatnonzero(tensor[0, 0]).tolist() == [0]
-    assert np.flatnonzero(tensor[1, 0]).tolist() == [0]
-    assert np.flatnonzero(tensor[2, 0]).tolist() == [2]
+    assert np.flatnonzero(tensor[1, 0]).tolist() == [1]
+    assert np.flatnonzero(tensor[2, 0]).tolist() == [3]
     assert np.flatnonzero(tensor[3, 0]).tolist() == [0]
 
     # State 2 corresponds to position (2, 1), where south and west are blocked.
-    assert tuple(positions[2].tolist()) == (2, 1)
-    assert np.flatnonzero(tensor[0, 2]).tolist() == [0]
-    assert np.flatnonzero(tensor[1, 2]).tolist() == [3]
-    assert np.flatnonzero(tensor[2, 2]).tolist() == [2]
-    assert np.flatnonzero(tensor[3, 2]).tolist() == [2]
+    assert tuple(positions[3].tolist()) == (2, 1)
+    assert np.flatnonzero(tensor[0, 3]).tolist() == [0]
+    assert np.flatnonzero(tensor[1, 3]).tolist() == [3]
+    assert np.flatnonzero(tensor[2, 3]).tolist() == [5]
+    assert np.flatnonzero(tensor[3, 3]).tolist() == [3]
 
 
 def test_graph_edge_action_label_is_overwritten_for_same_source_target_pair() -> None:

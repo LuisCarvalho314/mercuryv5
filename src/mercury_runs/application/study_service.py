@@ -28,6 +28,12 @@ from ..infrastructure.progress import load_progress, load_progress_tracks
 
 
 WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
+    "baseline": {
+        "weight_memory": 0.4,
+        "weight_undirected": 0.2,
+        "weight_base": 0.2,
+        "weight_action": 0.2,
+    },
     "memory_dominant_action_only_80": {
         "weight_memory": 0.8,
         "weight_undirected": 0.0,
@@ -101,6 +107,7 @@ def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
                 },
             },
             "pocml": {"enabled": False, "grid": {}},
+            "sensory": {"enabled": False, "grid": {}},
             "cscg": {"enabled": False, "grid": {}},
         },
     }
@@ -133,7 +140,11 @@ def apply_weight_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_section(raw: Dict[str, Any]) -> Dict[str, List[Any]]:
     if not isinstance(raw, dict):
         raise ValueError("Study config sections must be JSON objects.")
-    return normalize_parameter_space(raw)
+    normalized_raw = dict(raw)
+    thresholds = normalized_raw.get("structure_metrics_epsilons")
+    if isinstance(thresholds, list) and thresholds and all(not isinstance(value, list) for value in thresholds):
+        normalized_raw["structure_metrics_epsilons"] = [thresholds]
+    return normalize_parameter_space(normalized_raw)
 
 
 def _merge_sections(*sections: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
@@ -148,8 +159,12 @@ def _method_flags(method: str) -> Dict[str, Any]:
         return {"method": "mercury", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     if method == "pocml":
         return {"method": "pocml", "baseline_all": False, "baseline_pocml": True, "baseline_cscg": False}
+    if method == "sensory":
+        return {"method": "sensory", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     if method == "cscg":
         return {"method": "cscg", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": True}
+    if method == "mercury_cscg_hybrid":
+        return {"method": "mercury_cscg_hybrid", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     raise ValueError(f"Unknown method '{method}'")
 
 
@@ -165,7 +180,7 @@ def _expand_method_runs(
     parameter_space["study_name"] = [defaults.study_name]
     method_flags = _method_flags(method_name)
     for key, value in method_flags.items():
-        parameter_space[key] = [value]
+        parameter_space.setdefault(key, [value])
     parameter_space.setdefault("reuse_existing_run", [False])
 
     runs: List[Dict[str, Any]] = []
@@ -182,7 +197,7 @@ def _load_hierarchical_study_config(config_path: Path, defaults: StudyDefaults) 
     common_space = _merge_sections(environment_space, evaluation_space)
 
     run_configurations: List[Dict[str, Any]] = []
-    for method_name in ("mercury", "pocml", "cscg"):
+    for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"):
         method_model = getattr(study_config.methods, method_name)
         if not bool(method_model.enabled):
             continue
@@ -207,7 +222,7 @@ def resolve_run_configurations(args: argparse.Namespace, defaults: StudyDefaults
         evaluation_space = _normalize_section(study_config.evaluation)
         common_space = _merge_sections(environment_space, evaluation_space)
         run_configurations: List[Dict[str, Any]] = []
-        for method_name in ("mercury", "pocml", "cscg"):
+        for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"):
             method_model = getattr(study_config.methods, method_name)
             if not bool(method_model.enabled):
                 continue
@@ -253,6 +268,14 @@ def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
     elif method == "cscg":
         for key in list(pruned):
             if key.startswith("pocml_"):
+                pruned.pop(key, None)
+    elif method == "mercury_cscg_hybrid":
+        for key in list(pruned):
+            if key.startswith("pocml_"):
+                pruned.pop(key, None)
+    elif method == "sensory":
+        for key in list(pruned):
+            if key.startswith("pocml_") or key.startswith("cscg_") or key.startswith("latent_"):
                 pruned.pop(key, None)
     return pruned
 
@@ -346,7 +369,7 @@ def build_study_run_records(
     inherited_keys = {
         "num_steps", "datasets_root", "window_length", "sensor", "sensor_range", "study_root", "study_name",
         "wandb", "wandb_project", "wandb_entity", "wandb_group", "wandb_tags", "wandb_mode",
-        "structure_metrics", "structure_metrics_epsilon", "structure_metrics_scope", "structure_metrics_ground_truth_source",
+        "structure_metrics", "structure_metrics_epsilon", "structure_metrics_epsilons", "structure_metrics_scope", "structure_metrics_ground_truth_source",
         "wandb_job_type", "wandb_log_artifacts", "wandb_run_name", "baseline_pocml", "baseline_all",
         "pocml_epochs", "pocml_trajectory_length", "pocml_max_trajectories", "pocml_state_dim",
         "pocml_random_feature_dim", "pocml_n_states", "pocml_precision_capacities", "pocml_alpha", "pocml_lr_q", "pocml_lr_v",
@@ -354,6 +377,7 @@ def build_study_run_records(
         "pocml_use_ground_truth_node_ids", "pocml_batch_size", "pocml_memory_bias", "baseline_cscg",
         "cscg_clones_per_obs", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
         "cscg_batch_size", "cscg_online_lambda", "cscg_seed", "method",
+        "mercury_input_mode", "sensory_observation_mode",
     }
     for run_index, run_configuration in enumerate(run_configurations):
         inherited = {key: getattr(args, key) for key in inherited_keys if hasattr(args, key) and getattr(args, key) is not None}
@@ -456,7 +480,7 @@ def _render_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int
     width = shutil.get_terminal_size((120, 20)).columns
     header = f"Study progress: {completed}/{total} completed"
     rows = [header[:width], "-" * min(width, max(len(header), 40))]
-    records_by_method: Dict[str, List[tuple[Dict[str, Any], List[tuple[str, Dict[str, Any]]]]]] = {"mercury": [], "pocml": [], "cscg": []}
+    records_by_method: Dict[str, List[tuple[Dict[str, Any], List[tuple[str, Dict[str, Any]]]]]] = {"mercury": [], "sensory": [], "pocml": [], "cscg": [], "mercury_cscg_hybrid": []}
     for record in run_records:
         run_root = Path(record["config"]["study_root"]) / record["config"]["study_name"] / record["run_id"]
         tracks = load_progress_tracks(run_root)
@@ -465,7 +489,7 @@ def _render_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int
         method = str(record["config"].get("method", "mercury"))
         visible_tracks = _visible_progress_tracks(tracks)
         records_by_method.setdefault(method, []).append((record, visible_tracks))
-    for method in ["mercury", "pocml", "cscg"]:
+    for method in ["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"]:
         method_records = records_by_method.get(method) or []
         if not method_records:
             continue

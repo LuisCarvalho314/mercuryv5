@@ -28,8 +28,11 @@ from ...infrastructure.paper_precision import (
     infer_num_actions_from_valid_transitions,
     project_graph_edges_to_ground_truth,
     remap_position_walks_to_global_ids,
+    resolve_structure_metric_epsilons,
+    structure_epsilon_key,
     write_paper_precision_artifact,
 )
+from ...infrastructure.observation_encoding import encode_observations_with_vocabulary
 from mercury.action_map.adapter import ActionMap
 from mercury.latent.state import LatentState, init_latent_state, latent_step_predict_only
 from mercury.latent.params import LatentParams
@@ -107,8 +110,15 @@ def _run_mercury_snapshot_on_walk(
     latent_params: LatentParams,
     memory_length: int,
     latent_valid_trajectories_only: bool,
+    obs_uniques: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    observation_dim = int(np.asarray(walk.observations).shape[1])
+    walk_observations = np.asarray(walk.observations)
+    if obs_uniques is not None:
+        walk_observations = encode_observations_with_vocabulary(
+            observations=walk_observations,
+            obs_uniques=obs_uniques,
+        ).observations
+    observation_dim = int(walk_observations.shape[1])
     sensory_state = SensoryState(
         gs=sensory_graph,
         global_context=init_global_context(observation_dim),
@@ -124,7 +134,7 @@ def _run_mercury_snapshot_on_walk(
     state_memory: list[int] = []
     sensory_bmus: list[int] = []
     latent_bmus: list[int] = []
-    for observation, action, collision in zip(walk.observations, walk.actions, walk.collisions, strict=False):
+    for observation, action, collision in zip(walk_observations, walk.actions, walk.collisions, strict=False):
         action_vector = np.atleast_1d(action).astype(np.float32)
         action_bmu = int(action_map.predict(action=action_vector))
         sensory_state, activation_vector = sensory_step_predict_only(
@@ -172,6 +182,7 @@ def compute_mercury_paper_precision_metrics(
     sensory_graph: Any | None = None,
     latent_graph: Any | None = None,
     action_map: ActionMap | None = None,
+    obs_uniques: np.ndarray | None = None,
     show_progress: bool = False,
     progress_desc: str | None = None,
     progress_callback: Any = None,
@@ -208,16 +219,20 @@ def compute_mercury_paper_precision_metrics(
         )
         if sensory_graph is None or latent_graph is None or action_map is None:
             raise RuntimeError("Mercury paper precision requires a frozen sensory graph, latent graph, and action map.")
-        sensory_bmu, latent_bmu = _run_mercury_snapshot_on_walk(
-            walk=walk,
-            sensory_graph=deepcopy(sensory_graph),
-            latent_graph=deepcopy(latent_graph),
-            action_map=deepcopy(action_map),
-            sensory_params=sensory_params,
-            latent_params=latent_params,
-            memory_length=int(config.memory_length),
-            latent_valid_trajectories_only=latent_valid_trajectories_only,
-        )
+        try:
+            sensory_bmu, latent_bmu = _run_mercury_snapshot_on_walk(
+                walk=walk,
+                sensory_graph=deepcopy(sensory_graph),
+                latent_graph=deepcopy(latent_graph),
+                action_map=deepcopy(action_map),
+                sensory_params=sensory_params,
+                latent_params=latent_params,
+                memory_length=int(config.memory_length),
+                latent_valid_trajectories_only=latent_valid_trajectories_only,
+                obs_uniques=obs_uniques,
+            )
+        except ValueError:
+            continue
         length = min(len(ground_truth_state_ids), len(sensory_bmu), len(latent_bmu))
         gt_walks.append(ground_truth_state_ids[:length].astype(np.int64, copy=False))
         gt_exact_walks.append(exact_ground_truth_state_ids[:length].astype(np.int64, copy=False))
@@ -272,7 +287,8 @@ def compute_mercury_paper_precision_metrics(
     if bool(getattr(config, "structure_metrics_enabled", True)):
         structure_scope = str(getattr(config, "structure_metrics_scope", "exact_level")).strip().lower()
         structure_source = str(getattr(config, "structure_metrics_ground_truth_source", "empirical_walks")).strip().lower()
-        structure_epsilon = float(getattr(config, "structure_metrics_epsilon", 1e-6))
+        structure_epsilons = resolve_structure_metric_epsilons(config)
+        structure_epsilon = float(structure_epsilons[0])
         ignore_self_loops = bool(getattr(config, "structure_metrics_ignore_self_loops", True))
         if structure_scope == "walk_local":
             true_structure_walks = remap_position_walks_to_global_ids(gt_position_walks)
@@ -302,32 +318,48 @@ def compute_mercury_paper_precision_metrics(
                 if structure_source == "maze_topology"
                 else None
             )
-        sensory_structure_metrics = compute_weighted_structure_metrics(
-            decoded_walks=sensory_walks,
-            true_walks=true_structure_walks,
-            W_hat=np.asarray(sensory_graph.adj, dtype=np.float64),
-            n_true=n_true_states,
-            W_true=W_true,
-            epsilon=structure_epsilon,
-            ignore_self_loops=ignore_self_loops,
-        )
-        latent_structure_metrics = compute_weighted_structure_metrics(
-            decoded_walks=latent_walks,
-            true_walks=true_structure_walks,
-            W_hat=np.asarray(latent_graph.adj, dtype=np.float64),
-            n_true=n_true_states,
-            W_true=W_true,
-            epsilon=structure_epsilon,
-            ignore_self_loops=ignore_self_loops,
-        )
-        metrics["sensory_mean_total_variation"] = sensory_structure_metrics["mean_total_variation"]
-        metrics["sensory_edge_precision"] = sensory_structure_metrics["edge_precision"]
-        metrics["sensory_edge_recall"] = sensory_structure_metrics["edge_recall"]
-        metrics["sensory_edge_f1"] = sensory_structure_metrics["edge_f1"]
-        metrics["latent_mean_total_variation"] = latent_structure_metrics["mean_total_variation"]
-        metrics["latent_edge_precision"] = latent_structure_metrics["edge_precision"]
-        metrics["latent_edge_recall"] = latent_structure_metrics["edge_recall"]
-        metrics["latent_edge_f1"] = latent_structure_metrics["edge_f1"]
+        metrics_by_epsilon: dict[str, Any] = {}
+        sensory_adjacency = np.asarray(sensory_graph.adj, dtype=np.float64)
+        latent_adjacency = np.asarray(latent_graph.adj, dtype=np.float64)
+        for epsilon in structure_epsilons:
+            sensory_structure_metrics = compute_weighted_structure_metrics(
+                decoded_walks=sensory_walks,
+                true_walks=true_structure_walks,
+                W_hat=sensory_adjacency,
+                n_true=n_true_states,
+                W_true=W_true,
+                epsilon=float(epsilon),
+                ignore_self_loops=ignore_self_loops,
+            )
+            latent_structure_metrics = compute_weighted_structure_metrics(
+                decoded_walks=latent_walks,
+                true_walks=true_structure_walks,
+                W_hat=latent_adjacency,
+                n_true=n_true_states,
+                W_true=W_true,
+                epsilon=float(epsilon),
+                ignore_self_loops=ignore_self_loops,
+            )
+            metrics_by_epsilon[structure_epsilon_key(float(epsilon))] = {
+                "sensory_mean_total_variation": sensory_structure_metrics["mean_total_variation"],
+                "sensory_edge_precision": sensory_structure_metrics["edge_precision"],
+                "sensory_edge_recall": sensory_structure_metrics["edge_recall"],
+                "sensory_edge_f1": sensory_structure_metrics["edge_f1"],
+                "latent_mean_total_variation": latent_structure_metrics["mean_total_variation"],
+                "latent_edge_precision": latent_structure_metrics["edge_precision"],
+                "latent_edge_recall": latent_structure_metrics["edge_recall"],
+                "latent_edge_f1": latent_structure_metrics["edge_f1"],
+            }
+        primary_structure_metrics = metrics_by_epsilon[structure_epsilon_key(structure_epsilon)]
+        metrics["sensory_mean_total_variation"] = primary_structure_metrics["sensory_mean_total_variation"]
+        metrics["sensory_edge_precision"] = primary_structure_metrics["sensory_edge_precision"]
+        metrics["sensory_edge_recall"] = primary_structure_metrics["sensory_edge_recall"]
+        metrics["sensory_edge_f1"] = primary_structure_metrics["sensory_edge_f1"]
+        metrics["latent_mean_total_variation"] = primary_structure_metrics["latent_mean_total_variation"]
+        metrics["latent_edge_precision"] = primary_structure_metrics["latent_edge_precision"]
+        metrics["latent_edge_recall"] = primary_structure_metrics["latent_edge_recall"]
+        metrics["latent_edge_f1"] = primary_structure_metrics["latent_edge_f1"]
+        metrics["metrics_by_structure_epsilon"] = metrics_by_epsilon
 
     if _supports_exact_action_semantics(config=config, action_map=action_map):
         valid_transitions = exact_valid_sensorimotor_transitions(level_index=int(config.level))
@@ -363,42 +395,53 @@ def compute_mercury_paper_precision_metrics(
                         n_actions=n_actions,
                     )
                 )
-            sensory_action_metrics = compute_action_conditioned_structure_metrics(
-                decoded_walks=sensory_walks,
-                true_walks=true_structure_walks,
-                action_walks=gt_action_walks,
-                T_hat=build_action_conditioned_tensor_from_graph(
-                    sensory_graph,
-                    n_actions=n_actions,
-                    epsilon=structure_epsilon,
-                ),
-                n_true=n_true_states,
-                T_true=T_true,
-                epsilon=structure_epsilon,
-                ignore_self_loops=ignore_self_loops,
-            )
-            latent_action_metrics = compute_action_conditioned_structure_metrics(
-                decoded_walks=latent_walks,
-                true_walks=true_structure_walks,
-                action_walks=gt_action_walks,
-                T_hat=build_action_conditioned_tensor_from_graph(
-                    latent_graph,
-                    n_actions=n_actions,
-                    epsilon=structure_epsilon,
-                ),
-                n_true=n_true_states,
-                T_true=T_true,
-                epsilon=structure_epsilon,
-                ignore_self_loops=ignore_self_loops,
-            )
-            metrics["sensory_action_conditioned_mean_total_variation"] = sensory_action_metrics["mean_total_variation"]
-            metrics["sensory_action_conditioned_edge_precision"] = sensory_action_metrics["edge_precision"]
-            metrics["sensory_action_conditioned_edge_recall"] = sensory_action_metrics["edge_recall"]
-            metrics["sensory_action_conditioned_edge_f1"] = sensory_action_metrics["edge_f1"]
-            metrics["latent_action_conditioned_mean_total_variation"] = latent_action_metrics["mean_total_variation"]
-            metrics["latent_action_conditioned_edge_precision"] = latent_action_metrics["edge_precision"]
-            metrics["latent_action_conditioned_edge_recall"] = latent_action_metrics["edge_recall"]
-            metrics["latent_action_conditioned_edge_f1"] = latent_action_metrics["edge_f1"]
+            for epsilon in structure_epsilons:
+                sensory_action_metrics = compute_action_conditioned_structure_metrics(
+                    decoded_walks=sensory_walks,
+                    true_walks=true_structure_walks,
+                    action_walks=gt_action_walks,
+                    T_hat=build_action_conditioned_tensor_from_graph(
+                        sensory_graph,
+                        n_actions=n_actions,
+                        epsilon=float(epsilon),
+                    ),
+                    n_true=n_true_states,
+                    T_true=T_true,
+                    epsilon=float(epsilon),
+                    ignore_self_loops=ignore_self_loops,
+                )
+                latent_action_metrics = compute_action_conditioned_structure_metrics(
+                    decoded_walks=latent_walks,
+                    true_walks=true_structure_walks,
+                    action_walks=gt_action_walks,
+                    T_hat=build_action_conditioned_tensor_from_graph(
+                        latent_graph,
+                        n_actions=n_actions,
+                        epsilon=float(epsilon),
+                    ),
+                    n_true=n_true_states,
+                    T_true=T_true,
+                    epsilon=float(epsilon),
+                    ignore_self_loops=ignore_self_loops,
+                )
+                threshold_metrics = metrics["metrics_by_structure_epsilon"][structure_epsilon_key(float(epsilon))]
+                threshold_metrics["sensory_action_conditioned_mean_total_variation"] = sensory_action_metrics["mean_total_variation"]
+                threshold_metrics["sensory_action_conditioned_edge_precision"] = sensory_action_metrics["edge_precision"]
+                threshold_metrics["sensory_action_conditioned_edge_recall"] = sensory_action_metrics["edge_recall"]
+                threshold_metrics["sensory_action_conditioned_edge_f1"] = sensory_action_metrics["edge_f1"]
+                threshold_metrics["latent_action_conditioned_mean_total_variation"] = latent_action_metrics["mean_total_variation"]
+                threshold_metrics["latent_action_conditioned_edge_precision"] = latent_action_metrics["edge_precision"]
+                threshold_metrics["latent_action_conditioned_edge_recall"] = latent_action_metrics["edge_recall"]
+                threshold_metrics["latent_action_conditioned_edge_f1"] = latent_action_metrics["edge_f1"]
+            primary_action_metrics = metrics["metrics_by_structure_epsilon"][structure_epsilon_key(structure_epsilon)]
+            metrics["sensory_action_conditioned_mean_total_variation"] = primary_action_metrics["sensory_action_conditioned_mean_total_variation"]
+            metrics["sensory_action_conditioned_edge_precision"] = primary_action_metrics["sensory_action_conditioned_edge_precision"]
+            metrics["sensory_action_conditioned_edge_recall"] = primary_action_metrics["sensory_action_conditioned_edge_recall"]
+            metrics["sensory_action_conditioned_edge_f1"] = primary_action_metrics["sensory_action_conditioned_edge_f1"]
+            metrics["latent_action_conditioned_mean_total_variation"] = primary_action_metrics["latent_action_conditioned_mean_total_variation"]
+            metrics["latent_action_conditioned_edge_precision"] = primary_action_metrics["latent_action_conditioned_edge_precision"]
+            metrics["latent_action_conditioned_edge_recall"] = primary_action_metrics["latent_action_conditioned_edge_recall"]
+            metrics["latent_action_conditioned_edge_f1"] = primary_action_metrics["latent_action_conditioned_edge_f1"]
         sensory_mapping = dominant_ground_truth_mapping_from_cooccurrence(sensory_exact_details["cooccurrence_matrix"])
         latent_mapping = dominant_ground_truth_mapping_from_cooccurrence(latent_exact_details["cooccurrence_matrix"])
         sensory_edges = project_graph_edges_to_ground_truth(
@@ -464,9 +507,11 @@ def write_mercury_paper_precision_payload(
             "ground_truth_state_series": "cartesian_state_id",
             "mode": str(config.paper_precision_mode),
             "eval_interval": int(config.paper_precision_eval_interval),
+            "eval_checkpoints": config.paper_precision_eval_checkpoints,
             "num_points": config.paper_precision_num_points,
             "schedule_unit": schedule_unit,
             "x_axis_unit": "observed_samples",
+            "structure_metrics_epsilons": resolve_structure_metric_epsilons(config),
         },
         "metrics": metrics,
         "history": history,
@@ -475,5 +520,5 @@ def write_mercury_paper_precision_payload(
     return write_paper_precision_artifact(path=out_path, payload=payload)
 
 
-def summarize_mercury_run(states_parquet: Path) -> dict:
-    return summarize_mercury_native_metrics(states_parquet)
+def summarize_mercury_run(states_parquet: Path, datasets_root: Path = Path("datasets")) -> dict:
+    return summarize_mercury_native_metrics(states_parquet, datasets_root=datasets_root)

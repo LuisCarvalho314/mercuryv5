@@ -25,17 +25,21 @@ class MercuryConfig(BaseModel):
     mercury_split_sensory_raw_latent_valid: bool = False
     reuse_existing_dataset: bool = True
     reuse_existing_run: bool = True
+    mercury_input_mode: str = "pretrained_raw"
     sensory: dict[str, Any]
     latent: dict[str, Any]
     action_map: dict[str, Any]
     paper_precision_enabled: bool = False
     paper_precision_mode: str = "off"
+    paper_precision_schedule: str = "log"
     paper_precision_eval_interval: int = Field(default=1, gt=0)
+    paper_precision_eval_checkpoints: Optional[list[int]] = None
     paper_precision_num_points: Optional[int] = Field(default=None, gt=0)
     paper_precision_num_walks: int = Field(default=100, gt=0)
     paper_precision_walk_length: int = Field(default=10_000, gt=0)
     structure_metrics_enabled: bool = True
     structure_metrics_epsilon: float = Field(default=1e-6, ge=0.0)
+    structure_metrics_epsilons: Optional[list[float]] = None
     structure_metrics_ignore_self_loops: bool = True
     structure_metrics_scope: str = "exact_level"
     structure_metrics_ground_truth_source: str = "empirical_walks"

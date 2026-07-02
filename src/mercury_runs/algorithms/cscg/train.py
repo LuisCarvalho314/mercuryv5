@@ -104,54 +104,66 @@ def run_cscg_online_em(
     online_lambda: float,
     max_batches: int,
     term_early: bool,
+    initial_counts: np.ndarray | None = None,
+    repeat_batches: bool = False,
     iteration_callback=None,
 ) -> np.ndarray:
-    running_counts = np.zeros_like(model.C, dtype=np.float32)
+    running_counts = (
+        np.asarray(initial_counts, dtype=np.float32).copy()
+        if initial_counts is not None
+        else np.zeros_like(model.C, dtype=np.float32)
+    )
+    if running_counts.shape != model.C.shape:
+        raise ValueError(f"initial_counts shape {running_counts.shape} does not match model.C shape {model.C.shape}.")
     em_convergence: list[float] = []
     previous = -np.inf
     processed_batches = 0
     processed_steps = 0
 
-    for batch in batch_iterator_factory():
-        if processed_batches >= max_batches:
-            break
-        filtered_steps = int(batch["filtered_steps"])
-        if filtered_steps == 0:
-            continue
-        obs_idx = map_observations(np.asarray(batch["observations"]))
-        act_idx = map_actions(np.asarray(batch["actions"]))
-        if obs_idx.shape[0] < 2 or act_idx.shape[0] < 2:
+    while processed_batches < int(max_batches):
+        processed_batches_at_pass_start = processed_batches
+        for batch in batch_iterator_factory():
+            if processed_batches >= max_batches:
+                break
+            filtered_steps = int(batch["filtered_steps"])
+            if filtered_steps == 0:
+                continue
+            obs_idx = map_observations(np.asarray(batch["observations"]))
+            act_idx = map_actions(np.asarray(batch["actions"]))
+            if obs_idx.shape[0] < 2 or act_idx.shape[0] < 2:
+                processed_steps += filtered_steps
+                continue
+
+            log2_lik, mess_fwd = chmm_mod.forward(
+                model.T.transpose(0, 2, 1),
+                model.Pi_x,
+                model.n_clones,
+                obs_idx,
+                act_idx,
+                store_messages=True,
+            )
+            mess_bwd = chmm_mod.backward(model.T, model.n_clones, obs_idx, act_idx)
+            batch_counts = np.zeros_like(model.C, dtype=np.float32)
+            chmm_mod.updateC(batch_counts, model.T, model.n_clones, mess_fwd, mess_bwd, obs_idx, act_idx)
+
+            if np.isclose(online_lambda, 1.0):
+                running_counts += batch_counts
+            else:
+                running_counts *= float(online_lambda)
+                running_counts += (1.0 - float(online_lambda)) * batch_counts
+
+            model.C = running_counts.astype(model.dtype, copy=True)
+            model.update_T()
+            processed_batches += 1
             processed_steps += filtered_steps
-            continue
-
-        log2_lik, mess_fwd = chmm_mod.forward(
-            model.T.transpose(0, 2, 1),
-            model.Pi_x,
-            model.n_clones,
-            obs_idx,
-            act_idx,
-            store_messages=True,
-        )
-        mess_bwd = chmm_mod.backward(model.T, model.n_clones, obs_idx, act_idx)
-        batch_counts = np.zeros_like(model.C, dtype=np.float32)
-        chmm_mod.updateC(batch_counts, model.T, model.n_clones, mess_fwd, mess_bwd, obs_idx, act_idx)
-
-        if np.isclose(online_lambda, 1.0):
-            running_counts += batch_counts
-        else:
-            running_counts *= float(online_lambda)
-            running_counts += (1.0 - float(online_lambda)) * batch_counts
-
-        model.C = running_counts.astype(model.dtype, copy=True)
-        model.update_T()
-        processed_batches += 1
-        processed_steps += filtered_steps
-        value = float((-np.asarray(log2_lik, dtype=np.float32)).mean())
-        em_convergence.append(value)
-        if iteration_callback is not None:
-            iteration_callback(stage="em", iteration=processed_batches, model=model, step=processed_steps)
-        if term_early and value <= previous:
+            value = float((-np.asarray(log2_lik, dtype=np.float32)).mean())
+            em_convergence.append(value)
+            if iteration_callback is not None:
+                iteration_callback(stage="em", iteration=processed_batches, model=model, step=processed_steps)
+            if term_early and value <= previous:
+                return np.asarray(em_convergence, dtype=np.float32)
+            previous = value
+        if not repeat_batches or processed_batches == processed_batches_at_pass_start:
             break
-        previous = value
 
     return np.asarray(em_convergence, dtype=np.float32)

@@ -3,14 +3,19 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+
+import polars as pl
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from src.mercury_runs.application import run_service
 from src.mercury_runs.interfaces.cli import parse_arguments
 from src.mercury_runs.application.run_service import _baseline_dataset_selection
 from src.mercury_runs.domain.models import RunConfigModel, RunStatusModel, SubsystemStatus
-from src.mercury_runs.infrastructure.runtime import atomic_write_json, stable_hash
+from src.mercury_runs.infrastructure.runtime import args_from_config, atomic_write_json, stable_hash
+from src.mercury_runs.infrastructure.state_columns import load_ground_truth_proxy_states
 from src.mercury_runs.schemas_results import ResultBundleMeta, SourceDatasetRef
 from src.mercury_runs.infrastructure.storage import (
     artifact_layout,
@@ -161,6 +166,89 @@ def test_validate_reusable_run_accepts_baseline_metrics_artifacts(tmp_path: Path
     assert reason == "ok"
 
 
+def test_validate_reusable_run_accepts_pocml_only_without_mercury_artifacts(tmp_path: Path) -> None:
+    payload = _run_payload(with_pocml=True)
+    payload["method"] = "pocml"
+    run_root = tmp_path / "pocml-only"
+    run_root.mkdir(parents=True)
+    layout = artifact_layout(run_root=run_root, run_id="pocml-only", run_payload=payload)
+    layout.ground_truth_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+    layout.ground_truth_states_parquet.write_text("gt", encoding="utf-8")
+    layout.pocml_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+    layout.pocml_states_parquet.write_text("states", encoding="utf-8")
+    layout.pocml_embeddings_npz.write_text("emb", encoding="utf-8")
+    layout.pocml_model_checkpoint_pt.write_text("model", encoding="utf-8")
+    run_config = RunConfigModel(
+        run_id="pocml-only",
+        requested_run_id="pocml-only",
+        saved_at_utc="2026-03-13T10:00:00Z",
+        cli_args={},
+        run_payload=payload,
+        execution={},
+        paths={},
+    )
+    run_status = RunStatusModel(
+        run_id="pocml-only",
+        requested_run_id="pocml-only",
+        status="completed",
+        started_at_utc="2026-03-13T10:00:00Z",
+        finished_at_utc="2026-03-13T10:01:00Z",
+        study={},
+        config=payload,
+        execution={},
+        paths={},
+        subsystems={},
+    )
+    atomic_write_json(layout.run_config_json, run_config.model_dump(mode="json"))
+    atomic_write_json(layout.run_status_json, run_status.model_dump(mode="json"))
+
+    reusable, reason = validate_reusable_run(run_root=run_root, run_payload=payload, run_id="pocml-only")
+
+    assert reusable is True
+    assert reason == "ok"
+
+
+def test_validate_reusable_run_accepts_cscg_only_without_mercury_artifacts(tmp_path: Path) -> None:
+    payload = _run_payload(with_cscg=True)
+    payload["method"] = "cscg"
+    run_root = tmp_path / "cscg-only"
+    run_root.mkdir(parents=True)
+    layout = artifact_layout(run_root=run_root, run_id="cscg-only", run_payload=payload)
+    layout.ground_truth_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+    layout.ground_truth_states_parquet.write_text("gt", encoding="utf-8")
+    layout.cscg_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+    layout.cscg_states_parquet.write_text("states", encoding="utf-8")
+    layout.cscg_model_npz.write_text("model", encoding="utf-8")
+    run_config = RunConfigModel(
+        run_id="cscg-only",
+        requested_run_id="cscg-only",
+        saved_at_utc="2026-03-13T10:00:00Z",
+        cli_args={},
+        run_payload=payload,
+        execution={},
+        paths={},
+    )
+    run_status = RunStatusModel(
+        run_id="cscg-only",
+        requested_run_id="cscg-only",
+        status="completed",
+        started_at_utc="2026-03-13T10:00:00Z",
+        finished_at_utc="2026-03-13T10:01:00Z",
+        study={},
+        config=payload,
+        execution={},
+        paths={},
+        subsystems={},
+    )
+    atomic_write_json(layout.run_config_json, run_config.model_dump(mode="json"))
+    atomic_write_json(layout.run_status_json, run_status.model_dump(mode="json"))
+
+    reusable, reason = validate_reusable_run(run_root=run_root, run_payload=payload, run_id="cscg-only")
+
+    assert reusable is True
+    assert reason == "ok"
+
+
 def test_resolve_run_identity_uses_fresh_directory_for_invalid_auto_run(tmp_path: Path) -> None:
     payload = _run_payload()
     requested_run_id = stable_hash(payload)
@@ -267,6 +355,19 @@ def test_baseline_dataset_selection_uses_mercury_source_dataset_run_id(monkeypat
     assert dataset_run_id == "level20_cardinal_distance_seed0_steps60000"
 
 
+def test_load_ground_truth_states_prefers_exact_ground_truth_column(tmp_path: Path) -> None:
+    path = tmp_path / "ground_truth.parquet"
+    pl.DataFrame(
+        {
+            "ground_truth_state_id": [7, 8],
+            "cartesian_proxy_bmu": [1, 2],
+            "ground_truth_bmu": [3, 4],
+        }
+    ).write_parquet(path)
+
+    assert load_ground_truth_proxy_states(path).tolist() == [7, 8]
+
+
 def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
     args = argparse.Namespace(
         level=13,
@@ -278,11 +379,13 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
         valid_trajectories_only=True,
         mercury_valid_trajectories_only=False,
         mercury_split_sensory_raw_latent_valid=True,
+        random_start=False,
         memory_length=10,
         window_length=20,
         paper_precision=False,
         paper_precision_mode="final",
         paper_precision_eval_interval=3,
+        paper_precision_eval_checkpoints=[2, 7],
         paper_precision_num_points=None,
         paper_precision_num_walks=7,
         paper_precision_walk_length=250,
@@ -366,12 +469,14 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
         "enabled": True,
         "mode": "final",
         "eval_interval": 3,
+        "eval_checkpoints": [2, 7],
         "num_points": None,
         "num_walks": 7,
         "walk_length": 250,
             "structure_metrics": {
                 "enabled": False,
                 "epsilon": 1e-4,
+                "thresholds": [1e-4],
                 "ignore_self_loops": True,
                 "scope": "walk_local",
                 "ground_truth_source": "maze_topology",
@@ -381,6 +486,7 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
     assert payload["valid_trajectories_only"] is True
     assert payload["mercury_valid_trajectories_only"] is False
     assert payload["mercury_split_sensory_raw_latent_valid"] is True
+    assert payload["random_start"] is False
     assert payload["baselines"]["pocml"]["valid_trajectories_only"] is False
     assert payload["baselines"]["cscg"]["valid_trajectories_only"] is False
     assert payload["latent"]["weight_memory"] == 0.4
@@ -392,6 +498,12 @@ def test_build_run_payload_preserves_paper_precision_walk_settings() -> None:
     assert payload["latent"]["lambda_trace"] == 0.05
     assert "mixture_alpha" not in payload["latent"]
     assert "mixture_beta" not in payload["latent"]
+
+
+def test_args_from_config_preserves_random_start_false() -> None:
+    arguments = args_from_config({"random_start": False})
+
+    assert arguments == ["--random_start", "False"]
 
 
 def test_validate_reusable_run_requires_computational_artifact_when_enabled(tmp_path: Path) -> None:
@@ -489,3 +601,132 @@ def test_parse_arguments_accepts_lambda_trace(monkeypatch) -> None:
     args = parse_arguments()
 
     assert args.lambda_trace == 0.125
+
+
+def _parsed_args(monkeypatch, *extra_args: str):
+    monkeypatch.setattr(sys, "argv", ["main.py", "--level", "13", "--wandb_mode", "disabled", *extra_args])
+    return parse_arguments()
+
+
+def test_execute_pipeline_run_method_pocml_skips_mercury(monkeypatch, tmp_path: Path) -> None:
+    args = _parsed_args(monkeypatch, "--method", "pocml", "--sensor", "cartesian")
+    run_payload = build_run_payload(args)
+    run_root = tmp_path / "study" / "pocml-run"
+    layout = artifact_layout(run_root=run_root, run_id="pocml-run", run_payload=run_payload)
+    captured: dict = {}
+
+    monkeypatch.setattr(run_service, "run_mercury", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Mercury should not run")))
+    monkeypatch.setattr(run_service, "_generate_standalone_dataset_run_ids", lambda **kwargs: {"cartesian": "cart-run"})
+
+    def _write_ground_truth(**kwargs):
+        layout.ground_truth_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ground_truth_state_id": [0, 1, 2]}).write_parquet(layout.ground_truth_states_parquet)
+        return layout.ground_truth_states_parquet
+
+    def _run_pocml(config, **kwargs):
+        captured["pocml_config"] = config
+        layout.pocml_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+        layout.pocml_states_parquet.write_text("states", encoding="utf-8")
+        layout.pocml_embeddings_npz.write_text("embeddings", encoding="utf-8")
+        layout.pocml_model_checkpoint_pt.write_text("model", encoding="utf-8")
+        return layout.pocml_states_parquet
+
+    monkeypatch.setattr(run_service, "_write_exact_ground_truth_states", _write_ground_truth)
+    monkeypatch.setattr(run_service, "run_pocml", _run_pocml)
+    monkeypatch.setattr(run_service, "read_native_metrics_from_bundle", lambda *args, **kwargs: {})
+
+    status = run_service.execute_pipeline_run(
+        args=args,
+        run_id="pocml-run",
+        requested_run_id="pocml-run",
+        run_root=run_root,
+        run_payload=run_payload,
+        reuse_existing_run=False,
+        reuse_existing_dataset=True,
+    )
+
+    assert status.subsystems["mercury"].status == "skipped"
+    assert status.subsystems["pocml"].status == "completed"
+    assert captured["pocml_config"].ground_truth_states_parquet == layout.ground_truth_states_parquet
+    assert captured["pocml_config"].dataset_select == "run_id"
+    assert captured["pocml_config"].dataset_run_id == "cart-run"
+
+
+def test_execute_pipeline_run_method_cscg_skips_mercury(monkeypatch, tmp_path: Path) -> None:
+    args = _parsed_args(monkeypatch, "--method", "cscg", "--sensor", "cartesian")
+    run_payload = build_run_payload(args)
+    run_root = tmp_path / "study" / "cscg-run"
+    layout = artifact_layout(run_root=run_root, run_id="cscg-run", run_payload=run_payload)
+    captured: dict = {}
+
+    monkeypatch.setattr(run_service, "run_mercury", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Mercury should not run")))
+    monkeypatch.setattr(run_service, "_generate_standalone_dataset_run_ids", lambda **kwargs: {"cartesian": "cart-run"})
+
+    def _write_ground_truth(**kwargs):
+        layout.ground_truth_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"ground_truth_state_id": [0, 1, 2]}).write_parquet(layout.ground_truth_states_parquet)
+        return layout.ground_truth_states_parquet
+
+    def _run_cscg(config, **kwargs):
+        captured["cscg_config"] = config
+        layout.cscg_states_parquet.parent.mkdir(parents=True, exist_ok=True)
+        layout.cscg_states_parquet.write_text("states", encoding="utf-8")
+        layout.cscg_model_npz.write_text("model", encoding="utf-8")
+        return layout.cscg_states_parquet
+
+    monkeypatch.setattr(run_service, "_write_exact_ground_truth_states", _write_ground_truth)
+    monkeypatch.setattr(run_service, "run_cscg", _run_cscg)
+    monkeypatch.setattr(run_service, "read_native_metrics_from_bundle", lambda *args, **kwargs: {})
+
+    status = run_service.execute_pipeline_run(
+        args=args,
+        run_id="cscg-run",
+        requested_run_id="cscg-run",
+        run_root=run_root,
+        run_payload=run_payload,
+        reuse_existing_run=False,
+        reuse_existing_dataset=True,
+    )
+
+    assert status.subsystems["mercury"].status == "skipped"
+    assert status.subsystems["cscg"].status == "completed"
+    assert captured["cscg_config"].ground_truth_states_parquet == layout.ground_truth_states_parquet
+    assert captured["cscg_config"].dataset_select == "run_id"
+    assert captured["cscg_config"].dataset_run_id == "cart-run"
+
+
+def test_write_exact_ground_truth_states_uses_cartesian_positions(monkeypatch, tmp_path: Path) -> None:
+    args = _parsed_args(monkeypatch, "--method", "pocml", "--sensor", "cartesian")
+    run_payload = build_run_payload(args)
+    layout = artifact_layout(run_root=tmp_path / "run", run_id="run-gt", run_payload=run_payload)
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        run_service,
+        "load_level_parquet",
+        lambda config: SimpleNamespace(
+            observations=[[3, 4], [5, 6]],
+            source_metadata={"run_id": "cart-run"},
+            parquet_path=tmp_path / "cart-run.parquet",
+        ),
+    )
+
+    def _exact_ids(*, level_index, positions):
+        captured["level_index"] = level_index
+        captured["positions"] = positions
+        return [9, 10]
+
+    monkeypatch.setattr(run_service, "exact_cartesian_state_ids_for_level", _exact_ids)
+
+    path = run_service._write_exact_ground_truth_states(
+        args=args,
+        run_id="run-gt",
+        run_payload=run_payload,
+        layout=layout,
+        dataset_run_ids={"cartesian": "cart-run"},
+    )
+
+    assert path == layout.ground_truth_states_parquet
+    assert captured["level_index"] == 13
+    assert captured["positions"].tolist() == [[3, 4], [5, 6]]
+    assert pl.read_parquet(path).get_column("ground_truth_state_id").to_list() == [9, 10]

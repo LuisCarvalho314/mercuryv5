@@ -36,11 +36,11 @@ LEVEL_INDICES = (13, 20, 21)
 
 SENSOR = "cardinal distance"
 SENSOR_RANGE = 1
-MAX_HISTORY_ORDER = 8
+MAX_HISTORY_ORDER = 18
 OUTPUT_DIRECTORY = Path(__file__).resolve().parent / "outputs" / "entropy_curves"
 DATASETS_ROOT = PROJECT_ROOT / "datasets"
 EMPIRICAL_SEEDS = tuple(range(10))
-EMPIRICAL_RANDOM_PROBABILITIES = tuple(round(i / 10, 1) for i in range(11))
+EMPIRICAL_RANDOM_PROBABILITIES = (0.0, 0.3)
 EMPIRICAL_VALID_ONLY_OPTIONS = (False, True)
 EMPIRICAL_NUM_STEPS = 20_000
 EMPIRICAL_RANDOM_START = True
@@ -662,6 +662,11 @@ def state_count_entropy_normalizer(level_index: int) -> float:
     if state_count <= 1:
         raise ValueError("At least two states are required for entropy normalization.")
     return math.log2(state_count)
+
+
+def state_count_entropy_log_base(level_index: int) -> float:
+    """Return the log base that expresses entropy in units of log2(|S|)."""
+    return float(count_level_states(level_index))
 
 
 def bit_threshold_to_state_normalized_threshold(
@@ -1541,7 +1546,7 @@ def plot_entropy_quantile_surface(
 
     axis.set_xlabel("History order $k$")
     axis.set_ylabel("Fraction of histories")
-    axis.set_title(title)
+    # axis.set_title(title)
     axis.set_xticks(history_orders)
     axis.set_yticks(DISPLAY_QUANTILE_FRACTIONS)
     axis.set_ylim(quantile_fractions[0], quantile_fractions[-1])
@@ -2363,31 +2368,31 @@ def run_empirical_entropy_outputs_for_level(
                 }
             )
 
-        print()
-        print_empirical_metadata_totals(
-            heading=f"Empirical metadata totals for p={rand_prob:g}, {validity_stem}:",
-            metadata_totals=metadata_totals,
-        )
+        # print()
+        # print_empirical_metadata_totals(
+        #     heading=f"Empirical metadata totals for p={rand_prob:g}, {validity_stem}:",
+        #     metadata_totals=metadata_totals,
+        # )
 
-        print()
-        print_summary_table(
-            heading=f"Empirical {title_entropy_label} structural unweighted summaries for p={rand_prob:g}, {validity_stem}:",
-            summaries=unweighted_summaries,
-        )
-        print_heatmap_integrals(
-            heading=f"Empirical structural unweighted {title_entropy_label} heatmap integrals for p={rand_prob:g}, {validity_stem}:",
-            summaries=unweighted_summaries,
-        )
+        # print()
+        # print_summary_table(
+        #     heading=f"Empirical {title_entropy_label} structural unweighted summaries for p={rand_prob:g}, {validity_stem}:",
+        #     summaries=unweighted_summaries,
+        # )
+        # print_heatmap_integrals(
+        #     heading=f"Empirical structural unweighted {title_entropy_label} heatmap integrals for p={rand_prob:g}, {validity_stem}:",
+        #     summaries=unweighted_summaries,
+        # )
 
-        print()
-        print_summary_table(
-            heading=f"Empirical {title_entropy_label} probability-weighted summaries for p={rand_prob:g}, {validity_stem}:",
-            summaries=weighted_summaries,
-        )
-        print_heatmap_integrals(
-            heading=f"Empirical probability-weighted {title_entropy_label} heatmap integrals for p={rand_prob:g}, {validity_stem}:",
-            summaries=weighted_summaries,
-        )
+        # print()
+        # print_summary_table(
+        #     heading=f"Empirical {title_entropy_label} probability-weighted summaries for p={rand_prob:g}, {validity_stem}:",
+        #     summaries=weighted_summaries,
+        # )
+        # print_heatmap_integrals(
+        #     heading=f"Empirical probability-weighted {title_entropy_label} heatmap integrals for p={rand_prob:g}, {validity_stem}:",
+        #     summaries=weighted_summaries,
+        # )
 
         plot_observation_and_sensorimotor_entropy_summaries(
             summaries=unweighted_summaries,
@@ -2404,28 +2409,28 @@ def run_empirical_entropy_outputs_for_level(
             entropy_unit_label=entropy_unit_label,
         )
 
-    plot_empirical_integral_records(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_integrals_by_rand_prob.png",
-        title=f"Empirical {title_entropy_label} heatmap integrals for {output_stem}",
-        y_label=f"{title_entropy_label.capitalize()} heatmap integral",
-    )
-    plot_empirical_structural_integral_records(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_structural_integrals_by_rand_prob.png",
-        title=f"Empirical structural {title_entropy_label} heatmap integrals for {output_stem}",
-        y_label=f"{title_entropy_label.capitalize()} heatmap integral",
-    )
-    plot_empirical_near_zero_area_records(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_near_zero_area_by_rand_prob.png",
-        title=f"Empirical near-zero {title_entropy_label} area for {output_stem}",
-    )
-    plot_empirical_structural_near_zero_area_records(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_structural_near_zero_area_by_rand_prob.png",
-        title=f"Empirical structural near-zero {title_entropy_label} area for {output_stem}",
-    )
+    # plot_empirical_integral_records(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_integrals_by_rand_prob.png",
+    #     title=f"Empirical {title_entropy_label} heatmap integrals for {output_stem}",
+    #     y_label=f"{title_entropy_label.capitalize()} heatmap integral",
+    # )
+    # plot_empirical_structural_integral_records(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_structural_integrals_by_rand_prob.png",
+    #     title=f"Empirical structural {title_entropy_label} heatmap integrals for {output_stem}",
+    #     y_label=f"{title_entropy_label.capitalize()} heatmap integral",
+    # )
+    # plot_empirical_near_zero_area_records(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_near_zero_area_by_rand_prob.png",
+    #     title=f"Empirical near-zero {title_entropy_label} area for {output_stem}",
+    # )
+    # plot_empirical_structural_near_zero_area_records(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / f"{output_stem}_empirical_structural_near_zero_area_by_rand_prob.png",
+    #     title=f"Empirical structural near-zero {title_entropy_label} area for {output_stem}",
+    # )
 
     return {
         "integral": empirical_integral_records,
@@ -2694,26 +2699,26 @@ def run_empirical_entropy_outputs_for_levels(
         empirical_integral_records.extend(output_records["integral"])
         empirical_near_zero_area_records.extend(output_records["near_zero_area"])
 
-    plot_empirical_integral_records_by_level(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_integrals_by_level_and_rand_prob.png",
-        title="Empirical entropy heatmap integrals by level",
-    )
-    plot_empirical_structural_integral_records_by_level(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_structural_integrals_by_level_and_rand_prob.png",
-        title="Empirical structural entropy heatmap integrals by level",
-    )
-    plot_empirical_near_zero_area_records_by_level(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_near_zero_area_by_level_and_rand_prob.png",
-        title="Empirical near-zero entropy area by level",
-    )
-    plot_empirical_structural_near_zero_area_records_by_level(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_structural_near_zero_area_by_level_and_rand_prob.png",
-        title="Empirical structural near-zero entropy area by level",
-    )
+    # plot_empirical_integral_records_by_level(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_integrals_by_level_and_rand_prob.png",
+    #     title="Empirical entropy heatmap integrals by level",
+    # )
+    # plot_empirical_structural_integral_records_by_level(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_structural_integrals_by_level_and_rand_prob.png",
+    #     title="Empirical structural entropy heatmap integrals by level",
+    # )
+    # plot_empirical_near_zero_area_records_by_level(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_near_zero_area_by_level_and_rand_prob.png",
+    #     title="Empirical near-zero entropy area by level",
+    # )
+    # plot_empirical_structural_near_zero_area_records_by_level(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_structural_near_zero_area_by_level_and_rand_prob.png",
+    #     title="Empirical structural near-zero entropy area by level",
+    # )
     return {
         "integral": empirical_integral_records,
         "near_zero_area": empirical_near_zero_area_records,
@@ -2748,28 +2753,28 @@ def run_empirical_normalized_entropy_outputs_for_levels(
         empirical_integral_records.extend(output_records["integral"])
         empirical_near_zero_area_records.extend(output_records["near_zero_area"])
 
-    plot_empirical_integral_records_by_level(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_integrals_by_level_and_rand_prob.png",
-        title="Empirical normalized entropy heatmap integrals by level",
-        y_label="Normalized entropy heatmap integral",
-    )
-    plot_empirical_structural_integral_records_by_level(
-        empirical_integral_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_structural_integrals_by_level_and_rand_prob.png",
-        title="Empirical normalized structural entropy heatmap integrals by level",
-        y_label="Normalized entropy heatmap integral",
-    )
-    plot_empirical_near_zero_area_records_by_level(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_near_zero_area_by_level_and_rand_prob.png",
-        title="Empirical normalized near-zero entropy area by level",
-    )
-    plot_empirical_structural_near_zero_area_records_by_level(
-        empirical_near_zero_area_records,
-        output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_structural_near_zero_area_by_level_and_rand_prob.png",
-        title="Empirical normalized structural near-zero entropy area by level",
-    )
+    # plot_empirical_integral_records_by_level(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_integrals_by_level_and_rand_prob.png",
+    #     title="Empirical normalized entropy heatmap integrals by level",
+    #     y_label="Normalized entropy heatmap integral",
+    # )
+    # plot_empirical_structural_integral_records_by_level(
+    #     empirical_integral_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_structural_integrals_by_level_and_rand_prob.png",
+    #     title="Empirical normalized structural entropy heatmap integrals by level",
+    #     y_label="Normalized entropy heatmap integral",
+    # )
+    # plot_empirical_near_zero_area_records_by_level(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_near_zero_area_by_level_and_rand_prob.png",
+    #     title="Empirical normalized near-zero entropy area by level",
+    # )
+    # plot_empirical_structural_near_zero_area_records_by_level(
+    #     empirical_near_zero_area_records,
+    #     output_path=OUTPUT_DIRECTORY / "empirical_normalized_by_num_states_structural_near_zero_area_by_level_and_rand_prob.png",
+    #     title="Empirical normalized structural near-zero entropy area by level",
+    # )
     return {
         "integral": empirical_integral_records,
         "near_zero_area": empirical_near_zero_area_records,

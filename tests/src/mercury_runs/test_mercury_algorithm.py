@@ -117,3 +117,18 @@ def test_generate_mercury_datasets_passes_valid_trajectory_flag(monkeypatch, tmp
 
     assert result == {"cartesian": "cart-run"}
     assert captured["valid_trajectories_only"] is True
+
+
+def test_generate_mercury_datasets_passes_random_start_flag(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return {"cartesian": "cart-run"}
+
+    monkeypatch.setattr("src.maze_environment.generate_data.generate_data", _capture)
+
+    result = generate_mercury_datasets(config=_config(tmp_path).model_copy(update={"random_start": False}))
+
+    assert result == {"cartesian": "cart-run"}
+    assert captured["random_start"] is False

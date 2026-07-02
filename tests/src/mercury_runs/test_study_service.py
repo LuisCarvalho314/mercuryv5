@@ -73,6 +73,54 @@ def test_resolve_run_configurations_expands_weight_preset(tmp_path) -> None:
     assert runs[0]["weight_preset"] == "baseline"
 
 
+def test_structure_metrics_epsilons_do_not_expand_study_grid(tmp_path) -> None:
+    config_path = tmp_path / "thresholds.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "level": [16],
+                    "sensor": ["cardinal distance"],
+                    "sensor_range": [1],
+                    "seed": [0],
+                    "rand_prob": [0.3],
+                    "window_length": [100],
+                },
+                "evaluation": {"structure_metrics_epsilons": [1e-6, 1e-4, 1e-3]},
+                "methods": {
+                    "mercury": {
+                        "enabled": True,
+                        "grid": {
+                            "memory_length": [40],
+                            "activation_threshold": [0.95],
+                            "ambiguity_threshold": [10],
+                            "am_lr": [0.001],
+                            "am_key": [0],
+                            "weight_memory": [0.4],
+                            "weight_undirected": [0.2],
+                            "weight_base": [0.2],
+                            "weight_action": [0.2],
+                            "memory_replay": [True],
+                            "memory_disambiguation": [True],
+                        },
+                    },
+                    "pocml": {"enabled": False, "grid": {}},
+                    "cscg": {"enabled": False, "grid": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="thresholds"),
+    )
+
+    assert len(runs) == 1
+    assert runs[0]["structure_metrics_epsilons"] == [1e-6, 1e-4, 1e-3]
+
+
 def test_build_study_run_records_prunes_irrelevant_method_args(tmp_path, monkeypatch) -> None:
     manifest_path = tmp_path / "study_manifest.jsonl"
     study_directory = tmp_path / "study"

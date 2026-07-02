@@ -60,8 +60,10 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
     sensor = str(run_payload["sensor"])
     sensor_range = run_payload.get("sensor_range")
     mercury_dir = method_output_dir(run_root / "bundles" / "mercury", level, sensor, sensor_range)
+    sensory_dir = method_output_dir(run_root / "bundles" / "sensory", level, sensor, sensor_range)
     pocml_dir = method_output_dir(run_root / "bundles" / "pocml", level, sensor, sensor_range)
     cscg_dir = method_output_dir(run_root / "bundles" / "cscg", level, sensor, sensor_range)
+    hybrid_dir = method_output_dir(run_root / "bundles" / "mercury_cscg_hybrid", level, sensor, sensor_range)
     return ArtifactLayout(
         mercury_states_parquet=mercury_dir / f"{run_id}_states.parquet",
         mercury_attribution_parquet=mercury_dir / f"{run_id}_attribution.parquet",
@@ -72,6 +74,12 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
         mercury_bmu_attribution_step_png=run_root / "plots" / "mercury_bmu_attribution_vs_training_step.png",
         mercury_bmu_attribution_edge_f1_png=run_root / "plots" / "mercury_bmu_attribution_vs_edge_f1.png",
         mercury_bmu_attribution_node_ratio_png=run_root / "plots" / "mercury_bmu_attribution_vs_node_ratio.png",
+        sensory_states_parquet=sensory_dir / f"{run_id}_states.parquet",
+        sensory_paper_precision_json=(run_root / "metrics" / "sensory" / f"{run_id}_paper_precision.json"),
+        sensory_computational_json=(run_root / "metrics" / "sensory" / f"{run_id}_computational.json"),
+        sensory_graph_npz=sensory_dir / f"{run_id}_sensory_graph.npz",
+        sensory_action_map_npz=sensory_dir / f"{run_id}_action_map.npz",
+        sensory_observation_vocabulary_npz=sensory_dir / f"{run_id}_observation_vocabulary.npz",
         pocml_states_parquet=pocml_dir / f"{run_id}_states.parquet",
         pocml_paper_precision_json=(run_root / "metrics" / "pocml" / f"{run_id}_paper_precision.json"),
         pocml_computational_json=(run_root / "metrics" / "pocml" / f"{run_id}_computational.json"),
@@ -83,6 +91,11 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
         cscg_computational_json=(run_root / "metrics" / "cscg" / f"{run_id}_computational.json"),
         cscg_model_npz=cscg_dir / f"{run_id}_cscg_model.npz",
         cscg_internal_graph_png=run_root / "plots" / "cscg_internal_graph.png",
+        mercury_cscg_hybrid_states_parquet=hybrid_dir / f"{run_id}_states.parquet",
+        mercury_cscg_hybrid_paper_precision_json=(run_root / "metrics" / "mercury_cscg_hybrid" / f"{run_id}_paper_precision.json"),
+        mercury_cscg_hybrid_computational_json=(run_root / "metrics" / "mercury_cscg_hybrid" / f"{run_id}_computational.json"),
+        mercury_cscg_hybrid_model_npz=hybrid_dir / f"{run_id}_mercury_cscg_hybrid_model.npz",
+        ground_truth_states_parquet=(run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet"),
         internal_graphs_comparison_png=run_root / "plots" / "internal_graphs_comparison.png",
         comparison_summary_json=run_root / "comparison_summary.json",
         run_config_json=run_root / "run_config.json",
@@ -148,6 +161,13 @@ def collect_run_artifacts(
         "mercury_bmu_attribution_step_png": path_if_exists(layout.mercury_bmu_attribution_step_png),
         "mercury_bmu_attribution_edge_f1_png": path_if_exists(layout.mercury_bmu_attribution_edge_f1_png),
         "mercury_bmu_attribution_node_ratio_png": path_if_exists(layout.mercury_bmu_attribution_node_ratio_png),
+        "sensory_states_parquet": path_if_exists(layout.sensory_states_parquet),
+        "sensory_paper_precision_json": path_if_exists(layout.sensory_paper_precision_json),
+        "sensory_computational_json": path_if_exists(layout.sensory_computational_json),
+        "sensory_graph_npz": path_if_exists(layout.sensory_graph_npz),
+        "sensory_action_map_npz": path_if_exists(layout.sensory_action_map_npz),
+        "sensory_observation_vocabulary_npz": path_if_exists(layout.sensory_observation_vocabulary_npz),
+        "ground_truth_states_parquet": path_if_exists(layout.ground_truth_states_parquet),
         "internal_graphs_comparison_png": path_if_exists(layout.internal_graphs_comparison_png),
     }
     if include_baseline_artifacts and baseline_enabled(run_payload, "pocml"):
@@ -163,7 +183,21 @@ def collect_run_artifacts(
         artifacts["cscg_computational_json"] = path_if_exists(layout.cscg_computational_json)
         artifacts["cscg_model_npz"] = path_if_exists(layout.cscg_model_npz)
         artifacts["cscg_internal_graph_png"] = path_if_exists(layout.cscg_internal_graph_png)
+    if str(run_payload.get("method", "mercury")) == "mercury_cscg_hybrid":
+        artifacts["mercury_cscg_hybrid_states_parquet"] = path_if_exists(layout.mercury_cscg_hybrid_states_parquet)
+        artifacts["mercury_cscg_hybrid_paper_precision_json"] = path_if_exists(layout.mercury_cscg_hybrid_paper_precision_json)
+        artifacts["mercury_cscg_hybrid_computational_json"] = path_if_exists(layout.mercury_cscg_hybrid_computational_json)
+        artifacts["mercury_cscg_hybrid_model_npz"] = path_if_exists(layout.mercury_cscg_hybrid_model_npz)
     return artifacts
+
+
+def paper_precision_snapshot_dir(*, run_root: Path, method: str) -> Path:
+    return Path(run_root) / "snapshots" / str(method) / "paper_precision"
+
+
+def has_paper_precision_snapshot(*, run_root: Path, method: str) -> bool:
+    snapshot_root = paper_precision_snapshot_dir(run_root=run_root, method=method)
+    return snapshot_root.exists() and any(snapshot_root.glob("step=*/snapshot.json"))
 
 
 def read_native_metrics_from_bundle(states_path: Optional[Path], run_parameters_key: str) -> Dict[str, Any]:
@@ -192,41 +226,74 @@ def validate_reusable_run(
         return False, "run_config schema version mismatch"
     if run_status.status not in {"completed", "reused"}:
         return False, f"run status is {run_status.status!r}"
-    if (
-        not layout.mercury_states_parquet.exists()
-        or not layout.mercury_latent_graph_npz.exists()
-        or not layout.mercury_internal_graph_png.exists()
-        or not layout.internal_graphs_comparison_png.exists()
-    ):
-        return False, "missing Mercury artifacts"
-    if paper_precision_enabled(run_payload) and not layout.mercury_paper_precision_json.exists():
-        return False, "missing Mercury paper precision artifact"
-    if computational_eval_enabled(run_payload) and not layout.mercury_computational_json.exists():
-        return False, "missing Mercury computational artifact"
-    if baseline_enabled(run_payload, "pocml"):
+    method = str(run_payload.get("method", "mercury"))
+    if method == "mercury":
         if (
-            not layout.pocml_states_parquet.exists()
-            or not layout.pocml_embeddings_npz.exists()
-            or not layout.pocml_model_checkpoint_pt.exists()
-            or not layout.pocml_internal_graph_png.exists()
+            not layout.mercury_states_parquet.exists()
+            or not layout.mercury_latent_graph_npz.exists()
+            or not layout.mercury_internal_graph_png.exists()
+            or not layout.internal_graphs_comparison_png.exists()
         ):
+            return False, "missing Mercury artifacts"
+        if paper_precision_enabled(run_payload) and not layout.mercury_paper_precision_json.exists():
+            return False, "missing Mercury paper precision artifact"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="mercury"):
+            return False, "missing Mercury paper precision snapshot"
+        if computational_eval_enabled(run_payload) and not layout.mercury_computational_json.exists():
+            return False, "missing Mercury computational artifact"
+    elif method == "sensory":
+        if not layout.sensory_states_parquet.exists() or not layout.sensory_graph_npz.exists() or not layout.sensory_action_map_npz.exists():
+            return False, "missing Sensory artifacts"
+        if paper_precision_enabled(run_payload) and not layout.sensory_paper_precision_json.exists():
+            return False, "missing Sensory paper precision artifact"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="sensory"):
+            return False, "missing Sensory paper precision snapshot"
+        if computational_eval_enabled(run_payload) and not layout.sensory_computational_json.exists():
+            return False, "missing Sensory computational artifact"
+    elif method in {"pocml", "cscg"}:
+        if not layout.ground_truth_states_parquet.exists():
+            return False, "missing ground truth state artifact"
+    elif method == "mercury_cscg_hybrid":
+        if not layout.ground_truth_states_parquet.exists():
+            return False, "missing ground truth state artifact"
+        if not layout.mercury_cscg_hybrid_states_parquet.exists() or not layout.mercury_cscg_hybrid_model_npz.exists():
+            return False, "missing Mercury-CSCG hybrid artifacts"
+        if paper_precision_enabled(run_payload) and not layout.mercury_cscg_hybrid_paper_precision_json.exists():
+            return False, "missing Mercury-CSCG hybrid paper precision artifact"
+        if computational_eval_enabled(run_payload) and not layout.mercury_cscg_hybrid_computational_json.exists():
+            return False, "missing Mercury-CSCG hybrid computational artifact"
+    else:
+        return False, f"unsupported method {method!r}"
+    if baseline_enabled(run_payload, "pocml"):
+        pocml_required = [
+            layout.pocml_states_parquet,
+            layout.pocml_embeddings_npz,
+            layout.pocml_model_checkpoint_pt,
+        ]
+        if method == "mercury":
+            pocml_required.append(layout.pocml_internal_graph_png)
+        if any(not path.exists() for path in pocml_required):
             return False, "missing POCML artifacts"
         if paper_precision_enabled(run_payload) and not layout.pocml_paper_precision_json.exists():
             return False, "missing POCML paper precision artifact"
         if computational_eval_enabled(run_payload) and not layout.pocml_computational_json.exists():
             return False, "missing POCML computational artifact"
     if baseline_enabled(run_payload, "cscg"):
-        if (
-            not layout.cscg_states_parquet.exists()
-            or not layout.cscg_model_npz.exists()
-            or not layout.cscg_internal_graph_png.exists()
-        ):
+        cscg_required = [
+            layout.cscg_states_parquet,
+            layout.cscg_model_npz,
+        ]
+        if method == "mercury":
+            cscg_required.append(layout.cscg_internal_graph_png)
+        if any(not path.exists() for path in cscg_required):
             return False, "missing CSCG artifacts"
         if paper_precision_enabled(run_payload) and not layout.cscg_paper_precision_json.exists():
             return False, "missing CSCG paper precision artifact"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="cscg"):
+            return False, "missing CSCG paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.cscg_computational_json.exists():
             return False, "missing CSCG computational artifact"
-    if (baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg")) and not layout.comparison_summary_json.exists():
+    if method in {"mercury", "mercury_cscg_hybrid"} and (baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg")) and not layout.comparison_summary_json.exists():
         return False, "missing comparison summary"
     return True, "ok"
 
@@ -319,6 +386,14 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
             target_method = "cscg"
         else:
             target_method = "mercury"
+    pocml_enabled = (str(target_method) == "pocml") or (
+        str(target_method) == "mercury"
+        and (bool(getattr(args, "baseline_pocml", False)) or bool(getattr(args, "baseline_all", False)))
+    )
+    cscg_enabled = (str(target_method) == "cscg") or (
+        str(target_method) in {"mercury", "mercury_cscg_hybrid"}
+        and (bool(getattr(args, "baseline_cscg", False)) or bool(getattr(args, "baseline_all", False)))
+    )
     return {
         "method": str(target_method),
         "level": args.level,
@@ -330,6 +405,9 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "valid_trajectories_only": bool(getattr(args, "valid_trajectories_only", False)),
         "mercury_valid_trajectories_only": bool(getattr(args, "mercury_valid_trajectories_only", False)),
         "mercury_split_sensory_raw_latent_valid": bool(getattr(args, "mercury_split_sensory_raw_latent_valid", False)),
+        "mercury_input_mode": str(getattr(args, "mercury_input_mode", "pretrained_raw")),
+        "sensory_observation_mode": str(getattr(args, "sensory_observation_mode", "raw")),
+        "random_start": bool(getattr(args, "random_start", True)),
         "memory_length": args.memory_length,
         "window_length": args.window_length,
         "evaluation": {
@@ -337,12 +415,18 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "enabled": enabled,
                 "mode": resolved_mode,
                 "eval_interval": int(getattr(args, "paper_precision_eval_interval", 1)),
+                "eval_checkpoints": getattr(args, "paper_precision_eval_checkpoints", None),
                 "num_points": getattr(args, "paper_precision_num_points", None),
                 "num_walks": int(getattr(args, "paper_precision_num_walks", 100)),
                 "walk_length": int(getattr(args, "paper_precision_walk_length", 10_000)),
                 "structure_metrics": {
                     "enabled": bool(getattr(args, "structure_metrics", True)),
                     "epsilon": float(getattr(args, "structure_metrics_epsilon", 1e-6)),
+                    "thresholds": (
+                        [float(value) for value in getattr(args, "structure_metrics_epsilons", None)]
+                        if getattr(args, "structure_metrics_epsilons", None) is not None
+                        else [float(getattr(args, "structure_metrics_epsilon", 1e-6))]
+                    ),
                     "ignore_self_loops": bool(getattr(args, "structure_metrics_ignore_self_loops", True)),
                     "scope": str(getattr(args, "structure_metrics_scope", "exact_level")),
                     "ground_truth_source": str(getattr(args, "structure_metrics_ground_truth_source", "empirical_walks")),
@@ -393,7 +477,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "baselines": {
             "pocml": {
-                "enabled": bool(getattr(args, "baseline_pocml", False)) or bool(getattr(args, "baseline_all", False)),
+                "enabled": pocml_enabled,
                 "valid_trajectories_only": bool(getattr(args, "pocml_valid_trajectories_only", False)),
                 "epochs": int(getattr(args, "pocml_epochs", 30)),
                 "trajectory_length": int(getattr(args, "pocml_trajectory_length", 15)),
@@ -415,7 +499,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "use_ground_truth_node_ids": bool(getattr(args, "pocml_use_ground_truth_node_ids", False)),
             },
             "cscg": {
-                "enabled": bool(getattr(args, "baseline_cscg", False)) or bool(getattr(args, "baseline_all", False)),
+                "enabled": cscg_enabled,
                 "valid_trajectories_only": bool(getattr(args, "cscg_valid_trajectories_only", False)),
                 "clones_per_obs": int(getattr(args, "cscg_clones_per_obs", 10)),
                 "n_iter": int(getattr(args, "cscg_n_iter", 100)),
@@ -425,6 +509,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "training_mode": str(getattr(args, "cscg_training_mode", "full")),
                 "batch_size": int(getattr(args, "cscg_batch_size", 1024)),
                 "online_lambda": float(getattr(args, "cscg_online_lambda", 1.0)),
+                "mercury_cscg_prior_weight": float(getattr(args, "mercury_cscg_prior_weight", 1.0)),
                 "seed": int(args.seed if getattr(args, "cscg_seed", None) is None else args.cscg_seed),
             },
         },
