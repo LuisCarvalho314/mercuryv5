@@ -28,10 +28,54 @@ from .prepare import (
     resolve_dataset_path_and_metadata,
     to_indices,
 )
-from .train import objective_scores, run_cscg_online_em, train_cscg_model
+from .train import objective_scores, run_cscg_online_em, train_cscg_model, viterbi_refined_eval_model_npz
 from ...infrastructure.paper_precision import resolve_eval_checkpoints
 from ...infrastructure.paper_precision_snapshots import write_cscg_paper_precision_snapshot
 from ...infrastructure.runtime import progress_enabled
+
+
+def _online_sample_schedule_total(*, explicit_checkpoints: list[int] | None, default_total: int) -> int:
+    if explicit_checkpoints is None:
+        return int(default_total)
+    valid = [int(value) for value in explicit_checkpoints if 0 < int(value) <= int(default_total)]
+    if not valid:
+        return int(default_total)
+    return max(valid)
+
+
+def _consume_crossed_checkpoints(checkpoints: list[int], next_index: int, current_step: int) -> tuple[int, bool]:
+    should_record = False
+    while next_index < len(checkpoints) and int(current_step) >= int(checkpoints[next_index]):
+        should_record = True
+        next_index += 1
+    return next_index, should_record
+
+
+def _resolve_cscg_clone_allocation(
+    *,
+    config: CSCGConfig,
+    obs_idx: np.ndarray,
+    ground_truth_states: np.ndarray | None,
+    n_obs: int,
+) -> np.ndarray:
+    allocation = str(config.clone_allocation).strip().lower()
+    if allocation == "uniform":
+        return np.full(int(n_obs), int(config.clones_per_obs), dtype=np.int64)
+    if allocation not in {"ground_truth", "oracle_ground_truth"}:
+        raise ValueError(f"Unsupported CSCG clone_allocation: {config.clone_allocation}")
+    if ground_truth_states is None:
+        raise ValueError("CSCG ground-truth clone allocation requires aligned ground-truth states.")
+    obs_idx = np.asarray(obs_idx, dtype=np.int64)
+    ground_truth_states = np.asarray(ground_truth_states)
+    if obs_idx.shape[0] != ground_truth_states.shape[0]:
+        raise ValueError(
+            "CSCG ground-truth clone allocation requires observation and ground-truth arrays with matching lengths."
+        )
+    n_clones = np.zeros(int(n_obs), dtype=np.int64)
+    for obs in range(int(n_obs)):
+        states = np.unique(ground_truth_states[obs_idx == obs])
+        n_clones[obs] = max(1, int(states.shape[0])) * int(config.clones_per_state)
+    return n_clones
 
 
 def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., None]] = None):
@@ -77,7 +121,32 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         n_actions = int(action_values.shape[0])
         if n_obs < 1 or n_actions < 1:
             raise ValueError("CSCG online EM requires at least one observation and one action.")
-        n_clones = np.full(n_obs, int(config.clones_per_obs), dtype=np.int64)
+        allocation_ground_truth = None
+        allocation_obs_idx = None
+        if str(config.clone_allocation).strip().lower() in {"ground_truth", "oracle_ground_truth"}:
+            allocation_observations, allocation_actions, allocation_collisions, _, _ = load_dataset_arrays(
+                datasets_root=config.datasets_root,
+                level=config.level,
+                sensor=config.sensor,
+                sensor_range=config.sensor_range,
+                dataset_select=config.dataset_select,
+                dataset_run_id=config.dataset_run_id,
+            )
+            allocation_ground_truth_all = load_ground_truth_states(config.ground_truth_states_parquet)
+            allocation_observations, _, allocation_ground_truth, _ = filter_valid_cscg_rows(
+                observations=allocation_observations,
+                actions=allocation_actions,
+                collisions=allocation_collisions,
+                ground_truth_bmu=allocation_ground_truth_all,
+                valid_trajectories_only=bool(config.valid_trajectories_only),
+            )
+            allocation_obs_idx = map_to_indices(obs_values, allocation_observations)
+        n_clones = _resolve_cscg_clone_allocation(
+            config=config,
+            obs_idx=(allocation_obs_idx if allocation_obs_idx is not None else np.arange(n_obs, dtype=np.int64)),
+            ground_truth_states=allocation_ground_truth,
+            n_obs=n_obs,
+        )
         seed_obs = np.asarray([0, min(1, n_obs - 1), 0], dtype=np.int64)
         seed_actions = np.asarray([0, max(0, n_actions - 1), 0], dtype=np.int64)
         model = chmm_mod.CHMM(
@@ -97,10 +166,12 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
             dataset_select=config.dataset_select,
             dataset_run_id=config.dataset_run_id,
         )
-        observations, actions, _, training_stats = filter_valid_cscg_rows(
+        ground_truth_bmu = load_ground_truth_states(config.ground_truth_states_parquet)
+        observations, actions, training_ground_truth_bmu, training_stats = filter_valid_cscg_rows(
             observations=observations,
             actions=actions,
             collisions=collisions,
+            ground_truth_bmu=ground_truth_bmu,
             valid_trajectories_only=bool(config.valid_trajectories_only),
         )
         obs_idx_seed, obs_values = to_indices(observations)
@@ -108,7 +179,12 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         if obs_idx_seed.shape[0] < 3 or act_idx_seed.shape[0] < 3:
             raise ValueError("CSCG baseline could not align enough samples between dataset and ground truth.")
         n_obs = int(obs_idx_seed.max()) + 1
-        n_clones = np.full(n_obs, int(config.clones_per_obs), dtype=np.int64)
+        n_clones = _resolve_cscg_clone_allocation(
+            config=config,
+            obs_idx=obs_idx_seed,
+            ground_truth_states=training_ground_truth_bmu,
+            n_obs=n_obs,
+        )
         model = chmm_mod.CHMM(
             n_clones=n_clones,
             x=obs_idx_seed.astype(np.int64, copy=False),
@@ -121,16 +197,19 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     paper_precision_history: list[dict[str, Any]] = []
     em_schedule_total_units = int(config.n_iter)
     if training_mode == "online_em":
-        em_schedule_total_units = max(1, min(int(config.n_iter), int(available_batch_count)))
-    em_eval_checkpoints = set(
-        resolve_eval_checkpoints(
-            total_units=em_schedule_total_units,
-            schedule = config.paper_precision_schedule,
-            num_points=config.paper_precision_num_points,
-            eval_interval=int(config.paper_precision_eval_interval),
+        em_schedule_total_units = _online_sample_schedule_total(
             explicit_checkpoints=config.paper_precision_eval_checkpoints,
+            default_total=max(1, int(config.n_iter)),
         )
+    em_eval_checkpoints = resolve_eval_checkpoints(
+        total_units=em_schedule_total_units,
+        schedule=config.paper_precision_schedule,
+        num_points=config.paper_precision_num_points,
+        eval_interval=int(config.paper_precision_eval_interval),
+        explicit_checkpoints=config.paper_precision_eval_checkpoints,
     )
+    em_eval_checkpoint_set = set(em_eval_checkpoints)
+    next_online_eval_index = 0
     last_em_iteration = 0
     last_em_step = 0
 
@@ -164,15 +243,31 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         )
 
     def _paper_precision_callback(*, stage: str, iteration: int, model, step: int | None = None) -> None:
-        nonlocal last_em_iteration, last_em_step
+        nonlocal last_em_iteration, last_em_step, next_online_eval_index
         if str(stage).strip().lower() != "em":
             return
-        current_step = int(step if step is not None else iteration)
+        current_step = int(step if training_mode == "online_em" and step is not None else iteration)
         last_em_iteration = int(iteration)
         last_em_step = current_step
         if progress_callback is not None:
-            progress_callback(stage=f"train_{stage}", current=int(iteration), total=int(config.n_iter), message=f"{stage} iter {iteration}")
-        if int(iteration) not in em_eval_checkpoints:
+            if training_mode == "online_em":
+                progress_callback(
+                    stage=f"train_{stage}",
+                    current=min(current_step, int(config.n_iter)),
+                    total=int(config.n_iter),
+                    message=f"observed samples {current_step} (batch {iteration})",
+                )
+            else:
+                progress_callback(stage=f"train_{stage}", current=int(iteration), total=int(config.n_iter), message=f"{stage} iter {iteration}")
+        if training_mode == "online_em":
+            next_online_eval_index, should_record = _consume_crossed_checkpoints(
+                em_eval_checkpoints,
+                next_online_eval_index,
+                current_step,
+            )
+            if not should_record:
+                return
+        elif int(iteration) not in em_eval_checkpoint_set:
             return
         _record_paper_precision(
             stage=stage,
@@ -201,6 +296,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 online_lambda=float(config.online_lambda),
                 max_batches=int(config.n_iter),
                 term_early=bool(config.term_early),
+                max_steps=int(config.n_iter),
                 repeat_batches=True,
                 iteration_callback=training_callback,
             )
@@ -241,7 +337,12 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     paper_precision_mode = str(config.paper_precision_mode).strip().lower()
     if bool(config.paper_precision_enabled) and paper_precision_mode == "per_iteration" and last_em_iteration > 0:
         last_recorded_step = int(paper_precision_history[-1]["step"]) if paper_precision_history else -1
-        if last_recorded_step < last_em_step:
+        explicit_online_schedule_complete = (
+            training_mode == "online_em"
+            and config.paper_precision_eval_checkpoints is not None
+            and next_online_eval_index >= len(em_eval_checkpoints)
+        )
+        if last_recorded_step < last_em_step and not explicit_online_schedule_complete:
             _record_paper_precision(
                 stage="em",
                 iteration=last_em_iteration,
@@ -322,10 +423,30 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         observation_prediction_eval=observation_prediction_eval,
     )
     if bool(config.paper_precision_enabled):
+        eval_viterbi_metrics = None
+        if bool(getattr(config, "eval_viterbi", False)):
+            eval_model_npz = viterbi_refined_eval_model_npz(
+                model,
+                obs_idx=obs_idx,
+                act_idx=act_idx,
+                n_clones=n_clones,
+                n_iter=int(config.n_iter),
+            )
+            eval_viterbi_metrics = compute_cscg_paper_precision_metrics_from_model(
+                model_npz=eval_model_npz,
+                n_clones=n_clones,
+                config=config,
+                obs_uniques=np.asarray(obs_values),
+                action_uniques=np.asarray(action_values),
+                chmm_mod=chmm_mod,
+            )
         if paper_precision_mode == "per_iteration":
             write_cscg_paper_precision_payload(
                 config=config,
                 metrics=(
+                    eval_viterbi_metrics
+                    if eval_viterbi_metrics is not None
+                    else
                     {
                         key: value
                         for key, value in paper_precision_history[-1].items()
@@ -340,7 +461,15 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         else:
             if progress_callback is not None:
                 progress_callback(stage="paper_precision", current=0, total=1, message="Starting paper precision")
-            compute_cscg_paper_precision(config=config)
+            if eval_viterbi_metrics is not None:
+                write_cscg_paper_precision_payload(
+                    config=config,
+                    metrics=eval_viterbi_metrics,
+                    history=[],
+                    mode=str(config.paper_precision_mode),
+                )
+            else:
+                compute_cscg_paper_precision(config=config)
     compute_cscg_precision(config=config)
     if progress_callback is not None:
         progress_callback(stage="native_eval", current=1, total=1, message="Native eval complete")

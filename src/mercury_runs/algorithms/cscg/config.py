@@ -21,6 +21,8 @@ class CSCGConfig(BaseModel):
     dataset_select: str = "latest"
     dataset_run_id: Optional[str] = None
     clones_per_obs: int = Field(default=10, gt=0)
+    clone_allocation: str = Field(default="uniform")
+    clones_per_state: int = Field(default=1, gt=0)
     n_iter: int = Field(default=1000, gt=0)
     pseudocount: float = Field(default=2e-3, ge=0.0)
     term_early: bool = True
@@ -28,6 +30,7 @@ class CSCGConfig(BaseModel):
     training_mode: str = Field(default="full")
     batch_size: int = Field(default=1024, gt=0)
     online_lambda: float = Field(default=1.0, gt=0.0, le=1.0)
+    eval_viterbi: bool = False
     seed: int = Field(default=42, ge=0)
     paper_precision_enabled: bool = False
     paper_precision_mode: str = "off"

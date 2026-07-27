@@ -225,12 +225,19 @@ def test_row_normalize_mean_tv_and_edge_metrics_follow_spec() -> None:
 
     assert np.allclose(T_true, np.array([[0.0, 0.0], [0.5, 0.5]], dtype=np.float64))
     assert np.allclose(T_aligned, np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float64))
-    assert compute_mean_tv(T_true, T_aligned) == pytest.approx(0.25)
+    assert compute_mean_tv(T_true, T_aligned) == pytest.approx(0.5)
     assert compute_edge_metrics(W_true, W_aligned) == {
         "edge_precision": pytest.approx(1.0),
         "edge_recall": pytest.approx(0.5),
         "edge_f1": pytest.approx(2.0 / 3.0),
     }
+
+
+def test_compute_mean_tv_missing_predicted_row_matches_action_conditioned_tv() -> None:
+    T_true = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float64)
+    T_aligned = np.zeros((2, 2), dtype=np.float64)
+
+    assert compute_mean_tv(T_true, T_aligned) == pytest.approx(1.0)
 
 
 def test_weighted_structure_metrics_respect_walk_boundaries() -> None:
@@ -285,7 +292,7 @@ def test_compute_weighted_structure_metrics_can_ignore_self_loops() -> None:
 
     assert metrics["edge_recall"] == pytest.approx(0.5)
     assert metrics["edge_f1"] == pytest.approx(2.0 / 3.0)
-    assert metrics["mean_total_variation"] == pytest.approx(0.25)
+    assert metrics["mean_total_variation"] == pytest.approx(0.5)
     assert ignored_metrics == {
         "mean_total_variation": pytest.approx(0.0),
         "edge_precision": pytest.approx(1.0),

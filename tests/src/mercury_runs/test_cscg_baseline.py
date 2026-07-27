@@ -41,6 +41,7 @@ class _FakeCHMM:
 
     def learn_viterbi_T(self, x, a, n_iter=100):
         self.train_calls.append(f"viterbi:{n_iter}:{self.pseudocount}")
+        self.T = np.full_like(self.T, 7.0)
         return [2.0]
 
     def bps(self, x, a):
@@ -201,6 +202,68 @@ def test_run_cscg_baseline_uses_forward_objective_for_em(monkeypatch, tmp_path: 
     assert paper_precision["config"].run_id == "run-em"
 
 
+def test_run_cscg_ground_truth_clone_allocation_counts_states_per_observation(monkeypatch, tmp_path: Path) -> None:
+    written: dict = {}
+    precision: dict = {}
+    paper_precision: dict = {}
+    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.load_dataset_arrays",
+        lambda **kwargs: (
+            np.array([10, 10, 11, 12], dtype=np.int64),
+            np.array([0, 1, 0, 1], dtype=np.int64),
+            np.array([False, False, False, False]),
+            {"seed": 7},
+            "dataset.parquet",
+        ),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.load_ground_truth_states",
+        lambda path: np.array([2, 3, 3, 4], dtype=np.int32),
+    )
+
+    run_cscg(
+        _base_config(tmp_path, "em").model_copy(
+            update={"clone_allocation": "ground_truth", "clones_per_state": 2}
+        )
+    )
+
+    assert _FakeCHMM.last_instance is not None
+    assert _FakeCHMM.last_instance.kwargs["n_clones"].tolist() == [4, 2, 2]
+    assert written["meta"].run_parameters["cscg_eval"]["num_clone_states"] == 8
+    assert written["meta"].run_parameters["cscg"]["clone_allocation"] == "ground_truth"
+    assert written["meta"].run_parameters["cscg"]["clones_per_state"] == 2
+
+
+def test_run_cscg_eval_viterbi_uses_copy_for_final_paper_metrics(monkeypatch, tmp_path: Path) -> None:
+    written: dict = {}
+    precision: dict = {}
+    captured_metrics: dict = {}
+    captured_payload: dict = {}
+    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
+        lambda **kwargs: captured_metrics.update(kwargs) or {"latent_precision": 0.9},
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
+        lambda **kwargs: captured_payload.update(kwargs),
+    )
+
+    run_cscg(
+        _base_config(tmp_path, "em").model_copy(
+            update={"paper_precision_mode": "final", "eval_viterbi": True}
+        )
+    )
+
+    assert _FakeCHMM.last_instance is not None
+    assert _FakeCHMM.last_instance.train_calls == ["em:3:True:0.002"]
+    assert np.asarray(captured_metrics["model_npz"]["T"]).tolist() == np.full((2, 4, 4), 7.0).tolist()
+    assert captured_payload["metrics"] == {"latent_precision": 0.9}
+    assert captured_payload["config"].eval_viterbi is True
+    assert written["meta"].run_parameters["cscg"]["eval_viterbi"] is True
+
+
 def test_run_cscg_baseline_uses_viterbi_objective_for_viterbi(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
@@ -249,8 +312,8 @@ def test_run_cscg_per_iteration_history_skips_viterbi_stage(monkeypatch, tmp_pat
     stages = [item["stage"] for item in captured_payload["history"]]
     assert all(stage == "em" for stage in stages)
     assert "viterbi" not in stages
-    assert [item["step"] for item in captured_payload["history"]] == [3, 6]
-    assert [item["observed_samples"] for item in captured_payload["history"]] == [3, 6]
+    assert [item["step"] for item in captured_payload["history"]] == [1, 2]
+    assert [item["observed_samples"] for item in captured_payload["history"]] == [1, 2]
     assert captured_payload["metrics"] == {"latent_precision": 0.5}
 
 
@@ -274,7 +337,7 @@ def test_run_cscg_per_iteration_uses_training_step_interval(monkeypatch, tmp_pat
     )
     run_cscg(config)
 
-    assert [item["step"] for item in captured_payload["history"]] == [6]
+    assert [item["step"] for item in captured_payload["history"]] == [2]
     assert [item["iteration"] for item in captured_payload["history"]] == [2]
 
 
@@ -298,7 +361,7 @@ def test_run_cscg_per_iteration_records_final_em_point_when_interval_not_reached
     )
     run_cscg(config)
 
-    assert [item["step"] for item in captured_payload["history"]] == [6]
+    assert [item["step"] for item in captured_payload["history"]] == [2]
     assert [item["iteration"] for item in captured_payload["history"]] == [2]
     assert captured_payload["metrics"] == {"latent_precision": 0.75}
 
@@ -421,12 +484,18 @@ def test_run_cscg_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: 
     )
 
     config = _base_config(tmp_path, "em").model_copy(
-        update={"n_iter": 4, "paper_precision_mode": "per_iteration", "paper_precision_eval_interval": 1000, "paper_precision_num_points": 2}
+        update={
+            "n_iter": 4,
+            "paper_precision_mode": "per_iteration",
+            "paper_precision_eval_interval": 1000,
+            "paper_precision_num_points": 2,
+            "paper_precision_schedule": "linear",
+        }
     )
     run_cscg(config)
 
     assert [item["iteration"] for item in captured_payload["history"]] == [1, 2]
-    assert [item["step"] for item in captured_payload["history"]] == [3, 6]
+    assert [item["step"] for item in captured_payload["history"]] == [1, 2]
 
 
 def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, tmp_path: Path) -> None:
@@ -501,7 +570,84 @@ def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, t
     )
     run_cscg(config)
 
-    assert [item["iteration"] for item in captured_payload["history"]] == [3, 1000]
+    assert [item["iteration"] for item in captured_payload["history"]] == [5, 50, 500]
+    assert [item["step"] for item in captured_payload["history"]] == [10, 100, 1000]
+
+
+def test_run_cscg_online_em_manual_checkpoints_use_observed_samples(monkeypatch, tmp_path: Path) -> None:
+    written: dict = {}
+    precision: dict = {}
+    captured_payload: dict = {}
+    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
+
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.resolve_dataset_path_and_metadata",
+        lambda **kwargs: (tmp_path / "dataset.parquet", {"seed": 7}),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.collect_streaming_cscg_metadata",
+        lambda **kwargs: (
+            np.array([10, 11, 12], dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            {"raw_steps": 6, "filtered_steps": 6, "dropped_collision_steps": 0},
+            3,
+        ),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.iter_cscg_training_batches",
+        lambda **kwargs: iter(
+            [
+                {
+                    "observations": np.array([10, 11], dtype=np.int64),
+                    "actions": np.array([0, 0], dtype=np.int64),
+                    "raw_steps": 2,
+                    "filtered_steps": 2,
+                    "dropped_collision_steps": 0,
+                    "prepended_previous_step": False,
+                },
+                {
+                    "observations": np.array([11, 12], dtype=np.int64),
+                    "actions": np.array([0, 1], dtype=np.int64),
+                    "raw_steps": 2,
+                    "filtered_steps": 2,
+                    "dropped_collision_steps": 0,
+                    "prepended_previous_step": True,
+                },
+                {
+                    "observations": np.array([12, 10], dtype=np.int64),
+                    "actions": np.array([1, 0], dtype=np.int64),
+                    "raw_steps": 2,
+                    "filtered_steps": 2,
+                    "dropped_collision_steps": 0,
+                    "prepended_previous_step": True,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
+        lambda **kwargs: {"latent_precision": 0.4},
+    )
+    monkeypatch.setattr(
+        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
+        lambda **kwargs: captured_payload.update(kwargs),
+    )
+
+    config = _base_config(tmp_path, "em").model_copy(
+        update={
+            "training_mode": "online_em",
+            "batch_size": 2,
+            "n_iter": 1000,
+            "term_early": False,
+            "paper_precision_mode": "per_iteration",
+            "paper_precision_eval_checkpoints": [1, 2, 5],
+            "paper_precision_num_points": None,
+        }
+    )
+    run_cscg(config)
+
+    assert [item["iteration"] for item in captured_payload["history"]] == [1, 3]
+    assert [item["step"] for item in captured_payload["history"]] == [2, 6]
 
 
 def test_run_cscg_online_em_with_viterbi_keeps_final_full_refinement(monkeypatch, tmp_path: Path) -> None:

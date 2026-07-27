@@ -197,6 +197,16 @@ level_22 = [
     "XXXXXX"
 ]
 
+level_23 = [
+    "XXXXXXX",
+    "XP    X",
+    "X     X",
+    "X     X",
+    "X     X",
+    "X     X",
+    "XXXXXXX"
+]
+
 # for value in maze.iter_rows(
 #     min_row=1, max_row=17, min_col=1, max_col=17, values_only=True
 # ):
@@ -235,4 +245,5 @@ levels = [
     level_20,
     level_21,
     level_22,
+    level_23
 ]

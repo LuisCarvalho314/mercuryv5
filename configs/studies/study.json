@@ -136,6 +136,8 @@
       "enabled": false,
       "grid": {
         "cscg_clones_per_obs": [10],
+        "cscg_clone_allocation": ["uniform", "ground_truth"],
+        "cscg_clones_per_state": [1],
         "cscg_n_iter": [1000],
         "cscg_pseudocount": [0.002],
         "cscg_term_early": [true],
@@ -143,6 +145,7 @@
         "cscg_training_mode": ["full"],
         "cscg_batch_size": [1024],
         "cscg_online_lambda": [1.0],
+        "cscg_eval_viterbi": [false, true],
         "cscg_seed": [null]
       }
     }

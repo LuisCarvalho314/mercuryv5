@@ -58,12 +58,45 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
         "weight_base": 0.0,
         "weight_action": 0.01,
     },
-	"only_memory": {
-		"weight_memory": 1.0,
+    "only_memory": {
+        "weight_memory": 1.0,
         "weight_undirected": 0.0,
         "weight_base": 0.0,
         "weight_action": 0.0,
+    },
 }
+
+CSCG_CLONE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "ground_truth_state_1": {
+        "cscg_clone_allocation": "ground_truth",
+        "cscg_clones_per_state": 1,
+        "cscg_clones_per_obs": 1,
+    },
+    "ground_truth_state_2": {
+        "cscg_clone_allocation": "ground_truth",
+        "cscg_clones_per_state": 2,
+        "cscg_clones_per_obs": 1,
+    },
+    "uniform_obs_1": {
+        "cscg_clone_allocation": "uniform",
+        "cscg_clones_per_state": 1,
+        "cscg_clones_per_obs": 1,
+    },
+    "uniform_obs_2": {
+        "cscg_clone_allocation": "uniform",
+        "cscg_clones_per_state": 1,
+        "cscg_clones_per_obs": 2,
+    },
+    "uniform_obs_4": {
+        "cscg_clone_allocation": "uniform",
+        "cscg_clones_per_state": 1,
+        "cscg_clones_per_obs": 4,
+    },
+    "uniform_obs_8": {
+        "cscg_clone_allocation": "uniform",
+        "cscg_clones_per_state": 1,
+        "cscg_clones_per_obs": 8,
+    },
 }
 
 def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
@@ -137,6 +170,21 @@ def apply_weight_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]:
     return expanded
 
 
+def apply_cscg_clone_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]:
+    preset_name = run_configuration.get("cscg_clone_preset")
+    if preset_name is None:
+        return dict(run_configuration)
+    resolved_name = str(preset_name)
+    if resolved_name not in CSCG_CLONE_PRESETS:
+        available = ", ".join(sorted(CSCG_CLONE_PRESETS))
+        raise ValueError(f"Unknown cscg_clone_preset '{resolved_name}'. Expected one of: {available}")
+    expanded = dict(run_configuration)
+    expanded.pop("cscg_clone_preset", None)
+    expanded.update(CSCG_CLONE_PRESETS[resolved_name])
+    expanded["cscg_clone_preset"] = resolved_name
+    return expanded
+
+
 def _normalize_section(raw: Dict[str, Any]) -> Dict[str, List[Any]]:
     if not isinstance(raw, dict):
         raise ValueError("Study config sections must be JSON objects.")
@@ -182,10 +230,19 @@ def _expand_method_runs(
     for key, value in method_flags.items():
         parameter_space.setdefault(key, [value])
     parameter_space.setdefault("reuse_existing_run", [False])
+    if method_name != "cscg":
+        parameter_space.pop("cscg_clone_preset", None)
 
     runs: List[Dict[str, Any]] = []
     for run_configuration in grid(parameter_space):
-        runs.append(apply_weight_preset(run_configuration) if method_name == "mercury" else dict(run_configuration))
+        expanded_configuration = (
+            apply_weight_preset(run_configuration)
+            if method_name in {"mercury", "mercury_cscg_hybrid"}
+            else dict(run_configuration)
+        )
+        if method_name == "cscg":
+            expanded_configuration = apply_cscg_clone_preset(expanded_configuration)
+        runs.append(expanded_configuration)
     return runs
 
 
@@ -257,6 +314,7 @@ def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }:
         pruned.pop(key, None)
     pruned.pop("weight_preset", None)
+    pruned.pop("cscg_clone_preset", None)
     if method == "mercury":
         for key in list(pruned):
             if key.startswith("pocml_") or key.startswith("cscg_"):
@@ -375,8 +433,8 @@ def build_study_run_records(
         "pocml_random_feature_dim", "pocml_n_states", "pocml_precision_capacities", "pocml_alpha", "pocml_lr_q", "pocml_lr_v",
         "pocml_lr_all", "pocml_lr_m", "pocml_reg_m", "pocml_max_iter_m", "pocml_eps_m",
         "pocml_use_ground_truth_node_ids", "pocml_batch_size", "pocml_memory_bias", "baseline_cscg",
-        "cscg_clones_per_obs", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
-        "cscg_batch_size", "cscg_online_lambda", "cscg_seed", "method",
+        "cscg_clones_per_obs", "cscg_clone_allocation", "cscg_clones_per_state", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
+        "cscg_batch_size", "cscg_online_lambda", "cscg_eval_viterbi", "cscg_seed", "method",
         "mercury_input_mode", "sensory_observation_mode",
     }
     for run_index, run_configuration in enumerate(run_configurations):

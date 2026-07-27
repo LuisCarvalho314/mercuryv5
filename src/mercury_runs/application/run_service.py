@@ -114,14 +114,11 @@ def _hybrid_total_cscg_baseline_steps(args: argparse.Namespace) -> int:
 
 
 def _hybrid_online_train_steps(args: argparse.Namespace) -> int:
-    return int(args.num_steps) * int(args.cscg_n_iter)
+    return int(args.num_steps) + int(args.cscg_n_iter)
 
 
 def _baseline_cscg_n_iter_for_budget(args: argparse.Namespace) -> int:
-    if str(args.cscg_training_mode).strip().lower() != "online_em":
-        return int(args.cscg_n_iter)
-    batches_per_epoch = max(1, int(np.ceil(float(args.num_steps) / float(args.cscg_batch_size))))
-    return batches_per_epoch * int(args.cscg_n_iter)
+    return int(args.cscg_n_iter)
 
 
 def _write_exact_ground_truth_states(
@@ -639,6 +636,7 @@ def _run_mercury_cscg_hybrid_stage(
             batch_size=args.cscg_batch_size,
             online_lambda=args.cscg_online_lambda,
             mercury_prior_weight=float(getattr(args, "mercury_cscg_prior_weight", 1.0)),
+            eval_viterbi=bool(getattr(args, "cscg_eval_viterbi", False)),
             paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
             paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
             paper_precision_eval_interval=int((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("eval_interval", 1)),
@@ -875,6 +873,8 @@ def _run_baseline_stages(
                 dataset_select=baseline_dataset_select,
                 dataset_run_id=baseline_dataset_run_id,
                 clones_per_obs=args.cscg_clones_per_obs,
+                clone_allocation=str(getattr(args, "cscg_clone_allocation", "uniform")),
+                clones_per_state=int(getattr(args, "cscg_clones_per_state", 1)),
                 n_iter=(int(baseline_cscg_n_iter) if baseline_cscg_n_iter is not None else args.cscg_n_iter),
                 pseudocount=args.cscg_pseudocount,
                 term_early=args.cscg_term_early,
@@ -882,6 +882,7 @@ def _run_baseline_stages(
                 training_mode=args.cscg_training_mode,
                 batch_size=args.cscg_batch_size,
                 online_lambda=args.cscg_online_lambda,
+                eval_viterbi=bool(getattr(args, "cscg_eval_viterbi", False)),
                 seed=(args.cscg_seed if args.cscg_seed is not None else args.seed),
                 paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
                 paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),

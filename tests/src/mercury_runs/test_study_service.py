@@ -73,6 +73,163 @@ def test_resolve_run_configurations_expands_weight_preset(tmp_path) -> None:
     assert runs[0]["weight_preset"] == "baseline"
 
 
+def test_resolve_run_configurations_expands_weight_preset_for_hybrid(tmp_path) -> None:
+    config_path = tmp_path / "hybrid_weight_preset.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "level": [16],
+                    "sensor": ["cardinal distance"],
+                    "sensor_range": [1],
+                    "seed": [0],
+                    "rand_prob": [0.3],
+                    "window_length": [100],
+                },
+                "evaluation": {},
+                "methods": {
+                    "mercury": {"enabled": False, "grid": {}},
+                    "pocml": {"enabled": False, "grid": {}},
+                    "cscg": {"enabled": False, "grid": {}},
+                    "mercury_cscg_hybrid": {
+                        "enabled": True,
+                        "grid": {
+                            "memory_length": [10],
+                            "activation_threshold": [0.95],
+                            "ambiguity_threshold": [30],
+                            "am_lr": [0.5],
+                            "am_key": [0],
+                            "weight_preset": ["only_memory"],
+                            "memory_replay": [True],
+                            "memory_disambiguation": [True],
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="hybrid_weight_preset"),
+    )
+
+    assert len(runs) == 1
+    assert runs[0]["method"] == "mercury_cscg_hybrid"
+    assert runs[0]["weight_memory"] == 1.0
+    assert runs[0]["weight_undirected"] == 0.0
+    assert runs[0]["weight_base"] == 0.0
+    assert runs[0]["weight_action"] == 0.0
+    assert runs[0]["weight_preset"] == "only_memory"
+
+
+def test_resolve_run_configurations_expands_cscg_clone_preset(tmp_path) -> None:
+    config_path = tmp_path / "clone_preset.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "level": [16],
+                    "sensor": ["cardinal distance"],
+                    "sensor_range": [1],
+                    "seed": [0],
+                    "rand_prob": [0.3],
+                    "window_length": [100],
+                },
+                "evaluation": {},
+                "methods": {
+                    "mercury": {"enabled": False, "grid": {}},
+                    "pocml": {"enabled": False, "grid": {}},
+                    "cscg": {
+                        "enabled": True,
+                        "grid": {
+                            "cscg_clone_preset": ["ground_truth_state_2", "uniform_obs_4"],
+                            "cscg_n_iter": [1000],
+                            "cscg_pseudocount": [0.002],
+                            "cscg_term_early": [False],
+                            "cscg_train_algorithm": ["em"],
+                            "cscg_training_mode": ["full"],
+                            "cscg_batch_size": [2000],
+                            "cscg_online_lambda": [1.0],
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="clone_preset"),
+    )
+
+    assert len(runs) == 2
+    assert {
+        (
+            run["cscg_clone_preset"],
+            run["cscg_clone_allocation"],
+            run["cscg_clones_per_state"],
+            run["cscg_clones_per_obs"],
+        )
+        for run in runs
+    } == {
+        ("ground_truth_state_2", "ground_truth", 2, 1),
+        ("uniform_obs_4", "uniform", 1, 4),
+    }
+
+
+def test_resolve_run_configurations_does_not_expand_clone_preset_for_hybrid(tmp_path) -> None:
+    config_path = tmp_path / "hybrid_clone_preset.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "level": [16],
+                    "sensor": ["cardinal distance"],
+                    "sensor_range": [1],
+                    "seed": [0],
+                    "rand_prob": [0.3],
+                    "window_length": [100],
+                },
+                "evaluation": {},
+                "methods": {
+                    "mercury": {"enabled": False, "grid": {}},
+                    "pocml": {"enabled": False, "grid": {}},
+                    "cscg": {"enabled": False, "grid": {}},
+                    "mercury_cscg_hybrid": {
+                        "enabled": True,
+                        "grid": {
+                            "memory_length": [10],
+                            "activation_threshold": [0.95],
+                            "ambiguity_threshold": [30],
+                            "am_lr": [0.5],
+                            "am_key": [0],
+                            "weight_preset": ["only_memory"],
+                            "memory_replay": [True],
+                            "memory_disambiguation": [True],
+                            "cscg_clone_preset": ["ground_truth_state_2", "uniform_obs_4"],
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="hybrid_clone_preset"),
+    )
+
+    assert len(runs) == 1
+    assert "cscg_clone_preset" not in runs[0]
+    assert all("cscg_clone_allocation" not in run for run in runs)
+    assert all("cscg_clones_per_state" not in run for run in runs)
+    assert all("cscg_clones_per_obs" not in run for run in runs)
+
+
 def test_structure_metrics_epsilons_do_not_expand_study_grid(tmp_path) -> None:
     config_path = tmp_path / "thresholds.json"
     config_path.write_text(

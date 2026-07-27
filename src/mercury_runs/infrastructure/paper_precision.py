@@ -210,6 +210,8 @@ def compute_fixed_map_precision_details(
     inferred_states: np.ndarray,
     ground_truth_states: np.ndarray,
     metric_name: str,
+    inferred_state_count: int | None = None,
+    ground_truth_state_count: int | None = None,
 ) -> dict[str, Any]:
     z_hat = np.asarray(inferred_states, dtype=np.int64)
     z_true = np.asarray(ground_truth_states, dtype=np.int64)
@@ -225,7 +227,15 @@ def compute_fixed_map_precision_details(
             "ground_truth_state_count": 0,
             "cooccurrence_matrix": [],
         }
-    cooccurrence = compute_cooccurrence_matrix(z_hat.tolist(), z_true.tolist())
+    if inferred_state_count is not None or ground_truth_state_count is not None:
+        cooccurrence = dense_integer_cooccurrence_matrix(
+            z_hat,
+            z_true,
+            n_inferred=inferred_state_count,
+            n_true=ground_truth_state_count,
+        )
+    else:
+        cooccurrence = compute_cooccurrence_matrix(z_hat.tolist(), z_true.tolist())
     total = float(z_hat.shape[0])
     recall_name = metric_name.replace("precision", "recall")
     return {
@@ -236,6 +246,29 @@ def compute_fixed_map_precision_details(
         "ground_truth_state_count": int(len(np.unique(z_true))),
         "cooccurrence_matrix": cooccurrence.astype(int).tolist(),
     }
+
+
+def dense_integer_cooccurrence_matrix(
+    inferred_states: np.ndarray,
+    ground_truth_states: np.ndarray,
+    *,
+    n_inferred: int | None = None,
+    n_true: int | None = None,
+) -> np.ndarray:
+    inferred = np.asarray(inferred_states, dtype=np.int64)
+    truth = np.asarray(ground_truth_states, dtype=np.int64)
+    if inferred.shape[0] != truth.shape[0]:
+        raise ValueError("Inferred and ground-truth state sequences must have matching lengths.")
+    inferred_size = int(n_inferred) if n_inferred is not None else (int(inferred.max()) + 1 if inferred.size else 0)
+    truth_size = int(n_true) if n_true is not None else (int(truth.max()) + 1 if truth.size else 0)
+    matrix = np.zeros((max(inferred_size, 0), max(truth_size, 0)), dtype=np.int64)
+    for inferred_state, true_state in zip(inferred.tolist(), truth.tolist(), strict=False):
+        if int(inferred_state) < 0 or int(true_state) < 0:
+            continue
+        if int(inferred_state) >= matrix.shape[0] or int(true_state) >= matrix.shape[1]:
+            continue
+        matrix[int(inferred_state), int(true_state)] += 1
+    return matrix
 
 
 def compute_purity_from_cooccurrence(cooccurrence_matrix: Sequence[Sequence[int]]) -> float:
@@ -410,14 +443,25 @@ def zero_action_tensor_diagonal(T: np.ndarray) -> np.ndarray:
     return transitions
 
 
-def compute_mean_tv(T_true: np.ndarray, T_aligned: np.ndarray) -> float:
+def compute_mean_tv(T_true: np.ndarray, T_aligned: np.ndarray, epsilon: float = 1e-6) -> float:
     transition_true = np.asarray(T_true, dtype=np.float64)
     transition_aligned = np.asarray(T_aligned, dtype=np.float64)
     if transition_true.shape != transition_aligned.shape:
         raise ValueError("Transition matrices must have matching shapes.")
     if transition_true.size == 0:
         return 0.0
-    return float(np.mean(0.5 * np.abs(transition_true - transition_aligned).sum(axis=1)))
+    valid_rows = transition_true.sum(axis=1) > float(epsilon)
+    if not np.any(valid_rows):
+        return 0.0
+    tv_values: list[float] = []
+    for source_idx in np.flatnonzero(valid_rows).tolist():
+        predicted_row = transition_aligned[int(source_idx)]
+        if float(predicted_row.sum()) <= float(epsilon):
+            tv_values.append(1.0)
+            continue
+        delta = np.abs(predicted_row - transition_true[int(source_idx)])
+        tv_values.append(float(0.5 * delta.sum()))
+    return float(np.mean(tv_values)) if tv_values else 0.0
 
 
 def compute_edge_metrics(W_true: np.ndarray, W_aligned: np.ndarray, epsilon: float = 1e-6) -> dict[str, float]:
@@ -771,8 +815,9 @@ def compute_action_conditioned_structure_metrics(
 ) -> dict[str, float]:
     decoded_series = concatenate_walk_series(decoded_walks)
     true_series = concatenate_walk_series(true_walks)
-    learned_support = support_action_transition_tensor(T_hat, epsilon=float(epsilon))
-    n_learned = int(learned_support.shape[1])
+    learned = np.asarray(T_hat, dtype=np.float64)
+    learned_support = support_action_transition_tensor(learned, epsilon=float(epsilon))
+    n_learned = int(learned.shape[1])
     n_true_states = int(n_true)
     contingency = compute_contingency_matrix(
         decoded_states=decoded_series,
@@ -782,9 +827,16 @@ def compute_action_conditioned_structure_metrics(
     )
     alignment = compute_alignment(contingency)
     occupancy = compute_occupancy(decoded_series, n_learned=n_learned)
-    learned_uniform = normalize_action_rows(learned_support)
-    aligned_tensor = aggregate_aligned_action_transition_tensor(
-        learned_uniform,
+    learned_distribution = normalize_action_rows(learned)
+    aligned_distribution_tensor = aggregate_aligned_action_transition_tensor(
+        learned_distribution,
+        alignment,
+        occupancy,
+        n_true=n_true_states,
+    )
+    learned_support_distribution = normalize_action_rows(learned_support)
+    aligned_support_tensor = aggregate_aligned_action_transition_tensor(
+        learned_support_distribution,
         alignment,
         occupancy,
         n_true=n_true_states,
@@ -796,24 +848,30 @@ def compute_action_conditioned_structure_metrics(
             state_walks=true_walks,
             action_walks=action_walks,
             n_states=n_true_states,
-            n_actions=int(learned_support.shape[0]),
+            n_actions=int(learned.shape[0]),
         )
     )
-    resolved_n_actions = max(int(true_tensor.shape[0]), int(aligned_tensor.shape[0]))
+    resolved_n_actions = max(
+        int(true_tensor.shape[0]),
+        int(aligned_distribution_tensor.shape[0]),
+        int(aligned_support_tensor.shape[0]),
+    )
     true_tensor = _pad_action_tensor_to_n_actions(true_tensor, resolved_n_actions)
-    aligned_tensor = _pad_action_tensor_to_n_actions(aligned_tensor, resolved_n_actions)
+    aligned_distribution_tensor = _pad_action_tensor_to_n_actions(aligned_distribution_tensor, resolved_n_actions)
+    aligned_support_tensor = _pad_action_tensor_to_n_actions(aligned_support_tensor, resolved_n_actions)
     if ignore_self_loops:
         true_tensor = zero_action_tensor_diagonal(true_tensor)
-        aligned_tensor = zero_action_tensor_diagonal(aligned_tensor)
+        aligned_distribution_tensor = zero_action_tensor_diagonal(aligned_distribution_tensor)
+        aligned_support_tensor = zero_action_tensor_diagonal(aligned_support_tensor)
     return {
         "mean_total_variation": compute_action_conditioned_mean_tv(
             true_tensor,
-            aligned_tensor,
+            aligned_distribution_tensor,
             epsilon=float(epsilon),
         ),
         **compute_action_conditioned_edge_metrics(
             true_tensor,
-            aligned_tensor,
+            aligned_support_tensor,
             epsilon=float(epsilon),
         ),
     }

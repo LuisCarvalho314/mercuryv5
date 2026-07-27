@@ -43,6 +43,21 @@ def test_action_conditioned_structure_metrics_missing_correct_edge_gives_max_tv(
     assert metrics["edge_f1"] == pytest.approx(0.0)
 
 
+def test_action_conditioned_tv_uses_raw_probabilities_not_thresholded_support() -> None:
+    metrics = compute_action_conditioned_structure_metrics(
+        decoded_walks=[np.array([0, 1], dtype=np.int64)],
+        true_walks=[np.array([0, 1], dtype=np.int64)],
+        action_walks=[np.array([0, 0], dtype=np.int64)],
+        T_hat=np.array([[[0.0, 0.1], [0.0, 0.0]]], dtype=np.float64),
+        n_true=2,
+        T_true=np.array([[[0.0, 1.0], [0.0, 0.0]]], dtype=np.float64),
+        epsilon=0.2,
+    )
+
+    assert metrics["mean_total_variation"] == pytest.approx(0.0)
+    assert metrics["edge_f1"] == pytest.approx(0.0)
+
+
 def test_action_conditioned_structure_metrics_multiple_successors_increase_tv() -> None:
     metrics = compute_action_conditioned_structure_metrics(
         decoded_walks=[np.array([0, 1], dtype=np.int64)],

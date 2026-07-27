@@ -28,7 +28,6 @@ from ...infrastructure.paper_precision import (
     remap_position_walks_to_global_ids,
     resolve_structure_metric_epsilons,
     resolve_dataset_parquet_from_bundle,
-    support_action_transition_tensor,
     structure_epsilon_key,
     write_paper_precision_artifact,
 )
@@ -205,6 +204,8 @@ def compute_cscg_paper_precision_metrics_from_model(
         inferred_states=concatenate_walk_series(inferred_walks),
         ground_truth_states=concatenate_walk_series(gt_exact_walks),
         metric_name="latent_exact_precision",
+        inferred_state_count=int(np.asarray(n_clones, dtype=np.int64).sum()),
+        ground_truth_state_count=int(exact_cartesian_reference_positions(int(config.level)).shape[0]),
     )
     attempted_walks = requested_walks - skipped_short_walks
     decoded_walks = attempted_walks - unsupported_walks
@@ -316,7 +317,7 @@ def compute_cscg_paper_precision_metrics_from_model(
                 decoded_walks=inferred_walks,
                 true_walks=true_structure_walks,
                 action_walks=gt_action_walks,
-                T_hat=support_action_transition_tensor(transition_tensor, epsilon=float(epsilon)),
+                T_hat=transition_tensor,
                 n_true=n_true_states,
                 T_true=T_true,
                 epsilon=float(epsilon),
@@ -355,7 +356,9 @@ def compute_cscg_paper_precision_metrics_from_model(
 
 
 def write_cscg_paper_precision_payload(*, config, metrics: dict[str, Any], history: list[dict[str, Any]], mode: str) -> Path:
-    schedule_unit = "training_step" if history else "final_only"
+    training_mode = str(getattr(config, "training_mode", "full")).strip().lower()
+    schedule_unit = "final_only" if not history else ("training_step" if training_mode == "online_em" else "em_iteration")
+    x_axis_unit = "observed_samples" if training_mode == "online_em" else schedule_unit
     payload = {
         "method": "cscg",
         "schema": "paper_precision_v1",
@@ -373,8 +376,11 @@ def write_cscg_paper_precision_payload(*, config, metrics: dict[str, Any], histo
             "eval_checkpoints": config.paper_precision_eval_checkpoints,
             "num_points": config.paper_precision_num_points,
             "schedule_unit": schedule_unit,
-            "x_axis_unit": "observed_samples",
+            "x_axis_unit": x_axis_unit,
             "structure_metrics_epsilons": resolve_structure_metric_epsilons(config),
+            "eval_viterbi_enabled": bool(getattr(config, "eval_viterbi", False)),
+            "eval_viterbi_n_iter": (int(getattr(config, "n_iter", 0)) if bool(getattr(config, "eval_viterbi", False)) else None),
+            "eval_viterbi_pseudocount": (0.0 if bool(getattr(config, "eval_viterbi", False)) else None),
         },
         "metrics": metrics,
         "history": history,

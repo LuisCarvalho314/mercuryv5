@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -104,6 +105,7 @@ def run_cscg_online_em(
     online_lambda: float,
     max_batches: int,
     term_early: bool,
+    max_steps: int | None = None,
     initial_counts: np.ndarray | None = None,
     repeat_batches: bool = False,
     iteration_callback=None,
@@ -119,11 +121,14 @@ def run_cscg_online_em(
     previous = -np.inf
     processed_batches = 0
     processed_steps = 0
+    step_limit = None if max_steps is None else max(1, int(max_steps))
 
-    while processed_batches < int(max_batches):
+    while processed_batches < int(max_batches) and (step_limit is None or processed_steps < step_limit):
         processed_batches_at_pass_start = processed_batches
         for batch in batch_iterator_factory():
             if processed_batches >= max_batches:
+                break
+            if step_limit is not None and processed_steps >= step_limit:
                 break
             filtered_steps = int(batch["filtered_steps"])
             if filtered_steps == 0:
@@ -160,6 +165,8 @@ def run_cscg_online_em(
             em_convergence.append(value)
             if iteration_callback is not None:
                 iteration_callback(stage="em", iteration=processed_batches, model=model, step=processed_steps)
+            if step_limit is not None and processed_steps >= step_limit:
+                return np.asarray(em_convergence, dtype=np.float32)
             if term_early and value <= previous:
                 return np.asarray(em_convergence, dtype=np.float32)
             previous = value
@@ -167,3 +174,24 @@ def run_cscg_online_em(
             break
 
     return np.asarray(em_convergence, dtype=np.float32)
+
+
+def viterbi_refined_eval_model_npz(
+    model: Any,
+    *,
+    obs_idx: np.ndarray,
+    act_idx: np.ndarray,
+    n_clones: np.ndarray,
+    n_iter: int,
+) -> dict[str, np.ndarray]:
+    eval_model = copy.deepcopy(model)
+    eval_model.pseudocount = 0.0
+    eval_model.learn_viterbi_T(
+        np.asarray(obs_idx, dtype=np.int64),
+        np.asarray(act_idx, dtype=np.int64),
+        n_iter=int(n_iter),
+    )
+    return {
+        "T": np.asarray(eval_model.T).copy(),
+        "n_clones": np.asarray(n_clones, dtype=np.int64).copy(),
+    }

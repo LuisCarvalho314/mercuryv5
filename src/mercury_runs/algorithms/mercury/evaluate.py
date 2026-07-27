@@ -260,11 +260,15 @@ def compute_mercury_paper_precision_metrics(
         inferred_states=sensory_series,
         ground_truth_states=gt_exact_series,
         metric_name="sensory_exact_precision",
+        inferred_state_count=int(sensory_graph.n),
+        ground_truth_state_count=int(exact_cartesian_reference_positions(int(config.level)).shape[0]),
     )
     latent_exact_details = compute_fixed_map_precision_details(
         inferred_states=latent_series,
         ground_truth_states=gt_exact_series,
         metric_name="latent_exact_precision",
+        inferred_state_count=int(latent_graph.n),
+        ground_truth_state_count=int(exact_cartesian_reference_positions(int(config.level)).shape[0]),
     )
     metrics: dict[str, Any] = {
         "sensory_precision": sensory_details["sensory_precision"],
