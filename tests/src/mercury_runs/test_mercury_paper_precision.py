@@ -50,8 +50,7 @@ def _advance_latent_state(state):
 
 
 def test_run_mercury_per_iteration_writes_history(monkeypatch, tmp_path: Path) -> None:
-    written: dict = {}
-    metrics_calls: list[int] = []
+    snapshots: list[dict] = []
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.generate_mercury_datasets", lambda **kwargs: {})
 
@@ -63,31 +62,19 @@ def test_run_mercury_per_iteration_writes_history(monkeypatch, tmp_path: Path) -
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.run_mercury_bundle", _fake_run_bundle)
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api._compute_mercury_precision", lambda **kwargs: None)
-
-    def _fake_metrics(*, config, sensory_graph=None, latent_graph=None, action_map=None, show_progress=False, progress_desc=None):
-        metrics_calls.append(len(metrics_calls) + 1)
-        return {"sensory_precision": 0.5, "latent_precision": 0.75}
-
-    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.compute_mercury_paper_precision_metrics", _fake_metrics)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_payload",
-        lambda **kwargs: written.update(kwargs),
+        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot",
+        lambda **kwargs: snapshots.append({"step": int(kwargs["step"])}),
     )
 
     result = run_mercury(_base_config(tmp_path))
 
     assert result == tmp_path / "states.parquet"
-    assert metrics_calls == [1, 2]
-    assert written["schedule_unit"] == "training_step"
-    assert written["history"] == [
-        {"step": 2, "observed_samples": 2, "sensory_precision": 0.5, "latent_precision": 0.75},
-        {"step": 4, "observed_samples": 4, "sensory_precision": 0.5, "latent_precision": 0.75},
-    ]
-    assert written["metrics"] == {"sensory_precision": 0.5, "latent_precision": 0.75}
+    assert [s["step"] for s in snapshots] == [2, 4]
 
 
 def test_run_mercury_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: Path) -> None:
-    written: dict = {}
+    snapshots: list[int] = []
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.generate_mercury_datasets", lambda **kwargs: {})
 
@@ -100,18 +87,14 @@ def test_run_mercury_per_iteration_uses_num_points_schedule(monkeypatch, tmp_pat
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.run_mercury_bundle", _fake_run_bundle)
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api._compute_mercury_precision", lambda **kwargs: None)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.compute_mercury_paper_precision_metrics",
-        lambda **kwargs: {"sensory_precision": 0.5, "latent_precision": 0.75},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_payload",
-        lambda **kwargs: written.update(kwargs),
+        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot",
+        lambda **kwargs: snapshots.append(int(kwargs["step"])),
     )
 
-    config = _base_config(tmp_path).model_copy(update={"num_steps": 10, "paper_precision_num_points": 3, "paper_precision_eval_interval": 1000})
+    config = _base_config(tmp_path).model_copy(update={"num_steps": 10, "paper_precision_num_points": 3, "paper_precision_eval_interval": 1000, "paper_precision_schedule": "linear"})
     run_mercury(config)
 
-    assert [item["step"] for item in written["history"]] == [1, 5, 10]
+    assert snapshots == [1, 5, 10]
 
 
 def test_resolve_eval_checkpoints_uses_manual_list_first() -> None:
@@ -124,7 +107,7 @@ def test_resolve_eval_checkpoints_uses_manual_list_first() -> None:
 
 
 def test_run_mercury_per_iteration_uses_manual_checkpoints(monkeypatch, tmp_path: Path) -> None:
-    written: dict = {}
+    snapshots: list[int] = []
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.generate_mercury_datasets", lambda **kwargs: {})
 
@@ -136,14 +119,9 @@ def test_run_mercury_per_iteration_uses_manual_checkpoints(monkeypatch, tmp_path
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.run_mercury_bundle", _fake_run_bundle)
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api._compute_mercury_precision", lambda **kwargs: None)
-    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot", lambda **kwargs: None)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.compute_mercury_paper_precision_metrics",
-        lambda **kwargs: {"sensory_precision": 0.5, "latent_precision": 0.75},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_payload",
-        lambda **kwargs: written.update(kwargs),
+        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot",
+        lambda **kwargs: snapshots.append(int(kwargs["step"])),
     )
 
     config = _base_config(tmp_path).model_copy(
@@ -156,53 +134,36 @@ def test_run_mercury_per_iteration_uses_manual_checkpoints(monkeypatch, tmp_path
     )
     run_mercury(config)
 
-    assert [item["step"] for item in written["history"]] == [3, 7, 10]
+    assert snapshots == [3, 7, 10]
 
 
 def test_run_mercury_final_uses_frozen_snapshot(monkeypatch, tmp_path: Path) -> None:
-    written: dict = {}
-    received: dict = {}
+    snapshots: list[dict] = []
     config = _base_config(tmp_path).model_copy(update={"paper_precision_mode": "final"})
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.generate_mercury_datasets", lambda **kwargs: {})
 
     def _fake_run_bundle(*, config, dataset_run_ids, latent_step_callback=None, show_progress=True):
         if latent_step_callback is not None:
+            # Call with a non-final step first (should be ignored in final mode)
+            latent_step_callback(step=2, sensory_graph="sensory-graph-2", latent_graph="latent-graph-2", action_map="action-map-2")
+            # Call with the final step (num_steps=4)
             latent_step_callback(step=4, sensory_graph="sensory-graph", latent_graph="latent-graph", action_map="action-map")
         return tmp_path / "states.parquet"
 
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api.run_mercury_bundle", _fake_run_bundle)
     monkeypatch.setattr("mercury_runs.algorithms.mercury.api._compute_mercury_precision", lambda **kwargs: None)
-
-    def _fake_metrics(*, config, sensory_graph=None, latent_graph=None, action_map=None, show_progress=False, progress_desc=None):
-        received.update(
-            sensory_graph=sensory_graph,
-            latent_graph=latent_graph,
-            action_map=action_map,
-            show_progress=show_progress,
-            progress_desc=progress_desc,
-        )
-        return {"sensory_precision": 0.6, "latent_precision": 0.8}
-
-    monkeypatch.setattr("mercury_runs.algorithms.mercury.api.compute_mercury_paper_precision_metrics", _fake_metrics)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_payload",
-        lambda **kwargs: written.update(kwargs),
+        "mercury_runs.algorithms.mercury.api.write_mercury_paper_precision_snapshot",
+        lambda **kwargs: snapshots.append({"step": int(kwargs["step"]), "sensory_graph": kwargs["sensory_graph"]}),
     )
 
     result = run_mercury(config)
 
     assert result == tmp_path / "states.parquet"
-    assert received == {
-        "sensory_graph": "sensory-graph",
-        "latent_graph": "latent-graph",
-        "action_map": "action-map",
-        "show_progress": True,
-        "progress_desc": "Mercury Paper Precision",
-    }
-    assert written["schedule_unit"] == "final_only"
-    assert written["history"] == []
-    assert written["metrics"] == {"sensory_precision": 0.6, "latent_precision": 0.8}
+    assert len(snapshots) == 1
+    assert snapshots[0]["step"] == 4
+    assert snapshots[0]["sensory_graph"] == "sensory-graph"
 
 
 def test_mercury_pipeline_progress_uses_tqdm(monkeypatch) -> None:
@@ -245,6 +206,7 @@ def test_mercury_paper_precision_progress_uses_tqdm(monkeypatch, tmp_path: Path)
     calls: list[dict] = []
 
     class _Graph:
+        n = 2
         adj = np.zeros((2, 2), dtype=np.float32)
         edge_features = {"action": np.zeros((2, 2, 1), dtype=np.int32)}
 
@@ -291,6 +253,7 @@ def test_mercury_paper_precision_passes_valid_trajectory_flag(monkeypatch, tmp_p
     captured: dict = {}
 
     class _Graph:
+        n = 2
         adj = np.zeros((2, 2), dtype=np.float32)
         edge_features = {"action": np.zeros((2, 2, 1), dtype=np.int32)}
 
@@ -338,6 +301,7 @@ def test_mercury_paper_precision_base_valid_flag_passes_walk_filter(monkeypatch,
     captured: dict = {}
 
     class _Graph:
+        n = 2
         adj = np.zeros((2, 2), dtype=np.float32)
         edge_features = {"action": np.zeros((2, 2, 1), dtype=np.int32)}
 
@@ -452,7 +416,9 @@ def test_mercury_paper_precision_reports_purity_and_link_error_for_identity_acti
                 {
                     "observations": np.array([[0.0], [1.0]], dtype=np.float32),
                     "cartesian_observations": np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32),
-                    "actions": np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float32),
+                    # actions[t] is the action that arrived at state[t] (post-step convention).
+                    # The 0->1 transition is attributed to actions[1] = action id 0 ([1,0,0,0]).
+                    "actions": np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
                     "collisions": np.array([False, False]),
                 },
             )()
@@ -481,6 +447,7 @@ def test_mercury_paper_precision_reports_purity_and_link_error_for_identity_acti
 
     class _Graph:
         def __init__(self):
+            self.n = 2
             self.adj = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float32)
             self.edge_features = {"action": np.array([[[0], [0]], [[0], [0]]], dtype=np.int32)}
 
@@ -548,6 +515,7 @@ def test_mercury_paper_precision_marks_link_error_unsupported_without_identity_a
 
     class _Graph:
         def __init__(self):
+            self.n = 2
             self.adj = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float32)
             self.edge_features = {"action": np.array([[[0], [0]], [[0], [0]]], dtype=np.int32)}
 

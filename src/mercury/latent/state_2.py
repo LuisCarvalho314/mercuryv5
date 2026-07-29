@@ -648,7 +648,6 @@ def _predict(g: Graph, bmu: int, action_bmu: int) -> Array:
 
     mask = edge_exists & matches_action
     idx = np.flatnonzero(mask).astype(np.int32, copy=False)
-    print(f"prev {bmu} -> {action_bmu} -> preds: {idx}")
     return idx
 
 
@@ -751,8 +750,6 @@ def _resolve_prev_with_memory_replay(
                 _align_prev_activations_to_graph(replay_state)
 
                 bmu = int(compute_bmu(replay_state, replay_mem, action_bmu_i))
-                if bmu == bmu_refined:
-                    print("bmu created properly")
 
         replay_mem = update_memory(replay_mem)
         replay_mem = add_memory(replay_mem, mem_vec[L + i])
@@ -925,8 +922,6 @@ def update_bmu_memory_adj(ms: MemoryState, g: Graph, bmu: int, *, set_index: int
     mem_len = _mem_len_from_ms(ms)
     K = _max_sets_from_graph(g, mem_len)
     row = mem_adj_row(g, int(bmu), max_mem_adj_sets=K, mem_len=mem_len, set_index=set_index)
-    diff = row - ms.activations.astype(np.float32)
-    print(diff)
 
 
 def latent_step(
@@ -965,14 +960,10 @@ def latent_step(
             else:
                 is_current_aliased = False
 
-        if is_current_aliased:
-            print(True)
-
         if preds.size > 1:
             state.g.node_features["ambiguity_score"][state.prev_bmu] += 1
 
         if state.g.node_features["ambiguity_score"][state.prev_bmu] > state.ambiguity_threshold:
-            print(f"ALIASED {state.prev_bmu}")
             state.preds.append(preds)
 
             # remove all connections to and from bmu_prev
@@ -1025,8 +1016,6 @@ def latent_step(
 
             bmu_now = mapping[bmu_now]
             state.prev_activations = _remap_prev_activations(state.prev_activations, mapping, g.n)
-
-    print(f"STEP {state.step_idx} | {state.prev_bmu} -> {action_bmu} -> {bmu_now}")
 
     g = _set_activation(g, bmu_now)
 

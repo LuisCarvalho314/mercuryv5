@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+from tqdm import tqdm
 
 from ..algorithms.cscg import CSCGConfig, run_cscg
 from ..algorithms.cscg.evaluate import compute_cscg_paper_precision_metrics_from_model, write_cscg_paper_precision_payload
@@ -14,8 +15,11 @@ from ..algorithms.cscg.prepare import import_cscg_module
 from ..algorithms.mercury import MercuryConfig, run_mercury
 from ..algorithms.mercury.evaluate import compute_mercury_paper_precision_metrics, write_mercury_paper_precision_payload
 from ..algorithms.mercury.api import summarize_mercury_run
-from ..algorithms.mercury_cscg_hybrid import MercuryCSCGHybridConfig, run_mercury_cscg_hybrid
+from ..algorithms.mercury_cscg_hybrid import MercuryCSCGHybridConfig, run_mercury_cscg_hybrid, write_hybrid_paper_precision_payload
 from ..algorithms.pocml import POCMLConfig, run_pocml
+from ..algorithms.pocml.evaluate import compute_pocml_paper_precision_metrics_from_model, write_pocml_paper_precision_payload
+from ..algorithms.pocml.prepare import import_pocml_modules
+from ..algorithms.pocml.train import prepare_model_for_single_sequence_eval
 from ..algorithms.sensory import (
     SensoryConfig,
     compute_sensory_paper_precision_metrics,
@@ -27,8 +31,10 @@ from ..domain.models import ArtifactLayout, RunStatusModel
 from ..infrastructure.paper_precision import exact_cartesian_state_ids_for_level
 from ..infrastructure.paper_precision_snapshots import (
     list_paper_precision_snapshots,
+    list_pocml_paper_precision_snapshots,
     load_cscg_paper_precision_snapshot,
     load_mercury_paper_precision_snapshot,
+    load_pocml_paper_precision_snapshot,
     load_sensory_paper_precision_snapshot,
 )
 from ..infrastructure import (
@@ -1170,6 +1176,7 @@ def _paper_precision_config(args: argparse.Namespace, run_payload: dict) -> dict
         "paper_precision_eval_interval": int(paper_precision.get("eval_interval", 1)),
         "paper_precision_eval_checkpoints": paper_precision.get("eval_checkpoints"),
         "paper_precision_num_points": paper_precision.get("num_points"),
+        "paper_precision_schedule": str(paper_precision.get("schedule", getattr(args, "paper_precision_schedule", "log"))),
         "paper_precision_num_walks": int(paper_precision.get("num_walks", 100)),
         "paper_precision_walk_length": int(paper_precision.get("walk_length", 10_000)),
         "structure_metrics_enabled": bool(structure_metrics.get("enabled", True)),
@@ -1179,6 +1186,54 @@ def _paper_precision_config(args: argparse.Namespace, run_payload: dict) -> dict
         "structure_metrics_scope": str(structure_metrics.get("scope", "exact_level")),
         "structure_metrics_ground_truth_source": str(structure_metrics.get("ground_truth_source", "empirical_walks")),
     }
+
+
+def _hybrid_snapshot_eval_config(
+    *,
+    args: argparse.Namespace,
+    run_root: Path,
+    run_id: str,
+    run_payload: dict,
+    pp_config: dict[str, Any],
+    datasets_root: str | Path,
+) -> MercuryCSCGHybridConfig:
+    cscg_payload = ((run_payload.get("baselines") or {}).get("cscg") or {})
+    return MercuryCSCGHybridConfig(
+        datasets_root=Path(datasets_root),
+        output_root=run_root / "bundles" / "mercury_cscg_hybrid",
+        run_id=run_id,
+        level=int(run_payload["level"]),
+        sensor=str(run_payload["sensor"]),
+        sensor_range=run_payload.get("sensor_range"),
+        ground_truth_states_parquet=run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet",
+        memory_length=int(run_payload["memory_length"]),
+        window_length=int(run_payload["window_length"]),
+        seed=int(cscg_payload.get("seed", run_payload["seed"])),
+        rand_prob=float(run_payload["rand_prob"]),
+        num_steps=int(run_payload["num_steps"]),
+        valid_trajectories_only=bool(run_payload.get("valid_trajectories_only", False)),
+        mercury_valid_trajectories_only=bool(run_payload.get("mercury_valid_trajectories_only", False)),
+        mercury_split_sensory_raw_latent_valid=bool(run_payload.get("mercury_split_sensory_raw_latent_valid", False)),
+        mercury_input_mode=str(run_payload.get("mercury_input_mode", "pretrained_raw")),
+        sensory=dict(run_payload["sensory"]),
+        latent=dict(run_payload["latent"]),
+        action_map=dict(run_payload["action_map"]),
+        n_iter=int(cscg_payload.get("n_iter", run_payload.get("cscg_n_iter", 1000))),
+        pseudocount=float(cscg_payload.get("pseudocount", run_payload.get("cscg_pseudocount", 2e-3))),
+        term_early=bool(cscg_payload.get("term_early", run_payload.get("cscg_term_early", True))),
+        train_algorithm=str(cscg_payload.get("train_algorithm", run_payload.get("cscg_train_algorithm", "em"))),
+        training_mode=str(cscg_payload.get("training_mode", run_payload.get("cscg_training_mode", "full"))),
+        batch_size=int(cscg_payload.get("batch_size", run_payload.get("cscg_batch_size", 1024))),
+        online_lambda=float(cscg_payload.get("online_lambda", run_payload.get("cscg_online_lambda", 1.0))),
+        mercury_prior_weight=float(cscg_payload.get("mercury_cscg_prior_weight", run_payload.get("mercury_cscg_prior_weight", 1.0))),
+        eval_viterbi=bool(cscg_payload.get("eval_viterbi", run_payload.get("cscg_eval_viterbi", False))),
+        paper_precision_seed=int(run_payload["seed"]),
+        paper_precision_rand_prob=float(run_payload["rand_prob"]),
+        paper_precision_sensory_params=dict(run_payload["sensory"]),
+        paper_precision_action_map_params=dict(run_payload["action_map"]),
+        random_start=bool(run_payload.get("random_start", True)),
+        **pp_config,
+    )
 
 
 def _normalize_one_hot_sensor_args(args: argparse.Namespace) -> None:
@@ -1211,8 +1266,8 @@ def reevaluate_paper_precision_snapshots(args: argparse.Namespace) -> None:
     run_payload = dict(run_config.run_payload)
     method = str(args.method or run_payload.get("method", "mercury"))
     run_id = str(run_config.run_id)
-    snapshots = list_paper_precision_snapshots(run_root, method)
-    if not snapshots:
+    snapshots = [] if method == "pocml" else list_paper_precision_snapshots(run_root, method)
+    if method != "pocml" and not snapshots:
         raise FileNotFoundError(f"No {method} paper-precision snapshots found under {run_root / 'snapshots'}")
 
     pp_config = _paper_precision_config(args, run_payload)
@@ -1371,7 +1426,508 @@ def reevaluate_paper_precision_snapshots(args: argparse.Namespace) -> None:
         )
         return
 
+    if method == "mercury_cscg_hybrid":
+        snapshots = list_paper_precision_snapshots(run_root, "mercury_cscg_hybrid")
+        if not snapshots:
+            raise FileNotFoundError(f"No mercury_cscg_hybrid paper-precision snapshots found under {run_root / 'snapshots'}")
+        config = _hybrid_snapshot_eval_config(
+            args=args,
+            run_root=run_root,
+            run_id=run_id,
+            run_payload=run_payload,
+            pp_config=pp_config,
+            datasets_root=(run_config.cli_args or {}).get("datasets_root", args.datasets_root),
+        )
+        chmm_mod = import_cscg_module(Path.cwd())
+        history = []
+        for snapshot_path in snapshots:
+            snapshot = load_cscg_paper_precision_snapshot(snapshot_path)
+            meta = dict(snapshot["meta"])
+            metrics = compute_cscg_paper_precision_metrics_from_model(
+                model_npz=snapshot["model_npz"],
+                n_clones=snapshot["n_clones"],
+                config=config,
+                obs_uniques=snapshot["obs_uniques"],
+                action_uniques=snapshot["action_uniques"],
+                chmm_mod=chmm_mod,
+            )
+            step = int(meta.get("step", 0))
+            history.append(
+                {
+                    "method": "mercury_cscg_hybrid_cscg",
+                    "series_label": "Hybrid CSCG",
+                    "phase": "cscg",
+                    "stage": str(meta.get("stage", "em")),
+                    "iteration": int(meta.get("iteration", step)),
+                    "step": step,
+                    "observed_samples": int(meta.get("observed_samples", step)),
+                    "phase_step": step,
+                    "cumulative_step": int(run_payload["num_steps"]) + step,
+                    "handoff_step": int(run_payload["num_steps"]),
+                    **metrics,
+                }
+            )
+        final_metrics = {
+            key: value
+            for key, value in history[-1].items()
+            if key
+            not in {
+                "method",
+                "series_label",
+                "phase",
+                "stage",
+                "iteration",
+                "step",
+                "observed_samples",
+                "phase_step",
+                "cumulative_step",
+                "handoff_step",
+            }
+        }
+        write_hybrid_paper_precision_payload(
+            config=config,
+            metrics=final_metrics,
+            history=history,
+            mode=str(config.paper_precision_mode),
+        )
+        return
+
+    if method == "pocml":
+        pocml_payload = ((run_payload.get("baselines") or {}).get("pocml") or {})
+        config = POCMLConfig(
+            datasets_root=Path((run_config.cli_args or {}).get("datasets_root", args.datasets_root)),
+            output_root=run_root / "bundles" / "pocml",
+            run_id=run_id,
+            level=int(run_payload["level"]),
+            sensor=str(run_payload["sensor"]),
+            sensor_range=run_payload.get("sensor_range"),
+            ground_truth_states_parquet=run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet",
+            window_length=int(run_payload.get("window_length", 1)),
+            valid_trajectories_only=bool(pocml_payload.get("valid_trajectories_only", run_payload.get("valid_trajectories_only", False))),
+            n_states=pocml_payload.get("n_states", run_payload.get("pocml_n_states")),
+            state_dim=int(pocml_payload.get("state_dim", run_payload.get("pocml_state_dim", 64))),
+            random_feature_dim=int(pocml_payload.get("random_feature_dim", run_payload.get("pocml_random_feature_dim", 256))),
+            alpha=float(pocml_payload.get("alpha", run_payload.get("pocml_alpha", 0.2))),
+            memory_bias=bool(pocml_payload.get("memory_bias", run_payload.get("pocml_memory_bias", True))),
+            paper_precision_seed=int(run_payload["seed"]),
+            paper_precision_rand_prob=float(run_payload["rand_prob"]),
+            paper_precision_sensory_params=dict(run_payload["sensory"]),
+            paper_precision_action_map_params=dict(run_payload["action_map"]),
+            **pp_config,
+        )
+        snapshots_by_capacity = list_pocml_paper_precision_snapshots(run_root)
+        if not snapshots_by_capacity:
+            raise FileNotFoundError(f"No pocml paper-precision snapshots found under {run_root / 'snapshots'}")
+        model_mod, _ = import_pocml_modules(Path.cwd())
+        import torch as _torch
+        history_by_capacity: dict[str, list[dict[str, Any]]] = {}
+        metrics_by_capacity: dict[str, dict[str, Any]] = {}
+        resolved_capacities = sorted(snapshots_by_capacity.keys())
+        primary_capacity = int(resolved_capacities[0])
+        for n_states, step_dirs in snapshots_by_capacity.items():
+            capacity_key = str(int(n_states))
+            history_by_capacity[capacity_key] = []
+            for snapshot_path in step_dirs:
+                snapshot = load_pocml_paper_precision_snapshot(snapshot_path)
+                meta = dict(snapshot["meta"])
+                model_arch = dict(meta.get("model_arch") or {})
+                model = model_mod.POCML(
+                    n_obs=int(model_arch.get("n_obs", snapshot["obs_uniques"].shape[0])),
+                    n_states=int(model_arch.get("n_states", n_states)),
+                    n_actions=int(model_arch.get("n_actions", snapshot["action_uniques"].shape[0])),
+                    state_dim=int(model_arch.get("state_dim", int(config.state_dim))),
+                    random_feature_dim=int(model_arch.get("random_feature_dim", int(config.random_feature_dim))),
+                    alpha=float(model_arch.get("alpha", float(config.alpha))),
+                    batch_size=1,
+                    memory_bias=bool(model_arch.get("memory_bias", bool(config.memory_bias))),
+                )
+                state_dict = _torch.load(str(snapshot["model_state_dict_path"]), map_location="cpu", weights_only=True)
+                model.load_state_dict(state_dict)
+                model = prepare_model_for_single_sequence_eval(model)
+                metrics = compute_pocml_paper_precision_metrics_from_model(
+                    model=model,
+                    config=config,
+                    obs_uniques=snapshot["obs_uniques"],
+                    action_uniques=snapshot["action_uniques"],
+                    torch_module=_torch,
+                )
+                history_by_capacity[capacity_key].append(
+                    {
+                        "step": int(meta.get("step", 0)),
+                        "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                        **metrics,
+                    }
+                )
+            metrics_by_capacity[capacity_key] = {
+                key: value
+                for key, value in history_by_capacity[capacity_key][-1].items()
+                if key not in {"step", "observed_samples"}
+            }
+        write_pocml_paper_precision_payload(
+            config=config,
+            metrics_by_capacity=metrics_by_capacity,
+            history_by_capacity=history_by_capacity,
+            mode=str(config.paper_precision_mode),
+            resolved_capacities=resolved_capacities,
+            primary_capacity=primary_capacity,
+        )
+        return
+
     raise ValueError(f"Snapshot re-evaluation is not supported for method {method!r}")
+
+
+def evaluate_study_snapshots(args: argparse.Namespace) -> None:
+    """Post-training evaluation for all snapshot-based methods at study level.
+
+    Iterates over every run directory in the study, finds paper-precision
+    snapshots for the relevant method, and evaluates each snapshot.
+    Writes the canonical payload (history + final metrics) to each run's metrics directory.
+    """
+    study_root = Path(args.study_root) / args.study_name
+    if not study_root.exists():
+        raise FileNotFoundError(f"Study directory not found: {study_root}")
+
+    run_dirs = sorted(
+        [d for d in study_root.iterdir() if d.is_dir() and (d / "run_config.json").exists()]
+    )
+    if not run_dirs:
+        raise FileNotFoundError(f"No run directories found under {study_root}")
+
+    evaluated = 0
+    skipped = 0
+    for run_root in tqdm(run_dirs, desc=f"eval {args.method} lvl={args.level}", unit="run", dynamic_ncols=True):
+        run_config = load_run_config_model(run_root / "run_config.json")
+        if run_config is None:
+            skipped += 1
+            continue
+
+        run_payload = dict(run_config.run_payload)
+        run_id = str(run_config.run_id)
+        run_method = str(run_payload.get("method", "mercury"))
+        target_method = str(args.method or run_method)
+        datasets_root = str((run_config.cli_args or {}).get("datasets_root", getattr(args, "datasets_root", "datasets")))
+        pp_config = _paper_precision_config(args, run_payload)
+
+        if target_method == "mercury":
+            snapshots = list_paper_precision_snapshots(run_root, "mercury")
+            if not snapshots:
+                skipped += 1
+                continue
+            config = MercuryConfig(
+                datasets_root=Path(datasets_root),
+                results_root=run_root / "bundles" / "mercury",
+                run_id=run_id,
+                level=int(run_payload["level"]),
+                sensor=str(run_payload["sensor"]),
+                sensor_range=run_payload.get("sensor_range"),
+                memory_length=int(run_payload["memory_length"]),
+                window_length=int(run_payload["window_length"]),
+                seed=int(run_payload["seed"]),
+                rand_prob=float(run_payload["rand_prob"]),
+                num_steps=int(run_payload["num_steps"]),
+                valid_trajectories_only=bool(run_payload.get("valid_trajectories_only", False)),
+                mercury_valid_trajectories_only=bool(run_payload.get("mercury_valid_trajectories_only", False)),
+                mercury_split_sensory_raw_latent_valid=bool(run_payload.get("mercury_split_sensory_raw_latent_valid", False)),
+                random_start=bool(run_payload.get("random_start", True)),
+                sensory=dict(run_payload["sensory"]),
+                latent=dict(run_payload["latent"]),
+                action_map=dict(run_payload["action_map"]),
+                **pp_config,
+            )
+            history: list[dict[str, Any]] = []
+            for snapshot_path in snapshots:
+                snapshot = load_mercury_paper_precision_snapshot(snapshot_path)
+                meta = dict(snapshot["meta"])
+                metrics = compute_mercury_paper_precision_metrics(
+                    config=config,
+                    sensory_graph=snapshot["sensory_graph"],
+                    latent_graph=snapshot["latent_graph"],
+                    action_map=snapshot["action_map"],
+                    obs_uniques=snapshot.get("obs_uniques"),
+                )
+                history.append(
+                    {
+                        "step": int(meta.get("step", 0)),
+                        "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                        **metrics,
+                    }
+                )
+            final_metrics = {key: value for key, value in history[-1].items() if key not in {"step", "observed_samples"}}
+            write_mercury_paper_precision_payload(
+                config=config,
+                metrics=final_metrics,
+                history=history,
+                schedule_unit="training_step",
+            )
+            evaluated += 1
+
+        elif target_method == "sensory":
+            snapshots = list_paper_precision_snapshots(run_root, "sensory")
+            if not snapshots:
+                skipped += 1
+                continue
+            config = SensoryConfig(
+                datasets_root=Path(datasets_root),
+                output_root=run_root / "bundles" / "sensory",
+                run_id=run_id,
+                level=int(run_payload["level"]),
+                sensor=str(run_payload["sensor"]),
+                sensor_range=run_payload.get("sensor_range"),
+                seed=int(run_payload["seed"]),
+                rand_prob=float(run_payload["rand_prob"]),
+                num_steps=int(run_payload["num_steps"]),
+                window_length=int(run_payload["window_length"]),
+                valid_trajectories_only=bool(run_payload.get("valid_trajectories_only", False)),
+                observation_mode=str(run_payload.get("sensory_observation_mode", "raw")),
+                sensory=dict(run_payload["sensory"]),
+                action_map=dict(run_payload["action_map"]),
+                **pp_config,
+            )
+            history: list[dict[str, Any]] = []
+            for snapshot_path in snapshots:
+                snapshot = load_sensory_paper_precision_snapshot(snapshot_path)
+                meta = dict(snapshot["meta"])
+                metrics = compute_sensory_paper_precision_metrics(
+                    config=config,
+                    sensory_graph=snapshot["sensory_graph"],
+                    action_map=snapshot["action_map"],
+                    obs_uniques=snapshot.get("obs_uniques"),
+                )
+                history.append(
+                    {
+                        "step": int(meta.get("step", 0)),
+                        "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                        **metrics,
+                    }
+                )
+            final_metrics = {key: value for key, value in history[-1].items() if key not in {"step", "observed_samples"}}
+            write_sensory_paper_precision_payload(
+                config=config,
+                metrics=final_metrics,
+                history=history,
+                schedule_unit="training_step",
+            )
+            evaluated += 1
+
+        elif target_method == "cscg":
+            snapshots = list_paper_precision_snapshots(run_root, "cscg")
+            if not snapshots:
+                skipped += 1
+                continue
+            cscg_payload = ((run_payload.get("baselines") or {}).get("cscg") or {})
+            config = CSCGConfig(
+                datasets_root=Path(datasets_root),
+                output_root=run_root / "bundles" / "cscg",
+                run_id=run_id,
+                level=int(run_payload["level"]),
+                sensor=str(run_payload["sensor"]),
+                sensor_range=run_payload.get("sensor_range"),
+                ground_truth_states_parquet=run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet",
+                window_length=int(run_payload["window_length"]),
+                valid_trajectories_only=bool(cscg_payload.get("valid_trajectories_only", run_payload.get("valid_trajectories_only", False))),
+                clones_per_obs=int(cscg_payload.get("clones_per_obs", run_payload.get("cscg_clones_per_obs", 10))),
+                n_iter=int(cscg_payload.get("n_iter", run_payload.get("cscg_n_iter", 1000))),
+                pseudocount=float(cscg_payload.get("pseudocount", run_payload.get("cscg_pseudocount", 2e-3))),
+                term_early=bool(cscg_payload.get("term_early", run_payload.get("cscg_term_early", True))),
+                train_algorithm=str(cscg_payload.get("train_algorithm", run_payload.get("cscg_train_algorithm", "em"))),
+                training_mode=str(cscg_payload.get("training_mode", run_payload.get("cscg_training_mode", "full"))),
+                batch_size=int(cscg_payload.get("batch_size", run_payload.get("cscg_batch_size", 1024))),
+                online_lambda=float(cscg_payload.get("online_lambda", run_payload.get("cscg_online_lambda", 1.0))),
+                seed=int(cscg_payload.get("seed", run_payload["seed"])),
+                paper_precision_seed=int(run_payload["seed"]),
+                paper_precision_rand_prob=float(run_payload["rand_prob"]),
+                paper_precision_sensory_params=dict(run_payload["sensory"]),
+                paper_precision_action_map_params=dict(run_payload["action_map"]),
+                **pp_config,
+            )
+            chmm_mod = import_cscg_module(Path.cwd())
+            history = []
+            for snapshot_path in snapshots:
+                snapshot = load_cscg_paper_precision_snapshot(snapshot_path)
+                meta = dict(snapshot["meta"])
+                metrics = compute_cscg_paper_precision_metrics_from_model(
+                    model_npz=snapshot["model_npz"],
+                    n_clones=snapshot["n_clones"],
+                    config=config,
+                    obs_uniques=snapshot["obs_uniques"],
+                    action_uniques=snapshot["action_uniques"],
+                    chmm_mod=chmm_mod,
+                )
+                history.append(
+                    {
+                        "stage": str(meta.get("stage", "em")),
+                        "iteration": int(meta.get("iteration", meta.get("step", 0))),
+                        "step": int(meta.get("step", 0)),
+                        "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                        **metrics,
+                    }
+                )
+            final_metrics = {
+                key: value
+                for key, value in history[-1].items()
+                if key not in {"stage", "iteration", "step", "observed_samples"}
+            }
+            write_cscg_paper_precision_payload(
+                config=config,
+                metrics=final_metrics,
+                history=history,
+                mode=str(config.paper_precision_mode),
+            )
+            evaluated += 1
+
+        elif target_method == "mercury_cscg_hybrid":
+            snapshots = list_paper_precision_snapshots(run_root, "mercury_cscg_hybrid")
+            if not snapshots:
+                skipped += 1
+                continue
+            config = _hybrid_snapshot_eval_config(
+                args=args,
+                run_root=run_root,
+                run_id=run_id,
+                run_payload=run_payload,
+                pp_config=pp_config,
+                datasets_root=datasets_root,
+            )
+            chmm_mod = import_cscg_module(Path.cwd())
+            history = []
+            for snapshot_path in snapshots:
+                snapshot = load_cscg_paper_precision_snapshot(snapshot_path)
+                meta = dict(snapshot["meta"])
+                metrics = compute_cscg_paper_precision_metrics_from_model(
+                    model_npz=snapshot["model_npz"],
+                    n_clones=snapshot["n_clones"],
+                    config=config,
+                    obs_uniques=snapshot["obs_uniques"],
+                    action_uniques=snapshot["action_uniques"],
+                    chmm_mod=chmm_mod,
+                )
+                step = int(meta.get("step", 0))
+                history.append(
+                    {
+                        "method": "mercury_cscg_hybrid_cscg",
+                        "series_label": "Hybrid CSCG",
+                        "phase": "cscg",
+                        "stage": str(meta.get("stage", "em")),
+                        "iteration": int(meta.get("iteration", step)),
+                        "step": step,
+                        "observed_samples": int(meta.get("observed_samples", step)),
+                        "phase_step": step,
+                        "cumulative_step": int(run_payload["num_steps"]) + step,
+                        "handoff_step": int(run_payload["num_steps"]),
+                        **metrics,
+                    }
+                )
+            final_metrics = {
+                key: value
+                for key, value in history[-1].items()
+                if key
+                not in {
+                    "method",
+                    "series_label",
+                    "phase",
+                    "stage",
+                    "iteration",
+                    "step",
+                    "observed_samples",
+                    "phase_step",
+                    "cumulative_step",
+                    "handoff_step",
+                }
+            }
+            write_hybrid_paper_precision_payload(
+                config=config,
+                metrics=final_metrics,
+                history=history,
+                mode=str(config.paper_precision_mode),
+            )
+            evaluated += 1
+
+        elif target_method == "pocml":
+            snapshots_by_capacity = list_pocml_paper_precision_snapshots(run_root)
+            if not snapshots_by_capacity:
+                skipped += 1
+                continue
+            pocml_payload = ((run_payload.get("baselines") or {}).get("pocml") or {})
+            config = POCMLConfig(
+                datasets_root=Path(datasets_root),
+                output_root=run_root / "bundles" / "pocml",
+                run_id=run_id,
+                level=int(run_payload["level"]),
+                sensor=str(run_payload["sensor"]),
+                sensor_range=run_payload.get("sensor_range"),
+                ground_truth_states_parquet=run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet",
+                window_length=int(run_payload.get("window_length", 1)),
+                valid_trajectories_only=bool(pocml_payload.get("valid_trajectories_only", run_payload.get("valid_trajectories_only", False))),
+                n_states=pocml_payload.get("n_states", run_payload.get("pocml_n_states")),
+                state_dim=int(pocml_payload.get("state_dim", run_payload.get("pocml_state_dim", 64))),
+                random_feature_dim=int(pocml_payload.get("random_feature_dim", run_payload.get("pocml_random_feature_dim", 256))),
+                alpha=float(pocml_payload.get("alpha", run_payload.get("pocml_alpha", 0.2))),
+                memory_bias=bool(pocml_payload.get("memory_bias", run_payload.get("pocml_memory_bias", True))),
+                paper_precision_seed=int(run_payload["seed"]),
+                paper_precision_rand_prob=float(run_payload["rand_prob"]),
+                paper_precision_sensory_params=dict(run_payload["sensory"]),
+                paper_precision_action_map_params=dict(run_payload["action_map"]),
+                **pp_config,
+            )
+            model_mod, _ = import_pocml_modules(Path.cwd())
+            import torch as _torch
+            history_by_capacity: dict[str, list[dict[str, Any]]] = {}
+            metrics_by_capacity: dict[str, dict[str, Any]] = {}
+            resolved_capacities = sorted(snapshots_by_capacity.keys())
+            primary_capacity = int(resolved_capacities[0])
+            for n_states, step_dirs in snapshots_by_capacity.items():
+                capacity_key = str(int(n_states))
+                history_by_capacity[capacity_key] = []
+                for snapshot_path in step_dirs:
+                    snapshot = load_pocml_paper_precision_snapshot(snapshot_path)
+                    meta = dict(snapshot["meta"])
+                    model_arch = dict(meta.get("model_arch") or {})
+                    model = model_mod.POCML(
+                        n_obs=int(model_arch.get("n_obs", snapshot["obs_uniques"].shape[0])),
+                        n_states=int(model_arch.get("n_states", n_states)),
+                        n_actions=int(model_arch.get("n_actions", snapshot["action_uniques"].shape[0])),
+                        state_dim=int(model_arch.get("state_dim", int(config.state_dim))),
+                        random_feature_dim=int(model_arch.get("random_feature_dim", int(config.random_feature_dim))),
+                        alpha=float(model_arch.get("alpha", float(config.alpha))),
+                        batch_size=1,
+                        memory_bias=bool(model_arch.get("memory_bias", bool(config.memory_bias))),
+                    )
+                    state_dict = _torch.load(str(snapshot["model_state_dict_path"]), map_location="cpu", weights_only=True)
+                    model.load_state_dict(state_dict)
+                    model = prepare_model_for_single_sequence_eval(model)
+                    metrics = compute_pocml_paper_precision_metrics_from_model(
+                        model=model,
+                        config=config,
+                        obs_uniques=snapshot["obs_uniques"],
+                        action_uniques=snapshot["action_uniques"],
+                        torch_module=_torch,
+                    )
+                    history_by_capacity[capacity_key].append(
+                        {
+                            "step": int(meta.get("step", 0)),
+                            "observed_samples": int(meta.get("observed_samples", meta.get("step", 0))),
+                            **metrics,
+                        }
+                    )
+                metrics_by_capacity[capacity_key] = {
+                    key: value
+                    for key, value in history_by_capacity[capacity_key][-1].items()
+                    if key not in {"step", "observed_samples"}
+                }
+            write_pocml_paper_precision_payload(
+                config=config,
+                metrics_by_capacity=metrics_by_capacity,
+                history_by_capacity=history_by_capacity,
+                mode=str(config.paper_precision_mode),
+                resolved_capacities=resolved_capacities,
+                primary_capacity=primary_capacity,
+            )
+            evaluated += 1
+
+        else:
+            skipped += 1
+
+    print(f"evaluate_study_snapshots: evaluated {evaluated} runs, skipped {skipped}")
 
 
 def run_single(args: argparse.Namespace) -> None:

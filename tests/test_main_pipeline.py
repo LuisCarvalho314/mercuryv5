@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import polars as pl
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ from src.mercury_runs.infrastructure.storage import (
     artifact_layout,
     build_run_payload,
     collect_run_artifacts,
+    has_paper_precision_snapshot,
     resolve_run_identity,
     validate_reusable_run,
 )
@@ -164,6 +166,93 @@ def test_validate_reusable_run_accepts_baseline_metrics_artifacts(tmp_path: Path
 
     assert reusable is True
     assert reason == "ok"
+
+
+def test_validate_reusable_run_accepts_snapshots_without_metric_json(tmp_path: Path) -> None:
+    payload = _run_payload(with_pocml=True, with_cscg=True)
+    payload["evaluation"]["paper_precision"]["enabled"] = True
+    payload["evaluation"]["paper_precision"]["mode"] = "per_iteration"
+    run_root = _write_valid_run(tmp_path, "snapshots-only", payload)
+    layout = artifact_layout(run_root=run_root, run_id="snapshots-only", run_payload=payload)
+    layout.mercury_paper_precision_json.unlink()
+    layout.pocml_paper_precision_json.unlink()
+    layout.cscg_paper_precision_json.unlink()
+    for method in ("mercury", "cscg"):
+        snapshot_json = run_root / "snapshots" / method / "paper_precision" / "step=1" / "snapshot.json"
+        snapshot_json.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_json.write_text("{}", encoding="utf-8")
+    pocml_snapshot_json = run_root / "snapshots" / "pocml" / "paper_precision" / "capacity=3" / "step=1" / "snapshot.json"
+    pocml_snapshot_json.parent.mkdir(parents=True, exist_ok=True)
+    pocml_snapshot_json.write_text("{}", encoding="utf-8")
+
+    reusable, reason = validate_reusable_run(run_root=run_root, run_payload=payload, run_id="snapshots-only")
+
+    assert reusable is True
+    assert reason == "ok"
+    assert has_paper_precision_snapshot(run_root=run_root, method="pocml") is True
+
+
+def test_evaluate_study_snapshots_uses_requested_cscg_method_for_mercury_run(monkeypatch, tmp_path: Path) -> None:
+    study_root = tmp_path / "studies"
+    study_name = "snapshot-study"
+    run_id = "mercury-with-cscg"
+    run_root = study_root / study_name / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    payload = _run_payload(with_cscg=True)
+    payload["evaluation"]["paper_precision"]["enabled"] = True
+    payload["evaluation"]["paper_precision"]["mode"] = "per_iteration"
+    snapshot_json = run_root / "snapshots" / "cscg" / "paper_precision" / "step=1" / "snapshot.json"
+    snapshot_json.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_json.write_text("{}", encoding="utf-8")
+    run_config = RunConfigModel(
+        run_id=run_id,
+        requested_run_id=run_id,
+        saved_at_utc="2026-03-13T10:00:00Z",
+        cli_args={"datasets_root": "datasets"},
+        run_payload=payload,
+        execution={},
+        paths={},
+    )
+    atomic_write_json(run_root / "run_config.json", run_config.model_dump(mode="json"))
+    written: dict = {}
+
+    monkeypatch.setattr("src.mercury_runs.application.run_service.import_cscg_module", lambda repo_root: object())
+    monkeypatch.setattr(
+        "src.mercury_runs.application.run_service.load_cscg_paper_precision_snapshot",
+        lambda path: {
+            "meta": {"stage": "em", "iteration": 1, "step": 1, "observed_samples": 1},
+            "model_npz": {"T": np.ones((1, 1, 1)), "n_clones": np.ones(1, dtype=np.int64)},
+            "n_clones": np.ones(1, dtype=np.int64),
+            "obs_uniques": np.asarray([0]),
+            "action_uniques": np.asarray([0]),
+        },
+    )
+    monkeypatch.setattr(
+        "src.mercury_runs.application.run_service.compute_cscg_paper_precision_metrics_from_model",
+        lambda **kwargs: {"paper_precision": 0.5},
+    )
+    monkeypatch.setattr(
+        "src.mercury_runs.application.run_service.write_cscg_paper_precision_payload",
+        lambda **kwargs: written.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "src.mercury_runs.application.run_service.compute_mercury_paper_precision_metrics",
+        lambda **kwargs: pytest.fail("requested CSCG evaluation should not evaluate Mercury snapshots"),
+    )
+
+    run_service.evaluate_study_snapshots(
+        SimpleNamespace(
+            study_root=str(study_root),
+            study_name=study_name,
+            method="cscg",
+            datasets_root="datasets",
+            level=13,
+            structure_metrics_epsilons=None,
+        )
+    )
+
+    assert written["config"].run_id == run_id
+    assert written["history"][0]["paper_precision"] == 0.5
 
 
 def test_validate_reusable_run_accepts_pocml_only_without_mercury_artifacts(tmp_path: Path) -> None:

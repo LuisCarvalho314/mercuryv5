@@ -124,6 +124,7 @@ def _patch_common(
     written: dict,
     precision: dict | None = None,
     paper_precision: dict | None = None,
+    snapshots: list | None = None,
 ) -> None:
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.import_cscg_module",
@@ -156,15 +157,17 @@ def _patch_common(
     monkeypatch.setattr("mercury_runs.algorithms.cscg.artifacts.write_bundle_parquet", _capture_write_bundle_parquet)
     if precision is not None:
         monkeypatch.setattr("mercury_runs.algorithms.cscg.api.compute_cscg_precision", lambda **kwargs: precision.update(kwargs))
-    if paper_precision is not None:
-        monkeypatch.setattr("mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision", lambda **kwargs: paper_precision.update(kwargs))
+    if snapshots is not None:
+        monkeypatch.setattr(
+            "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_snapshot",
+            lambda **kwargs: snapshots.append({"step": int(kwargs["step"]), "stage": str(kwargs["stage"]), "iteration": int(kwargs["iteration"]), "model_npz": kwargs["model_npz"]}),
+        )
 
 
 def test_run_cscg_baseline_uses_forward_objective_for_em(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    paper_precision: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    _patch_common(monkeypatch, tmp_path, written, precision)
 
     result = run_cscg(_base_config(tmp_path, "em"))
 
@@ -199,14 +202,12 @@ def test_run_cscg_baseline_uses_forward_objective_for_em(monkeypatch, tmp_path: 
     assert written["meta"].run_parameters["training_data"]["filtered_steps"] == 3
     assert written["meta"].run_parameters["training_data"]["dropped_collision_steps"] == 1
     assert precision["config"].run_id == "run-em"
-    assert paper_precision["config"].run_id == "run-em"
 
 
 def test_run_cscg_ground_truth_clone_allocation_counts_states_per_observation(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    paper_precision: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    _patch_common(monkeypatch, tmp_path, written, precision)
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.load_dataset_arrays",
         lambda **kwargs: (
@@ -235,20 +236,11 @@ def test_run_cscg_ground_truth_clone_allocation_counts_states_per_observation(mo
     assert written["meta"].run_parameters["cscg"]["clones_per_state"] == 2
 
 
-def test_run_cscg_eval_viterbi_uses_copy_for_final_paper_metrics(monkeypatch, tmp_path: Path) -> None:
+def test_run_cscg_eval_viterbi_saves_viterbi_refined_snapshot(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_metrics: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: captured_metrics.update(kwargs) or {"latent_precision": 0.9},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     run_cscg(
         _base_config(tmp_path, "em").model_copy(
@@ -258,17 +250,36 @@ def test_run_cscg_eval_viterbi_uses_copy_for_final_paper_metrics(monkeypatch, tm
 
     assert _FakeCHMM.last_instance is not None
     assert _FakeCHMM.last_instance.train_calls == ["em:3:True:0.002"]
-    assert np.asarray(captured_metrics["model_npz"]["T"]).tolist() == np.full((2, 4, 4), 7.0).tolist()
-    assert captured_payload["metrics"] == {"latent_precision": 0.9}
-    assert captured_payload["config"].eval_viterbi is True
+    viterbi_snapshots = [s for s in saved_snapshots if s["stage"] == "viterbi_eval"]
+    assert len(viterbi_snapshots) == 1
+    assert np.asarray(viterbi_snapshots[0]["model_npz"]["T"]).tolist() == np.full((2, 4, 4), 7.0).tolist()
     assert written["meta"].run_parameters["cscg"]["eval_viterbi"] is True
+
+
+def test_run_cscg_final_mode_saves_trained_model_snapshot(monkeypatch, tmp_path: Path) -> None:
+    written: dict = {}
+    precision: dict = {}
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
+
+    run_cscg(
+        _base_config(tmp_path, "em").model_copy(
+            update={"paper_precision_mode": "final", "eval_viterbi": False}
+        )
+    )
+
+    assert _FakeCHMM.last_instance is not None
+    assert len(saved_snapshots) == 1
+    assert saved_snapshots[0]["stage"] == "final"
+    assert saved_snapshots[0]["iteration"] == 3
+    assert saved_snapshots[0]["step"] == 3
+    assert np.asarray(saved_snapshots[0]["model_npz"]["T"]).tolist() == _FakeCHMM.last_instance.T.tolist()
 
 
 def test_run_cscg_baseline_uses_viterbi_objective_for_viterbi(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    paper_precision: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    _patch_common(monkeypatch, tmp_path, written, precision)
 
     run_cscg(_base_config(tmp_path, "viterbi"))
 
@@ -284,93 +295,60 @@ def test_run_cscg_baseline_uses_viterbi_objective_for_viterbi(monkeypatch, tmp_p
     }
     assert written["meta"].run_parameters["training_stages"] == ["em", "viterbi"]
     assert precision["config"].run_id == "run-viterbi"
-    assert paper_precision["config"].run_id == "run-viterbi"
 
 
 def test_run_cscg_per_iteration_history_skips_viterbi_stage(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
-
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.5},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     config = _base_config(tmp_path, "viterbi").model_copy(
         update={"paper_precision_mode": "per_iteration", "paper_precision_eval_interval": 1}
     )
     run_cscg(config)
 
-    assert captured_payload["mode"] == "per_iteration"
-    assert captured_payload["history"]
-    stages = [item["stage"] for item in captured_payload["history"]]
+    assert saved_snapshots
+    stages = [s["stage"] for s in saved_snapshots]
     assert all(stage == "em" for stage in stages)
     assert "viterbi" not in stages
-    assert [item["step"] for item in captured_payload["history"]] == [1, 2]
-    assert [item["observed_samples"] for item in captured_payload["history"]] == [1, 2]
-    assert captured_payload["metrics"] == {"latent_precision": 0.5}
+    assert [s["step"] for s in saved_snapshots] == [1, 2]
 
 
 def test_run_cscg_per_iteration_uses_training_step_interval(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
-
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.25},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     config = _base_config(tmp_path, "em").model_copy(
         update={"paper_precision_mode": "per_iteration", "paper_precision_eval_interval": 4}
     )
     run_cscg(config)
 
-    assert [item["step"] for item in captured_payload["history"]] == [2]
-    assert [item["iteration"] for item in captured_payload["history"]] == [2]
+    assert [s["step"] for s in saved_snapshots] == [2]
+    assert [s["iteration"] for s in saved_snapshots] == [2]
 
 
 def test_run_cscg_per_iteration_records_final_em_point_when_interval_not_reached(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
-
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.75},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     config = _base_config(tmp_path, "em").model_copy(
         update={"paper_precision_mode": "per_iteration", "paper_precision_eval_interval": 100}
     )
     run_cscg(config)
 
-    assert [item["step"] for item in captured_payload["history"]] == [2]
-    assert [item["iteration"] for item in captured_payload["history"]] == [2]
-    assert captured_payload["metrics"] == {"latent_precision": 0.75}
+    assert [s["step"] for s in saved_snapshots] == [2]
+    assert [s["iteration"] for s in saved_snapshots] == [2]
 
 
 def test_run_cscg_online_em_uses_streamed_batches(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    paper_precision: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    _patch_common(monkeypatch, tmp_path, written, precision)
 
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.resolve_dataset_path_and_metadata",
@@ -422,7 +400,6 @@ def test_run_cscg_online_em_uses_streamed_batches(monkeypatch, tmp_path: Path) -
     assert written["meta"].run_parameters["cscg_eval"]["num_batches"] == 2
     assert written["meta"].run_parameters["training_data"]["training_mode"] == "online_em"
     assert precision["config"].run_id == "run-em"
-    assert paper_precision["config"].run_id == "run-em"
 
 
 def test_run_cscg_online_em_can_repeat_batches_with_initial_counts() -> None:
@@ -471,17 +448,8 @@ def test_run_cscg_online_em_can_repeat_batches_with_initial_counts() -> None:
 def test_run_cscg_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
-
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.4},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     config = _base_config(tmp_path, "em").model_copy(
         update={
@@ -494,15 +462,15 @@ def test_run_cscg_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: 
     )
     run_cscg(config)
 
-    assert [item["iteration"] for item in captured_payload["history"]] == [1, 2]
-    assert [item["step"] for item in captured_payload["history"]] == [1, 2]
+    assert [s["iteration"] for s in saved_snapshots] == [1, 2]
+    assert [s["step"] for s in saved_snapshots] == [1, 2]
 
 
 def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.resolve_dataset_path_and_metadata",
@@ -547,14 +515,6 @@ def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, t
                 },
             ]
         ),
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.4},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
     )
 
     config = _base_config(tmp_path, "em").model_copy(
@@ -570,15 +530,15 @@ def test_run_cscg_online_em_num_points_uses_available_batch_count(monkeypatch, t
     )
     run_cscg(config)
 
-    assert [item["iteration"] for item in captured_payload["history"]] == [5, 50, 500]
-    assert [item["step"] for item in captured_payload["history"]] == [10, 100, 1000]
+    assert [s["iteration"] for s in saved_snapshots] == [5, 50, 500]
+    assert [s["step"] for s in saved_snapshots] == [10, 100, 1000]
 
 
 def test_run_cscg_online_em_manual_checkpoints_use_observed_samples(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    captured_payload: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision=None)
+    saved_snapshots: list = []
+    _patch_common(monkeypatch, tmp_path, written, precision, snapshots=saved_snapshots)
 
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.resolve_dataset_path_and_metadata",
@@ -624,14 +584,6 @@ def test_run_cscg_online_em_manual_checkpoints_use_observed_samples(monkeypatch,
             ]
         ),
     )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.compute_cscg_paper_precision_metrics_from_model",
-        lambda **kwargs: {"latent_precision": 0.4},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.cscg.api.write_cscg_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
 
     config = _base_config(tmp_path, "em").model_copy(
         update={
@@ -646,15 +598,14 @@ def test_run_cscg_online_em_manual_checkpoints_use_observed_samples(monkeypatch,
     )
     run_cscg(config)
 
-    assert [item["iteration"] for item in captured_payload["history"]] == [1, 3]
-    assert [item["step"] for item in captured_payload["history"]] == [2, 6]
+    assert [s["iteration"] for s in saved_snapshots] == [1, 3]
+    assert [s["step"] for s in saved_snapshots] == [2, 6]
 
 
 def test_run_cscg_online_em_with_viterbi_keeps_final_full_refinement(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
     precision: dict = {}
-    paper_precision: dict = {}
-    _patch_common(monkeypatch, tmp_path, written, precision, paper_precision)
+    _patch_common(monkeypatch, tmp_path, written, precision)
 
     monkeypatch.setattr(
         "mercury_runs.algorithms.cscg.api.resolve_dataset_path_and_metadata",

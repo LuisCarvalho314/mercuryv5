@@ -1,4 +1,5 @@
-from .cscg.api import CSCGConfig, compute_cscg_paper_precision, compute_cscg_precision, run_cscg
+from .cscg.api import CSCGConfig, compute_cscg_precision, run_cscg
+from .cscg.evaluate import compute_cscg_paper_precision
 from .mercury.api import MercuryConfig, compute_mercury_paper_precision, compute_mercury_precision, generate_mercury_datasets, run_mercury
 from .mercury_cscg_hybrid.api import MercuryCSCGHybridConfig, run_mercury_cscg_hybrid
 from .pocml.api import POCMLConfig, compute_pocml_paper_precision, compute_pocml_precision, evaluate_pocml_sequence, run_pocml

@@ -197,7 +197,11 @@ def paper_precision_snapshot_dir(*, run_root: Path, method: str) -> Path:
 
 def has_paper_precision_snapshot(*, run_root: Path, method: str) -> bool:
     snapshot_root = paper_precision_snapshot_dir(run_root=run_root, method=method)
-    return snapshot_root.exists() and any(snapshot_root.glob("step=*/snapshot.json"))
+    if not snapshot_root.exists():
+        return False
+    if str(method) == "pocml":
+        return any(snapshot_root.glob("capacity=*/step=*/snapshot.json"))
+    return any(snapshot_root.glob("step=*/snapshot.json"))
 
 
 def read_native_metrics_from_bundle(states_path: Optional[Path], run_parameters_key: str) -> Dict[str, Any]:
@@ -235,8 +239,6 @@ def validate_reusable_run(
             or not layout.internal_graphs_comparison_png.exists()
         ):
             return False, "missing Mercury artifacts"
-        if paper_precision_enabled(run_payload) and not layout.mercury_paper_precision_json.exists():
-            return False, "missing Mercury paper precision artifact"
         if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="mercury"):
             return False, "missing Mercury paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.mercury_computational_json.exists():
@@ -244,22 +246,36 @@ def validate_reusable_run(
     elif method == "sensory":
         if not layout.sensory_states_parquet.exists() or not layout.sensory_graph_npz.exists() or not layout.sensory_action_map_npz.exists():
             return False, "missing Sensory artifacts"
-        if paper_precision_enabled(run_payload) and not layout.sensory_paper_precision_json.exists():
-            return False, "missing Sensory paper precision artifact"
         if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="sensory"):
             return False, "missing Sensory paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.sensory_computational_json.exists():
             return False, "missing Sensory computational artifact"
-    elif method in {"pocml", "cscg"}:
+    elif method == "pocml":
         if not layout.ground_truth_states_parquet.exists():
             return False, "missing ground truth state artifact"
+        pocml_required = [
+            layout.pocml_states_parquet,
+            layout.pocml_embeddings_npz,
+            layout.pocml_model_checkpoint_pt,
+        ]
+        if any(not path.exists() for path in pocml_required):
+            return False, "missing POCML artifacts"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="pocml"):
+            return False, "missing POCML paper precision snapshot"
+    elif method == "cscg":
+        if not layout.ground_truth_states_parquet.exists():
+            return False, "missing ground truth state artifact"
+        if not layout.cscg_states_parquet.exists() or not layout.cscg_model_npz.exists():
+            return False, "missing CSCG artifacts"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="cscg"):
+            return False, "missing CSCG paper precision snapshot"
     elif method == "mercury_cscg_hybrid":
         if not layout.ground_truth_states_parquet.exists():
             return False, "missing ground truth state artifact"
         if not layout.mercury_cscg_hybrid_states_parquet.exists() or not layout.mercury_cscg_hybrid_model_npz.exists():
             return False, "missing Mercury-CSCG hybrid artifacts"
-        if paper_precision_enabled(run_payload) and not layout.mercury_cscg_hybrid_paper_precision_json.exists():
-            return False, "missing Mercury-CSCG hybrid paper precision artifact"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="mercury_cscg_hybrid"):
+            return False, "missing Mercury-CSCG hybrid paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.mercury_cscg_hybrid_computational_json.exists():
             return False, "missing Mercury-CSCG hybrid computational artifact"
     else:
@@ -274,8 +290,8 @@ def validate_reusable_run(
             pocml_required.append(layout.pocml_internal_graph_png)
         if any(not path.exists() for path in pocml_required):
             return False, "missing POCML artifacts"
-        if paper_precision_enabled(run_payload) and not layout.pocml_paper_precision_json.exists():
-            return False, "missing POCML paper precision artifact"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="pocml"):
+            return False, "missing POCML paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.pocml_computational_json.exists():
             return False, "missing POCML computational artifact"
     if baseline_enabled(run_payload, "cscg"):
@@ -287,8 +303,6 @@ def validate_reusable_run(
             cscg_required.append(layout.cscg_internal_graph_png)
         if any(not path.exists() for path in cscg_required):
             return False, "missing CSCG artifacts"
-        if paper_precision_enabled(run_payload) and not layout.cscg_paper_precision_json.exists():
-            return False, "missing CSCG paper precision artifact"
         if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="cscg"):
             return False, "missing CSCG paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.cscg_computational_json.exists():

@@ -54,7 +54,6 @@ class Player(turtle.Turtle):
         b = self.ycor() - other.ycor()
         distance = math.sqrt(a**2 + b**2)
         if distance < COLLISION_TOL:
-            print("BUMP")
             return True
         return False
 
@@ -318,7 +317,7 @@ def main():
         moves += 1
 
         if moves % 1000 == 0:
-            print(moves)
+            print(f"moves: {moves}")
         wn.update()
         # time.sleep(1)
     np.savetxt(

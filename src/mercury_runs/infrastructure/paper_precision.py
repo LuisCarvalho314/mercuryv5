@@ -239,7 +239,7 @@ def compute_fixed_map_precision_details(
     total = float(z_hat.shape[0])
     recall_name = metric_name.replace("precision", "recall")
     return {
-        metric_name: float(compute_precision(z_hat.tolist(), z_true.tolist())),
+        metric_name: float(np.max(cooccurrence, axis=1).sum() / total) if total > 0.0 else 0.0,
         recall_name: float(np.max(cooccurrence, axis=0).sum() / total) if total > 0.0 else 0.0,
         "evaluation_steps": int(z_hat.shape[0]),
         "inferred_state_count": int(len(np.unique(z_hat))),
@@ -262,12 +262,11 @@ def dense_integer_cooccurrence_matrix(
     inferred_size = int(n_inferred) if n_inferred is not None else (int(inferred.max()) + 1 if inferred.size else 0)
     truth_size = int(n_true) if n_true is not None else (int(truth.max()) + 1 if truth.size else 0)
     matrix = np.zeros((max(inferred_size, 0), max(truth_size, 0)), dtype=np.int64)
-    for inferred_state, true_state in zip(inferred.tolist(), truth.tolist(), strict=False):
-        if int(inferred_state) < 0 or int(true_state) < 0:
-            continue
-        if int(inferred_state) >= matrix.shape[0] or int(true_state) >= matrix.shape[1]:
-            continue
-        matrix[int(inferred_state), int(true_state)] += 1
+    valid = (
+        (0 <= inferred) & (inferred < matrix.shape[0])
+        & (0 <= truth) & (truth < matrix.shape[1])
+    )
+    np.add.at(matrix, (inferred[valid], truth[valid]), 1)
     return matrix
 
 
@@ -932,14 +931,63 @@ def build_exact_indexer(reference_values: np.ndarray) -> dict[Any, int]:
 
 
 def map_values_with_reference(*, reference_uniques: np.ndarray, values: np.ndarray) -> np.ndarray:
-    mapping = build_exact_indexer(np.asarray(reference_uniques))
-    if values.ndim == 1:
+    reference = np.asarray(reference_uniques)
+    values_arr = np.asarray(values)
+
+    if reference.dtype != object and values_arr.dtype != object:
         try:
-            return np.asarray([mapping[int(value)] for value in np.asarray(values).tolist()], dtype=np.int64)
+            if values_arr.ndim == 1:
+                reference_1d = np.asarray(reference).reshape(-1)
+                if reference_1d.size == 0 and values_arr.size > 0:
+                    raise KeyError(None)
+                if np.unique(reference_1d).shape[0] != reference_1d.shape[0]:
+                    raise TypeError("duplicate reference values require dictionary mapping")
+                values_1d = values_arr.astype(reference_1d.dtype, copy=False)
+                sorter = np.argsort(reference_1d, kind="stable")
+                sorted_reference = reference_1d[sorter]
+                positions = np.searchsorted(sorted_reference, values_1d)
+                valid = (
+                    (positions < sorted_reference.shape[0])
+                    & (sorted_reference[np.minimum(positions, sorted_reference.shape[0] - 1)] == values_1d)
+                )
+                if not np.all(valid):
+                    missing = values_1d[~valid][0]
+                    raise KeyError(int(missing) if np.issubdtype(values_1d.dtype, np.integer) else missing.item())
+                return sorter[positions].astype(np.int64, copy=False)
+
+            reference_rows = np.ascontiguousarray(reference.reshape(reference.shape[0], -1))
+            value_rows = np.ascontiguousarray(values_arr.astype(reference_rows.dtype, copy=False).reshape(values_arr.shape[0], -1))
+            row_dtype = np.dtype((np.void, reference_rows.dtype.itemsize * reference_rows.shape[1]))
+            reference_keys = reference_rows.view(row_dtype).reshape(-1)
+            value_keys = value_rows.view(row_dtype).reshape(-1)
+            if reference_keys.size == 0 and value_keys.size > 0:
+                raise KeyError(None)
+            if np.unique(reference_keys).shape[0] != reference_keys.shape[0]:
+                raise TypeError("duplicate reference rows require dictionary mapping")
+            sorter = np.argsort(reference_keys, kind="stable")
+            sorted_reference = reference_keys[sorter]
+            positions = np.searchsorted(sorted_reference, value_keys)
+            valid = (
+                (positions < sorted_reference.shape[0])
+                & (sorted_reference[np.minimum(positions, sorted_reference.shape[0] - 1)] == value_keys)
+            )
+            if not np.all(valid):
+                missing = values_arr.reshape(values_arr.shape[0], -1)[~valid][0]
+                raise KeyError(tuple(np.asarray(missing).tolist()))
+            return sorter[positions].astype(np.int64, copy=False)
+        except KeyError as exc:  # pragma: no cover
+            raise ValueError(f"Encountered evaluation value not present in the training vocabulary: {exc.args[0]!r}") from exc
+        except (TypeError, ValueError):
+            pass
+
+    mapping = build_exact_indexer(reference)
+    if values_arr.ndim == 1:
+        try:
+            return np.asarray([mapping[int(value)] for value in values_arr.tolist()], dtype=np.int64)
         except KeyError as exc:  # pragma: no cover
             raise ValueError(f"Encountered evaluation value not present in the training vocabulary: {exc.args[0]!r}") from exc
     try:
-        return np.asarray([mapping[tuple(np.asarray(row).tolist())] for row in np.asarray(values).tolist()], dtype=np.int64)
+        return np.asarray([mapping[tuple(np.asarray(row).tolist())] for row in values_arr.tolist()], dtype=np.int64)
     except KeyError as exc:  # pragma: no cover
         raise ValueError(f"Encountered evaluation row not present in the training vocabulary: {exc.args[0]!r}") from exc
 
@@ -949,3 +997,903 @@ def concatenate_walk_series(walk_values: Iterable[np.ndarray]) -> np.ndarray:
     if not series:
         return np.asarray([], dtype=np.int64)
     return np.concatenate(series, axis=0)
+
+
+@dataclass(frozen=True)
+class TransitionStructureEvaluation:
+    """All transition structure metrics derived from one consistent alignment.
+
+    Collapsed and action-conditioned metrics share the same cooccurrence matrix,
+    alignment, occupancy, and projected tensors.  The collapsed adjacency is
+    derived by summing the projected action tensor, not by projecting an
+    independently collapsed adjacency.
+    """
+
+    n_learned: int
+    n_true: int
+    n_actions: int
+    cooccurrence: np.ndarray            # (n_learned, n_true)  int64
+    alignment: np.ndarray               # (n_learned,)  int64
+    occupancy: np.ndarray               # (n_learned,)  float64
+    # Row-normalised distributions in ground-truth space, post-diagonal-mask.
+    projected_action_transitions: np.ndarray     # (n_actions, n_true, n_true)
+    projected_collapsed_adjacency: np.ndarray    # (n_true, n_true)
+    ground_truth_action_transitions: np.ndarray  # (n_actions, n_true, n_true)
+    ground_truth_collapsed_adjacency: np.ndarray # (n_true, n_true)
+    valid_action_rows: np.ndarray       # (n_actions, n_true)  bool
+    valid_collapsed_rows: np.ndarray    # (n_true,)  bool
+    action_tv: float
+    collapsed_tv: float
+    action_edge_metrics_by_threshold: dict
+    collapsed_edge_metrics_by_threshold: dict
+
+    def primary_metrics(self, threshold: float = 1e-6) -> dict[str, float]:
+        a = self.action_edge_metrics_by_threshold.get(float(threshold), {})
+        c = self.collapsed_edge_metrics_by_threshold.get(float(threshold), {})
+        return {
+            "action_tv": self.action_tv,
+            "collapsed_tv": self.collapsed_tv,
+            "action_edge_precision": a.get("edge_precision", float("nan")),
+            "action_edge_recall": a.get("edge_recall", float("nan")),
+            "action_edge_f1": a.get("edge_f1", float("nan")),
+            "collapsed_edge_precision": c.get("edge_precision", float("nan")),
+            "collapsed_edge_recall": c.get("edge_recall", float("nan")),
+            "collapsed_edge_f1": c.get("edge_f1", float("nan")),
+        }
+
+
+def project_and_evaluate_transition_structure(
+    *,
+    T_hat: np.ndarray,
+    T_true: np.ndarray,
+    cooccurrence: np.ndarray,
+    ignore_self_loops: bool = True,
+    edge_thresholds: Sequence[float] = (1e-6,),
+    epsilon: float = 1e-6,
+) -> TransitionStructureEvaluation:
+    """Canonical single-alignment evaluation of learned transition structure.
+
+    Pipeline:
+    1. Derive alignment and occupancy from ``cooccurrence`` once.
+    2. Project the full learned action tensor into GT space.
+    3. Derive collapsed adjacency from the projected tensor (not independently).
+    4. Remove self-loops after projection, never before.
+    5. Normalise rows to probability distributions.
+    6. Compute action-conditioned TV, collapsed TV, and edge metrics at every
+       requested threshold from the same projected tensors.
+    """
+    T_hat_arr = np.asarray(T_hat, dtype=np.float64)
+    T_true_arr = np.asarray(T_true, dtype=np.float64)
+    contingency = np.asarray(cooccurrence, dtype=np.int64)
+
+    if T_hat_arr.ndim != 3 or T_hat_arr.shape[1] != T_hat_arr.shape[2]:
+        raise ValueError(f"Expected learned tensor with shape (a, n, n), got {T_hat_arr.shape!r}")
+    if T_true_arr.ndim != 3 or T_true_arr.shape[1] != T_true_arr.shape[2]:
+        raise ValueError(f"Expected ground-truth tensor with shape (a, n, n), got {T_true_arr.shape!r}")
+    if contingency.ndim != 2:
+        raise ValueError(f"Expected cooccurrence matrix with shape (n_learned, n_true), got {contingency.shape!r}")
+
+    n_actions = max(int(T_hat_arr.shape[0]), int(T_true_arr.shape[0]))
+    n_learned = int(T_hat_arr.shape[1])
+    n_true = int(T_true_arr.shape[1])
+
+    T_hat_arr = _pad_action_tensor_to_n_actions(T_hat_arr, n_actions)
+    T_true_arr = _pad_action_tensor_to_n_actions(T_true_arr, n_actions)
+
+    if contingency.shape[0] < n_learned or contingency.shape[1] < n_true:
+        padded = np.zeros(
+            (max(n_learned, contingency.shape[0]), max(n_true, contingency.shape[1])),
+            dtype=np.int64,
+        )
+        padded[: contingency.shape[0], : contingency.shape[1]] = contingency
+        contingency = padded
+    contingency = contingency[:n_learned, :n_true]
+
+    # Step 1: alignment and occupancy derived once, shared by all metrics.
+    alignment = compute_alignment(contingency)
+    occupancy = contingency.sum(axis=1).astype(np.float64, copy=False)
+
+    # Step 2: project learned tensor into GT space (normalise rows, then aggregate).
+    T_hat_GT = aggregate_aligned_action_transition_tensor(
+        normalize_action_rows(T_hat_arr), alignment, occupancy, n_true=n_true
+    )
+
+    # Step 3: collapsed adjacency derived from projected action tensor.
+    W_hat_GT = collapse_action_transition_tensor_to_adjacency(T_hat_GT)
+    W_true = collapse_action_transition_tensor_to_adjacency(T_true_arr)
+
+    # Step 4: self-loops removed after projection.
+    if ignore_self_loops:
+        T_hat_GT = zero_action_tensor_diagonal(T_hat_GT)
+        T_true_arr = zero_action_tensor_diagonal(T_true_arr)
+        W_hat_GT = zero_diagonal(W_hat_GT)
+        W_true = zero_diagonal(W_true)
+
+    # Step 5: normalise to probability distributions.
+    P_hat_action = normalize_action_rows(T_hat_GT)
+    P_true_action = normalize_action_rows(T_true_arr)
+    P_hat_collapsed = row_normalize(W_hat_GT)
+    P_true_collapsed = row_normalize(W_true)
+
+    valid_action_rows = T_true_arr.sum(axis=2) > float(epsilon)
+    valid_collapsed_rows = W_true.sum(axis=1) > float(epsilon)
+
+    # Step 6: compute metrics from shared normalised projections.
+    action_tv = _tv_over_valid_pairs(P_true_action, P_hat_action, valid_action_rows, epsilon=float(epsilon))
+    collapsed_tv = _tv_over_valid_rows(P_true_collapsed, P_hat_collapsed, valid_collapsed_rows, epsilon=float(epsilon))
+
+    action_edge_by_threshold: dict[float, dict[str, float]] = {}
+    collapsed_edge_by_threshold: dict[float, dict[str, float]] = {}
+    for threshold in edge_thresholds:
+        t = float(threshold)
+        action_edge_by_threshold[t] = compute_action_conditioned_edge_metrics(P_true_action, P_hat_action, epsilon=t)
+        collapsed_edge_by_threshold[t] = compute_edge_metrics(P_true_collapsed, P_hat_collapsed, epsilon=t)
+
+    return TransitionStructureEvaluation(
+        n_learned=n_learned,
+        n_true=n_true,
+        n_actions=n_actions,
+        cooccurrence=contingency,
+        alignment=alignment,
+        occupancy=occupancy,
+        projected_action_transitions=P_hat_action,
+        projected_collapsed_adjacency=P_hat_collapsed,
+        ground_truth_action_transitions=P_true_action,
+        ground_truth_collapsed_adjacency=P_true_collapsed,
+        valid_action_rows=valid_action_rows,
+        valid_collapsed_rows=valid_collapsed_rows,
+        action_tv=action_tv,
+        collapsed_tv=collapsed_tv,
+        action_edge_metrics_by_threshold=action_edge_by_threshold,
+        collapsed_edge_metrics_by_threshold=collapsed_edge_by_threshold,
+    )
+
+
+def _tv_over_valid_pairs(
+    P_true: np.ndarray,
+    P_hat: np.ndarray,
+    valid_pairs: np.ndarray,
+    *,
+    epsilon: float,
+) -> float:
+    tv_values: list[float] = []
+    for action_idx, state_idx in np.argwhere(valid_pairs).tolist():
+        row_hat = P_hat[int(action_idx), int(state_idx)]
+        if float(row_hat.sum()) <= float(epsilon):
+            tv_values.append(1.0)
+        else:
+            tv_values.append(float(0.5 * np.abs(row_hat - P_true[int(action_idx), int(state_idx)]).sum()))
+    return float(np.mean(tv_values)) if tv_values else 0.0
+
+
+def _tv_over_valid_rows(
+    P_true: np.ndarray,
+    P_hat: np.ndarray,
+    valid_rows: np.ndarray,
+    *,
+    epsilon: float,
+) -> float:
+    tv_values: list[float] = []
+    for state_idx in np.flatnonzero(valid_rows).tolist():
+        row_hat = P_hat[int(state_idx)]
+        if float(row_hat.sum()) <= float(epsilon):
+            tv_values.append(1.0)
+        else:
+            tv_values.append(float(0.5 * np.abs(row_hat - P_true[int(state_idx)]).sum()))
+    return float(np.mean(tv_values)) if tv_values else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Canonical transition structure evaluation (First-Class Snapshot Architecture)
+# ---------------------------------------------------------------------------
+
+
+def compute_hard_alignment(C: np.ndarray) -> np.ndarray:
+    """Hard alignment returning -1 for unobserved learned states.
+
+    A(k) = argmax_i C[k, i]  when sum_i C[k, i] > 0
+    A(k) = -1                 when sum_i C[k, i] = 0
+
+    Prevents zero-sum rows from being mapped to true state 0 via argmax.
+    """
+    contingency = np.asarray(C, dtype=np.int64)
+    alignment = np.full(contingency.shape[0], -1, dtype=np.int64)
+    if contingency.shape[1] == 0:
+        return alignment
+    row_sums = contingency.sum(axis=1)
+    observed = row_sums > 0
+    if np.any(observed):
+        alignment[observed] = np.argmax(contingency[observed], axis=1)
+    return alignment
+
+
+def compute_transition_statistics(
+    *,
+    decoded_walks: Iterable[np.ndarray],
+    true_walks: Iterable[np.ndarray],
+    action_walks: Iterable[np.ndarray],
+    n_learned: int,
+    n_true: int,
+    n_actions: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute C, H, N_ai from evaluation walks.
+
+    Evaluation walks store action[t] as the post-step action (the action that
+    led to state[t]).  The source-state transition (state[t] -> state[t+1]) is
+    therefore conditioned on action[t+1].
+
+    Returns:
+        C:    (n_learned, n_true) int64  -- total state cooccurrence C[k, i]
+        H:    (n_actions, n_learned, n_true) int64  -- action-source cooccurrence H[a, k, i]
+        N_ai: (n_actions, n_true) int64  -- true state-action counts
+    """
+    C = np.zeros((n_learned, n_true), dtype=np.int64)
+    H = np.zeros((n_actions, n_learned, n_true), dtype=np.int64)
+    N_ai = np.zeros((n_actions, n_true), dtype=np.int64)
+
+    for decoded_walk, true_walk, action_walk in zip(decoded_walks, true_walks, action_walks, strict=False):
+        decoded = np.asarray(decoded_walk, dtype=np.int64)
+        truth = np.asarray(true_walk, dtype=np.int64)
+        actions = np.asarray(action_walk, dtype=np.int64)
+        length = min(decoded.shape[0], truth.shape[0])
+
+        # Total cooccurrence over all steps.
+        decoded_steps = decoded[:length]
+        truth_steps = truth[:length]
+        valid_steps = (
+            (0 <= decoded_steps) & (decoded_steps < n_learned)
+            & (0 <= truth_steps) & (truth_steps < n_true)
+        )
+        np.add.at(C, (decoded_steps[valid_steps], truth_steps[valid_steps]), 1)
+
+        # Transitions: source step t, target step t+1, action actions[t+1].
+        transition_length = min(length - 1, actions.shape[0] - 1)
+        if transition_length < 1:
+            continue
+        # action that caused the move from state[t] to state[t+1]
+        action_idx = actions[1:transition_length + 1]
+        decoded_src = decoded[:transition_length]
+        truth_src = truth[:transition_length]
+        valid_transitions = (
+            (0 <= decoded_src) & (decoded_src < n_learned)
+            & (0 <= truth_src) & (truth_src < n_true)
+            & (0 <= action_idx) & (action_idx < n_actions)
+        )
+        np.add.at(
+            H,
+            (action_idx[valid_transitions], decoded_src[valid_transitions], truth_src[valid_transitions]),
+            1,
+        )
+        np.add.at(N_ai, (action_idx[valid_transitions], truth_src[valid_transitions]), 1)
+
+    return C, H, N_ai
+
+
+def compute_action_projection_weights(
+    H: np.ndarray,
+    alignment: np.ndarray,
+    n_true: int,
+) -> np.ndarray:
+    """Action-specific clone weights ω[a, k, i] = H[a,k,i] / sum_{k' in K_i} H[a,k',i].
+
+    Returns (n_actions, n_learned, n_true).  Zero when denominator is zero.
+    """
+    H_f = np.asarray(H, dtype=np.float64)
+    n_actions, n_learned, _ = H_f.shape
+    omega = np.zeros((n_actions, n_learned, n_true), dtype=np.float64)
+    for i in range(n_true):
+        K_i = np.where(alignment == i)[0]
+        if K_i.size == 0:
+            continue
+        denom = H_f[:, K_i, i].sum(axis=1)  # (n_actions,)
+        pos = denom > 0
+        if not np.any(pos):
+            continue
+        for a in np.where(pos)[0].tolist():
+            omega[a, K_i, i] = H_f[a, K_i, i] / denom[a]
+    return omega
+
+
+def _build_target_mapping_matrix(alignment: np.ndarray, n_true: int) -> np.ndarray:
+    """target_mat[l, j] = 1 if alignment[l] == j; target_mat[l, n_true] = 1 if unaligned."""
+    n_learned = alignment.shape[0]
+    target_mat = np.zeros((n_learned, n_true + 1), dtype=np.float64)
+    for l in range(n_learned):
+        j = int(alignment[l])
+        if j < 0:
+            target_mat[l, n_true] = 1.0
+        elif j < n_true:
+            target_mat[l, j] = 1.0
+    return target_mat
+
+
+def project_transition_tensor_canonical(
+    *,
+    T_hat_norm: np.ndarray,
+    alignment: np.ndarray,
+    omega: np.ndarray,
+    n_true: int,
+) -> np.ndarray:
+    """Canonical projection into GT space with unmatched (⊥) target column.
+
+    P_proj[a, i, j] for j < n_true: matched target mass.
+    P_proj[a, i, n_true]: unmatched (⊥) target mass.
+
+    Returns shape (n_actions, n_true, n_true+1).
+    """
+    target_mat = _build_target_mapping_matrix(alignment, n_true)
+    # P_by_learned[a, k, j] = sum_{l: A(l)=j} T_hat_norm[a, k, l]
+    P_by_learned = np.einsum("akl,lj->akj", T_hat_norm, target_mat)
+    # P_proj[a, i, j] = sum_k omega[a, k, i] * P_by_learned[a, k, j]
+    return np.einsum("aki,akj->aij", omega, P_by_learned)
+
+
+def complete_and_normalize_projected_rows(
+    P_proj: np.ndarray,
+    valid_rows: np.ndarray,
+) -> np.ndarray:
+    """Row-complete and normalise the projected distribution.
+
+    For each valid (a, i):
+      - If the row has positive mass: normalise over S^GT ∪ {⊥}.
+      - If the row has no mass: assign all to ⊥ (TV = 1 vs any GT row).
+    Invalid rows are zeroed.
+
+    Returns shape identical to P_proj.
+    """
+    P_hat = np.zeros_like(P_proj)
+    row_sums = P_proj.sum(axis=2)  # (n_actions, n_true)
+    safe_sums = np.where(row_sums > 0, row_sums, 1.0)
+    normalized = P_proj / safe_sums[:, :, np.newaxis]
+
+    has_mass = valid_rows & (row_sums > 0)
+    no_mass = valid_rows & ~has_mass
+
+    P_hat[has_mass] = normalized[has_mass]
+    for a, i in np.argwhere(no_mass).tolist():
+        P_hat[a, i, -1] = 1.0  # all mass to ⊥
+
+    return P_hat
+
+
+def _action_tv_by_pair(
+    P_hat: np.ndarray,
+    P_true: np.ndarray,
+    valid_rows: np.ndarray,
+) -> np.ndarray:
+    """0.5 * |P_hat[a,i,:] - P_true[a,i,:]|_1 for valid (a, i) pairs."""
+    tv = np.zeros(valid_rows.shape, dtype=np.float64)
+    delta = np.abs(P_hat - P_true)  # (n_actions, n_true, n_true+1)
+    tv_raw = 0.5 * delta.sum(axis=2)  # (n_actions, n_true)
+    tv[valid_rows] = tv_raw[valid_rows]
+    return tv
+
+
+def compute_occupancy_weighted_action_tv(
+    tv_by_pair: np.ndarray,
+    valid_rows: np.ndarray,
+    N_ai: np.ndarray,
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute occupancy-weighted and macro action-conditioned TV.
+
+    Returns:
+        tv_occ: global occupancy-weighted TV (primary metric)
+        tv_macro: global macro-average TV
+        occ_weights: (n_actions, n_true) evaluation occupancy weights
+        tv_by_state_occ: (n_true,) per-state occupancy-weighted TV
+        tv_by_state_macro: (n_true,) per-state macro TV
+    """
+    n_actions, n_true = valid_rows.shape
+    N_valid = np.where(valid_rows, np.asarray(N_ai, dtype=np.float64), 0.0)
+    total = float(N_valid.sum())
+    if total > 0:
+        occ_weights = N_valid / total
+    else:
+        n_valid = int(np.count_nonzero(valid_rows))
+        occ_weights = np.where(valid_rows, 1.0 / n_valid if n_valid > 0 else 0.0, 0.0)
+
+    tv_occ = float((tv_by_pair * occ_weights).sum())
+    n_valid_pairs = int(np.count_nonzero(valid_rows))
+    tv_macro = float(tv_by_pair[valid_rows].mean()) if n_valid_pairs > 0 else 0.0
+
+    tv_by_state_occ = np.zeros(n_true, dtype=np.float64)
+    tv_by_state_macro = np.zeros(n_true, dtype=np.float64)
+    for i in range(n_true):
+        valid_a = valid_rows[:, i]
+        if not np.any(valid_a):
+            continue
+        N_i = float(N_ai[valid_a, i].sum())
+        if N_i > 0:
+            w_i = N_ai[valid_a, i].astype(np.float64) / N_i
+            tv_by_state_occ[i] = float((tv_by_pair[valid_a, i] * w_i).sum())
+        tv_by_state_macro[i] = float(tv_by_pair[valid_a, i].mean())
+
+    return tv_occ, tv_macro, occ_weights, tv_by_state_occ, tv_by_state_macro
+
+
+def compute_non_selfloop_action_tv(
+    P_hat: np.ndarray,
+    P_true: np.ndarray,
+    valid_rows: np.ndarray,
+) -> np.ndarray:
+    """Conditional non-self-loop TV diagnostic.
+
+    V_move = {(a, i): sum_{j != i} P_GT(j | i, a) > 0}.
+    For rows in V_move: remove diagonal, renormalise over j != i and ⊥, compute TV.
+    For rows not in V_move: result is 0.
+
+    TV = 1 if GT non-self-loop mass exists but predicted non-self-loop mass is zero.
+    """
+    n_actions, n_true, n_ext = P_hat.shape
+    tv_nonsl = np.zeros((n_actions, n_true), dtype=np.float64)
+
+    for a, i in np.argwhere(valid_rows).tolist():
+        # GT non-self-loop mass (exclude ⊥ from GT).
+        gt_row = P_true[a, i].copy()
+        gt_self = float(gt_row[i])
+        gt_row[i] = 0.0
+        gt_total = float(gt_row[:n_true].sum())  # GT has no ⊥ mass
+        if gt_total <= 0:
+            continue  # not in V_move
+
+        # Renormalise GT over j != i (⊥ column is zero).
+        gt_norm = gt_row / gt_total
+
+        # Predicted: remove diagonal, renormalise over j != i and ⊥.
+        hat_row = P_hat[a, i].copy()
+        hat_row[i] = 0.0
+        hat_total = float(hat_row.sum())
+        if hat_total <= 0:
+            # No predicted non-self-loop mass → all to ⊥, TV = 1.
+            hat_norm = np.zeros(n_ext)
+            hat_norm[-1] = 1.0
+        else:
+            hat_norm = hat_row / hat_total
+
+        tv_nonsl[a, i] = 0.5 * float(np.abs(hat_norm - gt_norm).sum())
+
+    return tv_nonsl
+
+
+def compute_action_edge_metrics_canonical(
+    P_hat: np.ndarray,
+    P_true: np.ndarray,
+    valid_rows: np.ndarray,
+    thresholds: Sequence[float],
+) -> dict:
+    """Action-probability thresholded edge metrics.
+
+    GT edge set: (a, i, j) with j < n_true and P_GT(j|i,a) > threshold.
+    Predicted edge set: (a, i, j) with P_hat(j|i,a) > threshold (may include ⊥).
+    ⊥ edges count as false positives only.
+    """
+    n_true = P_true.shape[1]
+    results: dict[float, dict] = {}
+    for eps in thresholds:
+        t = float(eps)
+        gt_edges: set[tuple] = set()
+        hat_edges: set[tuple] = set()
+        for a, i in np.argwhere(valid_rows).tolist():
+            for j in range(P_true.shape[2]):
+                if j < n_true and float(P_true[a, i, j]) > t:
+                    gt_edges.add((a, i, j))
+                if float(P_hat[a, i, j]) > t:
+                    hat_edges.add((a, i, j))
+        tp = len(gt_edges & hat_edges)
+        prec = tp / len(hat_edges) if hat_edges else 0.0
+        rec = tp / len(gt_edges) if gt_edges else 0.0
+        f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0.0 else 0.0
+        results[t] = {
+            "action_probability_edge_precision": prec,
+            "action_probability_edge_recall": rec,
+            "action_probability_edge_f1": f1,
+        }
+    return results
+
+
+def compute_collapsed_edge_metrics_canonical(
+    P_hat_coll: np.ndarray,
+    P_true_coll: np.ndarray,
+    valid_rows: np.ndarray,
+    thresholds: Sequence[float],
+) -> dict:
+    """Collapsed probability-thresholded edge metrics."""
+    n_true = P_true_coll.shape[0]
+    results: dict[float, dict] = {}
+    for eps in thresholds:
+        t = float(eps)
+        gt_edges: set[tuple] = set()
+        hat_edges: set[tuple] = set()
+        for i in np.flatnonzero(valid_rows).tolist():
+            for j in range(P_true_coll.shape[1]):
+                if j < n_true and float(P_true_coll[i, j]) > t:
+                    gt_edges.add((i, j))
+                if float(P_hat_coll[i, j]) > t:
+                    hat_edges.add((i, j))
+        tp = len(gt_edges & hat_edges)
+        prec = tp / len(hat_edges) if hat_edges else 0.0
+        rec = tp / len(gt_edges) if gt_edges else 0.0
+        f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0.0 else 0.0
+        results[t] = {
+            "action_probability_edge_precision": prec,
+            "action_probability_edge_recall": rec,
+            "action_probability_edge_f1": f1,
+        }
+    return results
+
+
+def compute_collapsed_distributions_canonical(
+    P_hat: np.ndarray,
+    P_true: np.ndarray,
+    valid_rows: np.ndarray,
+    N_ai: np.ndarray,
+    thresholds: Sequence[float] = (1e-6,),
+) -> dict:
+    """Compute evaluation-policy and uniform-valid-action collapsed TV and edge metrics.
+
+    Both GT and predicted are marginalised from the same action-conditioned tensors
+    using the same explicit action prior q(a | i).
+    """
+    n_actions, n_true, n_ext = P_hat.shape
+
+    # q_eval(a|i) = N_ai[a,i] / N_i  for (a,i) in V
+    # q_uniform(a|i) = 1 / |A_i|     for a in A_i
+    q_eval = np.zeros((n_actions, n_true), dtype=np.float64)
+    q_unif = np.zeros((n_actions, n_true), dtype=np.float64)
+    for i in range(n_true):
+        valid_a = valid_rows[:, i]
+        if not np.any(valid_a):
+            continue
+        N_i = float(N_ai[valid_a, i].sum())
+        n_va = int(valid_a.sum())
+        if N_i > 0:
+            q_eval[valid_a, i] = N_ai[valid_a, i].astype(np.float64) / N_i
+        q_unif[valid_a, i] = 1.0 / n_va
+
+    # Collapsed: einsum('ai,aij->ij', q, P)
+    P_hat_eval = np.einsum("ai,aij->ij", q_eval, P_hat)
+    P_true_eval = np.einsum("ai,aij->ij", q_eval, P_true)
+    P_hat_unif = np.einsum("ai,aij->ij", q_unif, P_hat)
+    P_true_unif = np.einsum("ai,aij->ij", q_unif, P_true)
+
+    # Valid collapsed rows: any valid action for that state
+    valid_collapsed = valid_rows.any(axis=0)  # (n_true,)
+    N_i_arr = N_ai.sum(axis=0).astype(np.float64)  # (n_true,)
+    total_N = float(N_i_arr[valid_collapsed].sum())
+    if total_N > 0:
+        d_state = np.where(valid_collapsed, N_i_arr / total_N, 0.0)
+    else:
+        n_vc = int(valid_collapsed.sum())
+        d_state = np.where(valid_collapsed, 1.0 / n_vc if n_vc > 0 else 0.0, 0.0)
+
+    def _tv_stats(P_hat_c: np.ndarray, P_true_c: np.ndarray) -> dict:
+        tv_by_state = np.zeros(n_true, dtype=np.float64)
+        for i in np.flatnonzero(valid_collapsed).tolist():
+            tv_by_state[i] = 0.5 * float(np.abs(P_hat_c[i] - P_true_c[i]).sum())
+        tv_occ = float((tv_by_state * d_state).sum())
+        n_vc = int(valid_collapsed.sum())
+        tv_macro = float(tv_by_state[valid_collapsed].mean()) if n_vc > 0 else 0.0
+        return {"tv_by_state": tv_by_state, "tv_occ": tv_occ, "tv_macro": tv_macro}
+
+    def _non_self_loop_tv_stats(P_hat_c: np.ndarray, P_true_c: np.ndarray) -> dict:
+        tv_by_state = np.zeros(n_true, dtype=np.float64)
+        for i in np.flatnonzero(valid_collapsed).tolist():
+            gt_row = P_true_c[i].copy()
+            gt_row[i] = 0.0
+            gt_total = float(gt_row[:n_true].sum())
+            if gt_total <= 0:
+                continue
+            gt_norm = gt_row / gt_total
+
+            hat_row = P_hat_c[i].copy()
+            hat_row[i] = 0.0
+            hat_total = float(hat_row.sum())
+            if hat_total <= 0:
+                hat_norm = np.zeros_like(hat_row)
+                hat_norm[-1] = 1.0
+            else:
+                hat_norm = hat_row / hat_total
+
+            tv_by_state[i] = 0.5 * float(np.abs(hat_norm - gt_norm).sum())
+        tv_occ = float((tv_by_state * d_state).sum())
+        n_vc = int(valid_collapsed.sum())
+        tv_macro = float(tv_by_state[valid_collapsed].mean()) if n_vc > 0 else 0.0
+        return {"tv_non_self_loop_by_state": tv_by_state, "tv_non_self_loop_occ": tv_occ, "tv_non_self_loop_macro": tv_macro}
+
+    eval_tv = _tv_stats(P_hat_eval, P_true_eval)
+    unif_tv = _tv_stats(P_hat_unif, P_true_unif)
+    eval_nonsl_tv = _non_self_loop_tv_stats(P_hat_eval, P_true_eval)
+    unif_nonsl_tv = _non_self_loop_tv_stats(P_hat_unif, P_true_unif)
+
+    eval_edge = compute_collapsed_edge_metrics_canonical(P_hat_eval, P_true_eval, valid_collapsed, thresholds)
+    unif_edge = compute_collapsed_edge_metrics_canonical(P_hat_unif, P_true_unif, valid_collapsed, thresholds)
+
+    return {
+        "q_eval": q_eval,
+        "q_uniform": q_unif,
+        "valid_collapsed_rows": valid_collapsed,
+        "state_occupancy_weights": d_state,
+        "evaluation_policy": {
+            "P_hat": P_hat_eval,
+            "P_true": P_true_eval,
+            **eval_tv,
+            **eval_nonsl_tv,
+            "edge_metrics_by_threshold": eval_edge,
+        },
+        "uniform_valid_actions": {
+            "P_hat": P_hat_unif,
+            "P_true": P_true_unif,
+            **unif_tv,
+            **unif_nonsl_tv,
+            "edge_metrics_by_threshold": unif_edge,
+        },
+    }
+
+
+@dataclass(frozen=True)
+class CanonicalTransitionEvaluationResult:
+    """Full canonical transition structure evaluation (First-Class Snapshot Architecture).
+
+    All action-conditioned and collapsed metrics share one cooccurrence matrix,
+    one alignment, and one set of projected distributions.
+
+    The primary metric is TV_action_occ: expected local transition error under the
+    held-out evaluation process, with evaluation-occupancy weighting and self-loops
+    included in the comparison target space (S^GT ∪ {⊥}).
+    """
+
+    n_learned: int
+    n_true: int
+    n_actions: int
+
+    # --- Alignment ---
+    cooccurrence: np.ndarray                   # (n_learned, n_true) int64
+    action_source_cooccurrence: np.ndarray     # (n_actions, n_learned, n_true) int64
+    alignment: np.ndarray                      # (n_learned,) int64, -1 = unaligned
+    aligned_learned_mask: np.ndarray           # (n_learned,) bool
+    unaligned_learned_states: list             # list[int]
+    source_action_counts: np.ndarray           # (n_actions, n_true) int64 — N_ai
+
+    # --- Projected distributions (extended space: S^GT ∪ {⊥}) ---
+    P_true_full: np.ndarray                    # (n_actions, n_true, n_true+1)
+    P_hat_full: np.ndarray                     # (n_actions, n_true, n_true+1)
+    valid_action_rows: np.ndarray              # (n_actions, n_true) bool
+
+    # --- Unmatched target mass ---
+    unmatched_target_mass: np.ndarray          # (n_actions, n_true) float64
+    total_unmatched_target_mass: float
+
+    # --- Action-conditioned TV variants ---
+    tv_by_pair_full: np.ndarray                # (n_actions, n_true)
+    tv_by_pair_non_self_loop: np.ndarray       # (n_actions, n_true)
+    evaluation_occupancy_weights: np.ndarray   # (n_actions, n_true)
+    tv_by_state_occupancy: np.ndarray          # (n_true,)
+    tv_by_state_macro: np.ndarray              # (n_true,)
+    tv_occupancy: float                        # includes self-loops
+    tv_macro: float
+    tv_non_self_loop_occupancy: float
+    tv_non_self_loop_macro: float
+    tv_non_self_loop_by_state_occupancy: np.ndarray
+    tv_non_self_loop_by_state_macro: np.ndarray
+    action_edge_metrics_by_threshold: dict
+
+    # --- Collapsed metrics ---
+    action_weights_evaluation_policy: np.ndarray   # (n_actions, n_true) q_eval
+    action_weights_uniform_valid: np.ndarray       # (n_actions, n_true) q_uniform
+    valid_collapsed_rows: np.ndarray               # (n_true,) bool
+    state_occupancy_weights: np.ndarray            # (n_true,)
+
+    collapsed_eval_P_true: np.ndarray              # (n_true, n_true+1)
+    collapsed_eval_P_hat: np.ndarray               # (n_true, n_true+1)
+    collapsed_eval_tv_by_state: np.ndarray         # (n_true,)
+    collapsed_eval_tv_occupancy: float
+    collapsed_eval_tv_macro: float
+    collapsed_eval_tv_non_self_loop_by_state: np.ndarray
+    collapsed_eval_tv_non_self_loop_occupancy: float
+    collapsed_eval_tv_non_self_loop_macro: float
+    collapsed_eval_edge_by_threshold: dict
+
+    collapsed_unif_P_true: np.ndarray              # (n_true, n_true+1)
+    collapsed_unif_P_hat: np.ndarray               # (n_true, n_true+1)
+    collapsed_unif_tv_by_state: np.ndarray         # (n_true,)
+    collapsed_unif_tv_occupancy: float
+    collapsed_unif_tv_macro: float
+    collapsed_unif_tv_non_self_loop_by_state: np.ndarray
+    collapsed_unif_tv_non_self_loop_occupancy: float
+    collapsed_unif_tv_non_self_loop_macro: float
+    collapsed_unif_edge_by_threshold: dict
+
+    def primary_metrics(self, threshold: float = 1e-6) -> dict[str, float]:
+        a_edge = self.action_edge_metrics_by_threshold.get(float(threshold), {})
+        c_edge = self.collapsed_eval_edge_by_threshold.get(float(threshold), {})
+        return {
+            "action_tv_occupancy_weighted": self.tv_occupancy,
+            "action_tv_macro": self.tv_macro,
+            "action_non_self_loop_tv_occupancy_weighted": self.tv_non_self_loop_occupancy,
+            "action_non_self_loop_tv_macro": self.tv_non_self_loop_macro,
+            "collapsed_evaluation_policy_tv_occupancy": self.collapsed_eval_tv_occupancy,
+            "collapsed_evaluation_policy_tv_macro": self.collapsed_eval_tv_macro,
+            "collapsed_evaluation_policy_non_self_loop_tv_occupancy": self.collapsed_eval_tv_non_self_loop_occupancy,
+            "collapsed_evaluation_policy_non_self_loop_tv_macro": self.collapsed_eval_tv_non_self_loop_macro,
+            "collapsed_uniform_action_tv_occupancy": self.collapsed_unif_tv_occupancy,
+            "action_probability_edge_precision": a_edge.get("action_probability_edge_precision", float("nan")),
+            "action_probability_edge_recall": a_edge.get("action_probability_edge_recall", float("nan")),
+            "action_probability_edge_f1": a_edge.get("action_probability_edge_f1", float("nan")),
+            "collapsed_eval_edge_precision": c_edge.get("action_probability_edge_precision", float("nan")),
+            "collapsed_eval_edge_recall": c_edge.get("action_probability_edge_recall", float("nan")),
+            "collapsed_eval_edge_f1": c_edge.get("action_probability_edge_f1", float("nan")),
+        }
+
+
+def evaluate_transition_structure_canonical(
+    *,
+    T_hat: np.ndarray,
+    T_true: np.ndarray,
+    cooccurrence: np.ndarray,
+    action_source_cooccurrence: np.ndarray,
+    source_action_counts: np.ndarray,
+    edge_thresholds: Sequence[float] = (1e-6,),
+) -> CanonicalTransitionEvaluationResult:
+    """Canonical single-alignment evaluation of learned transition structure.
+
+    Implements the First-Class Snapshot Evaluation Architecture:
+
+    1.  Hard alignment: A(k) = argmax_i C[k,i]; -1 if no evaluation evidence.
+    2.  Action-specific projection weights ω[a,k,i] from H[a,k,i].
+    3.  Canonical projection into S^GT ∪ {⊥}: targets with A(l)=-1 become ⊥.
+    4.  Row completion: empty projected rows are assigned entirely to ⊥ (TV=1).
+    5.  Primary TV includes self-loops; non-self-loop TV is a separate diagnostic.
+    6.  Occupancy weights derived from N_ai (true state-action counts), never from
+        decoded model output.
+    7.  Collapsed metrics use evaluation-policy or uniform action prior explicitly;
+        truth and prediction marginalise from the same action-conditioned tensors.
+
+    Args:
+        T_hat: (n_actions, n_learned, n_learned) — raw learned transition counts/probs.
+        T_true: (n_actions, n_true, n_true) — ground-truth transition counts/probs.
+        cooccurrence: (n_learned, n_true) int64 — C[k,i] from evaluation walks.
+        action_source_cooccurrence: (n_actions, n_learned, n_true) int64 — H[a,k,i].
+        source_action_counts: (n_actions, n_true) int64 — N_ai from evaluation walks.
+        edge_thresholds: probability thresholds for edge metrics.
+
+    Returns:
+        CanonicalTransitionEvaluationResult with all metrics and distributions.
+    """
+    T_hat_arr = np.asarray(T_hat, dtype=np.float64)
+    T_true_arr = np.asarray(T_true, dtype=np.float64)
+    C = np.asarray(cooccurrence, dtype=np.int64)
+    H = np.asarray(action_source_cooccurrence, dtype=np.int64)
+    N_ai = np.asarray(source_action_counts, dtype=np.int64)
+
+    if T_hat_arr.ndim != 3 or T_hat_arr.shape[1] != T_hat_arr.shape[2]:
+        raise ValueError(f"Expected T_hat with shape (a, n, n), got {T_hat_arr.shape!r}")
+    if T_true_arr.ndim != 3 or T_true_arr.shape[1] != T_true_arr.shape[2]:
+        raise ValueError(f"Expected T_true with shape (a, n, n), got {T_true_arr.shape!r}")
+    if C.ndim != 2:
+        raise ValueError(f"Expected cooccurrence with shape (n_learned, n_true), got {C.shape!r}")
+    if H.ndim != 3:
+        raise ValueError(f"Expected action_source_cooccurrence with shape (a, n_learned, n_true), got {H.shape!r}")
+
+    n_actions = max(int(T_hat_arr.shape[0]), int(T_true_arr.shape[0]))
+    n_learned = int(T_hat_arr.shape[1])
+    n_true = int(T_true_arr.shape[1])
+
+    T_hat_arr = _pad_action_tensor_to_n_actions(T_hat_arr, n_actions)
+    T_true_arr = _pad_action_tensor_to_n_actions(T_true_arr, n_actions)
+    H = _pad_action_tensor_to_n_actions(H.astype(np.float64), n_actions).astype(np.int64)
+    N_ai_padded = np.zeros((n_actions, n_true), dtype=np.int64)
+    N_ai_padded[:N_ai.shape[0], :N_ai.shape[1]] = N_ai[:n_actions, :n_true]
+    N_ai = N_ai_padded
+
+    # Pad cooccurrence to (n_learned, n_true).
+    if C.shape[0] < n_learned or C.shape[1] < n_true:
+        padded = np.zeros((max(n_learned, C.shape[0]), max(n_true, C.shape[1])), dtype=np.int64)
+        padded[:C.shape[0], :C.shape[1]] = C
+        C = padded
+    C = C[:n_learned, :n_true]
+
+    # --- Step 1: Hard alignment ---
+    alignment = compute_hard_alignment(C)
+    aligned_mask = alignment >= 0
+    unaligned = [int(k) for k in np.where(~aligned_mask)[0]]
+
+    # --- Step 2: Action-specific projection weights ---
+    omega = compute_action_projection_weights(H, alignment, n_true)
+
+    # --- Step 3: Normalise learned transitions ---
+    T_hat_norm = normalize_action_rows(T_hat_arr)
+
+    # --- Step 4: Canonical projection ---
+    P_proj = project_transition_tensor_canonical(
+        T_hat_norm=T_hat_norm,
+        alignment=alignment,
+        omega=omega,
+        n_true=n_true,
+    )
+
+    # --- Step 5: GT extended distribution (⊥ col = 0) ---
+    T_true_norm = normalize_action_rows(T_true_arr)
+    P_true_ext = np.zeros((n_actions, n_true, n_true + 1), dtype=np.float64)
+    P_true_ext[:, :, :n_true] = T_true_norm
+
+    # --- Step 6: Valid rows ---
+    valid_rows = T_true_arr.sum(axis=2) > 0  # (n_actions, n_true)
+
+    # --- Step 7: Complete and normalise projected rows ---
+    P_hat_full = complete_and_normalize_projected_rows(P_proj, valid_rows)
+
+    # --- Step 8: Unmatched target mass ---
+    unmatched_mass = np.where(valid_rows, P_hat_full[:, :, n_true], 0.0)
+    n_valid = int(np.count_nonzero(valid_rows))
+    total_unmatched = float(unmatched_mass[valid_rows].sum()) / max(1.0, float(n_valid))
+
+    # --- Step 9: Action-conditioned TV (primary: full distribution, with self-loops) ---
+    tv_full = _action_tv_by_pair(P_hat_full, P_true_ext, valid_rows)
+    tv_occ, tv_macro, occ_weights, tv_state_occ, tv_state_macro = compute_occupancy_weighted_action_tv(
+        tv_full, valid_rows, N_ai
+    )
+
+    # --- Step 10: Non-self-loop diagnostic ---
+    tv_nonsl = compute_non_selfloop_action_tv(P_hat_full, P_true_ext, valid_rows)
+    tv_nonsl_occ, tv_nonsl_macro, _, tv_nonsl_state_occ, tv_nonsl_state_macro = compute_occupancy_weighted_action_tv(
+        tv_nonsl, valid_rows, N_ai
+    )
+
+    # --- Step 11: Action edge metrics ---
+    action_edge = compute_action_edge_metrics_canonical(P_hat_full, P_true_ext, valid_rows, edge_thresholds)
+
+    # --- Step 12: Collapsed metrics ---
+    coll = compute_collapsed_distributions_canonical(
+        P_hat_full, P_true_ext, valid_rows, N_ai, thresholds=edge_thresholds
+    )
+
+    return CanonicalTransitionEvaluationResult(
+        n_learned=n_learned,
+        n_true=n_true,
+        n_actions=n_actions,
+        cooccurrence=C,
+        action_source_cooccurrence=H,
+        alignment=alignment,
+        aligned_learned_mask=aligned_mask,
+        unaligned_learned_states=unaligned,
+        source_action_counts=N_ai,
+        P_true_full=P_true_ext,
+        P_hat_full=P_hat_full,
+        valid_action_rows=valid_rows,
+        unmatched_target_mass=unmatched_mass,
+        total_unmatched_target_mass=total_unmatched,
+        tv_by_pair_full=tv_full,
+        tv_by_pair_non_self_loop=tv_nonsl,
+        evaluation_occupancy_weights=occ_weights,
+        tv_by_state_occupancy=tv_state_occ,
+        tv_by_state_macro=tv_state_macro,
+        tv_occupancy=tv_occ,
+        tv_macro=tv_macro,
+        tv_non_self_loop_occupancy=tv_nonsl_occ,
+        tv_non_self_loop_macro=tv_nonsl_macro,
+        tv_non_self_loop_by_state_occupancy=tv_nonsl_state_occ,
+        tv_non_self_loop_by_state_macro=tv_nonsl_state_macro,
+        action_edge_metrics_by_threshold=action_edge,
+        action_weights_evaluation_policy=coll["q_eval"],
+        action_weights_uniform_valid=coll["q_uniform"],
+        valid_collapsed_rows=coll["valid_collapsed_rows"],
+        state_occupancy_weights=coll["state_occupancy_weights"],
+        collapsed_eval_P_true=coll["evaluation_policy"]["P_true"],
+        collapsed_eval_P_hat=coll["evaluation_policy"]["P_hat"],
+        collapsed_eval_tv_by_state=coll["evaluation_policy"]["tv_by_state"],
+        collapsed_eval_tv_occupancy=coll["evaluation_policy"]["tv_occ"],
+        collapsed_eval_tv_macro=coll["evaluation_policy"]["tv_macro"],
+        collapsed_eval_tv_non_self_loop_by_state=coll["evaluation_policy"]["tv_non_self_loop_by_state"],
+        collapsed_eval_tv_non_self_loop_occupancy=coll["evaluation_policy"]["tv_non_self_loop_occ"],
+        collapsed_eval_tv_non_self_loop_macro=coll["evaluation_policy"]["tv_non_self_loop_macro"],
+        collapsed_eval_edge_by_threshold=coll["evaluation_policy"]["edge_metrics_by_threshold"],
+        collapsed_unif_P_true=coll["uniform_valid_actions"]["P_true"],
+        collapsed_unif_P_hat=coll["uniform_valid_actions"]["P_hat"],
+        collapsed_unif_tv_by_state=coll["uniform_valid_actions"]["tv_by_state"],
+        collapsed_unif_tv_occupancy=coll["uniform_valid_actions"]["tv_occ"],
+        collapsed_unif_tv_macro=coll["uniform_valid_actions"]["tv_macro"],
+        collapsed_unif_tv_non_self_loop_by_state=coll["uniform_valid_actions"]["tv_non_self_loop_by_state"],
+        collapsed_unif_tv_non_self_loop_occupancy=coll["uniform_valid_actions"]["tv_non_self_loop_occ"],
+        collapsed_unif_tv_non_self_loop_macro=coll["uniform_valid_actions"]["tv_non_self_loop_macro"],
+        collapsed_unif_edge_by_threshold=coll["uniform_valid_actions"]["edge_metrics_by_threshold"],
+    )

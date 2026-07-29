@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import inspect
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import MercuryConfig
-from .evaluate import compute_mercury_paper_precision_metrics, write_mercury_paper_precision_payload
 from .evaluate import compute_mercury_precision as _compute_mercury_precision
 from .evaluate import summarize_mercury_run
 from .prepare import generate_mercury_datasets
@@ -33,8 +31,6 @@ def run_mercury(
     dataset_run_ids = generate_mercury_datasets(config=config)
     if progress_callback is not None:
         progress_callback(stage="dataset", current=1, total=1, message="Datasets ready")
-    paper_precision_history: list[dict[str, object]] = []
-    final_snapshot: dict[str, Any] = {}
     paper_precision_mode = str(config.paper_precision_mode).strip().lower()
     paper_precision_checkpoints = set(
         resolve_eval_checkpoints(
@@ -46,17 +42,14 @@ def run_mercury(
         )
     )
 
-    def _paper_precision_callback(*, step: int, sensory_graph, latent_graph, action_map, obs_uniques=None) -> None:
-        if step == int(config.num_steps):
-            final_snapshot.update(
-                sensory_graph=deepcopy(sensory_graph),
-                latent_graph=deepcopy(latent_graph),
-                action_map=deepcopy(action_map),
-                obs_uniques=(None if obs_uniques is None else deepcopy(obs_uniques)),
-            )
-        if paper_precision_mode != "per_iteration":
-            return
-        if int(step) not in paper_precision_checkpoints:
+    def _paper_precision_callback(*, step, sensory_graph, latent_graph, action_map, obs_uniques=None) -> None:
+        if paper_precision_mode == "per_iteration":
+            if int(step) not in paper_precision_checkpoints:
+                return
+        elif paper_precision_mode == "final":
+            if int(step) != int(config.num_steps):
+                return
+        else:
             return
         write_mercury_paper_precision_snapshot(
             config=config,
@@ -67,21 +60,6 @@ def run_mercury(
             action_map=action_map,
             obs_uniques=obs_uniques,
         )
-        metrics_kwargs = {
-            "config": config,
-            "sensory_graph": deepcopy(sensory_graph),
-            "latent_graph": deepcopy(latent_graph),
-            "action_map": deepcopy(action_map),
-            "obs_uniques": (None if obs_uniques is None else deepcopy(obs_uniques)),
-            "show_progress": show_progress,
-            "progress_desc": f"Mercury Paper Precision @ step {step}",
-        }
-        if progress_callback is not None and _supports_keyword_argument(compute_mercury_paper_precision_metrics, "progress_callback"):
-            metrics_kwargs["progress_callback"] = lambda **kwargs: progress_callback(stage=f"paper_precision@{step}", **kwargs)
-        metrics = compute_mercury_paper_precision_metrics(
-            **metrics_kwargs,
-        )
-        paper_precision_history.append({"step": int(step), "observed_samples": int(step), **metrics})
 
     step_callback = None
     if bool(config.paper_precision_enabled) and paper_precision_mode in {"final", "per_iteration"}:
@@ -98,63 +76,6 @@ def run_mercury(
     states_path = run_mercury_bundle(**bundle_kwargs)
     if progress_callback is not None:
         progress_callback(stage="native_eval", current=0, total=1, message="Starting native eval")
-    if bool(config.paper_precision_enabled):
-        if paper_precision_mode == "per_iteration":
-            final_metrics = (
-                paper_precision_history[-1]
-                if paper_precision_history
-                else compute_mercury_paper_precision_metrics(
-                    **{
-                        key: value
-                        for key, value in {
-                            "config": config,
-                            "sensory_graph": final_snapshot.get("sensory_graph"),
-                            "latent_graph": final_snapshot.get("latent_graph"),
-                            "action_map": final_snapshot.get("action_map"),
-                            "obs_uniques": final_snapshot.get("obs_uniques"),
-                            "show_progress": show_progress,
-                            "progress_desc": "Mercury Paper Precision",
-                            "progress_callback": (
-                                (lambda **kwargs: progress_callback(stage="paper_precision", **kwargs))
-                                if (
-                                    progress_callback is not None
-                                    and _supports_keyword_argument(compute_mercury_paper_precision_metrics, "progress_callback")
-                                )
-                                else None
-                            ),
-                        }.items()
-                        if value is not None or key != "progress_callback"
-                    }
-                )
-            )
-            metrics = {key: value for key, value in final_metrics.items() if key not in {"step", "observed_samples"}}
-            write_mercury_paper_precision_payload(
-                config=config,
-                metrics=metrics,
-                history=paper_precision_history,
-                schedule_unit="training_step",
-            )
-        else:
-            if not final_snapshot:
-                raise RuntimeError("Mercury final paper precision requires a captured final training snapshot.")
-            metrics_kwargs = {
-                "config": config,
-                "sensory_graph": final_snapshot["sensory_graph"],
-                "latent_graph": final_snapshot["latent_graph"],
-                "action_map": final_snapshot["action_map"],
-                "obs_uniques": final_snapshot.get("obs_uniques"),
-                "show_progress": show_progress,
-                "progress_desc": "Mercury Paper Precision",
-            }
-            if progress_callback is not None and _supports_keyword_argument(compute_mercury_paper_precision_metrics, "progress_callback"):
-                metrics_kwargs["progress_callback"] = lambda **kwargs: progress_callback(stage="paper_precision", **kwargs)
-            metrics = compute_mercury_paper_precision_metrics(**metrics_kwargs)
-            write_mercury_paper_precision_payload(
-                config=config,
-                metrics=metrics,
-                history=[],
-                schedule_unit="final_only",
-            )
     _compute_mercury_precision(config=config)
     if progress_callback is not None:
         progress_callback(stage="native_eval", current=1, total=1, message="Native eval complete")

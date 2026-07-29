@@ -19,6 +19,7 @@ from .evaluate import (
 )
 from .prepare import fit_obs_to_gt_map, fit_state_to_gt_map
 from .train import train_pocml_model
+from ...infrastructure.paper_precision_snapshots import write_pocml_paper_precision_snapshot
 from ...infrastructure.runtime import progress_enabled
 
 
@@ -47,21 +48,26 @@ def _run_single_pocml_capacity(
     progress_callback: Optional[Callable[..., None]] = None,
 ) -> dict[str, Any]:
     show_progress = progress_enabled(default=True)
-    paper_precision_history: list[dict[str, Any]] = []
 
-    def _paper_precision_callback(*, model, step: int, observed_samples: int, obs_values, action_values, torch_module) -> None:
-        paper_precision_history.append(
-            {
-                "step": int(step),
-                "observed_samples": int(observed_samples),
-                **compute_pocml_paper_precision_metrics_from_model(
-                    model=model,
-                    config=config,
-                    obs_uniques=np.asarray(obs_values),
-                    action_uniques=np.asarray(action_values),
-                    torch_module=torch_module,
-                ),
-            }
+    def _paper_precision_callback(
+        *,
+        model,
+        step: int,
+        observed_samples: int,
+        obs_values,
+        action_values,
+        torch_module,
+        n_states: int | None = None,
+    ) -> None:
+        write_pocml_paper_precision_snapshot(
+            config=config,
+            step=int(step),
+            observed_samples=int(observed_samples),
+            obs_uniques=np.asarray(obs_values),
+            action_uniques=np.asarray(action_values),
+            model_state_dict=model.state_dict(),
+            torch_module=torch_module,
+            n_states=n_states,
         )
 
     paper_precision_mode = str(config.paper_precision_mode).strip().lower()
@@ -194,33 +200,20 @@ def _run_single_pocml_capacity(
         pocml_eval=pocml_eval,
         precision_capacities=resolved_precision_capacities,
     )
-    final_metrics = compute_pocml_paper_precision_metrics_from_model(
-        model=model,
-        config=config,
-        obs_uniques=trained["obs_values"],
-        action_uniques=trained["action_values"],
-        torch_module=torch_module,
-        progress_callback=(
-            (lambda **kwargs: progress_callback(stage="paper_precision", **kwargs))
-            if progress_callback is not None
-            else None
-        ),
-    )
-    if paper_precision_mode == "per_iteration" and (
-        not paper_precision_history or int(paper_precision_history[-1]["step"]) != int(config.epochs)
-    ):
-        paper_precision_history.append(
-            {
-                "step": int(config.epochs),
-                "observed_samples": int(config.epochs) * int(trained["observed_samples_per_epoch"]),
-                **final_metrics,
-            }
+    if bool(config.paper_precision_enabled) and paper_precision_mode == "final":
+        write_pocml_paper_precision_snapshot(
+            config=config,
+            step=int(config.epochs),
+            observed_samples=int(config.epochs) * int(trained["observed_samples_per_epoch"]),
+            obs_uniques=trained["obs_values"],
+            action_uniques=trained["action_values"],
+            model_state_dict=model.state_dict(),
+            torch_module=torch_module,
+            n_states=int(trained["n_states"]),
         )
     return {
         "states_path": states_path,
         "resolved_capacity": int(trained["n_states"]),
-        "paper_precision_metrics": final_metrics,
-        "paper_precision_history": paper_precision_history,
         "checkpoint_path": checkpoint_path,
         "embeddings_path": embeddings_path,
     }
@@ -264,21 +257,6 @@ def run_pocml(config: POCMLConfig, *, progress_callback: Optional[Callable[..., 
     resolved_capacities = [int(value) for value in resolved_capacities]
 
     primary_state_path = primary_result["states_path"]
-    if bool(config.paper_precision_enabled):
-        write_pocml_paper_precision_payload(
-            config=config,
-            metrics_by_capacity={
-                str(capacity): dict(results_by_capacity[int(capacity)]["paper_precision_metrics"])
-                for capacity in resolved_capacities
-            },
-            history_by_capacity={
-                str(capacity): list(results_by_capacity[int(capacity)]["paper_precision_history"])
-                for capacity in resolved_capacities
-            },
-            mode=str(config.paper_precision_mode),
-            resolved_capacities=resolved_capacities,
-            primary_capacity=primary_capacity,
-        )
     compute_pocml_precision(config=config)
     return primary_state_path
 

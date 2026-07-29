@@ -363,15 +363,9 @@ def compute_bmu_current_timestep_only(state: LatentState, ms: MemoryState,
     scored = (w_mem * masked) + (w_trace * diffusion_from_trace) + (w_action * action_diffusion_from_trace)
 
 
-    print(
-        f"scored {np.array2string(scored, precision=3, floatmode='fixed')}")
-
     memory_bmu = int(np.argmax(masked))
 
     bmu = int(np.argmax(scored))
-
-    print(f"memory_bmu {memory_bmu}")
-    print(f"bmu {bmu}")
 
     # if memory_bmu != bmu:
     #     print("memory bmu", memory_bmu)

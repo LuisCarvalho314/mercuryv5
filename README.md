@@ -17,6 +17,7 @@ The canonical movable code now lives under `src/mercury_runs` and is organized a
 - `domain/` for Pydantic models and contracts
 - `infrastructure/` for storage, reporting, runtime, and W&B
 - `interfaces/` for the CLI
+- `analysis/` for post-training evaluation record consumption and canonical plot generation
 
 
 ## Table of Contents
@@ -57,19 +58,21 @@ High-level structure:
 - `src/mercury_runs/algorithms/`
   - Canonical Python APIs for Mercury, POCML, and CSCG, each split into `config`, `prepare`, `train`, `evaluate`, and artifact modules where applicable.
 - `src/mercury_runs/application/`
-  - Single-run and study orchestration.
+  - Single-run and study orchestration. Includes `evaluation_service.py` for the canonical-v4 evaluation protocol.
 - `src/mercury_runs/domain/`
   - Pydantic models for run identity, status, config, and study contracts.
 - `src/mercury_runs/infrastructure/`
   - Artifact layout, persistence, reporting, W&B logging, and runtime helpers.
 - `src/mercury_runs/interfaces/`
   - CLI parsing and dispatch.
+- `src/mercury_runs/analysis/`
+  - Post-training analysis: evaluation record library, residual map rendering, and study-level canonical plot generators in `analysis/plots/`. Plotting modules must not load model snapshots, generate walks, or compute alignments — all data comes from stored evaluation records.
 - `main.py`
   - Main CLI entrypoint for single-run and study modes.
 - `configs/studies/`
   - JSON grid configs for studies.
-- `scripts/`
-  - Supported offline analysis tools in `scripts/analysis/`.
+- `scripts/analysis/`
+  - Backward-compatible shims pointing to canonical modules in `src/mercury_runs/analysis/`.
 - `tests/`
   - Unit tests.
 - `datasets/`
@@ -124,11 +127,17 @@ Typical lifecycle:
 3. Optionally run native POCML and CSCG baselines through `src/mercury_runs.algorithms.pocml` and `src/mercury_runs.algorithms.cscg`.
 4. Write run status, summaries, and Mercury precision metrics.
 5. Summarize across runs for studies (`study_summary.parquet`).
+6. Run the canonical evaluation pass (`evaluate_study`) to produce immutable evaluation records at `<run_root>/evaluations/<protocol_id>/snapshots/step=XXXXXXXX.json`.
+7. Generate plots from evaluation records using modules in `src/mercury_runs/analysis/plots/` (no model loading required).
+
+The evaluation phase (step 6) and the plotting phase (step 7) are fully independent of training and of each other.
 
 In study mode, each run is tracked through:
 - `study_manifest.jsonl` (scheduled runs),
 - `study_errors.jsonl` (execution failures),
 - optional `study_incomplete.jsonl` (missing outputs).
+
+**CSCG paper precision is a two-phase procedure.** Training saves model snapshots but does not compute metrics. Metrics are computed separately in a post-training evaluation pass that shares evaluation walks across all runs in a study (see §13).
 
 ## Python API
 
@@ -291,11 +300,13 @@ CSCG:
 - `bundles/cscg/.../<run_id>_states.parquet`
 - `bundles/cscg/.../<run_id>_cscg_model.npz`
 - `metrics/cscg/<run_id>_precision.parquet` (rolling diagnostic precision)
-- `metrics/cscg/<run_id>_paper_precision.json` (canonical paper-style precision, only when `--paper_precision True`)
+- `snapshots/cscg/paper_precision/step=<N>/snapshot.json` (one snapshot per training checkpoint, written during training)
+- `metrics/cscg/<run_id>_paper_precision.json` (canonical paper-style precision, written by `--evaluate_study_snapshots`)
 
 Important rule:
 - all three methods write rolling precision diagnostics under `metrics/<method>/*_precision.parquet`
-- all three methods also write canonical paper-style precision JSON artifacts under `metrics/<method>/*_paper_precision.json`
+- Mercury and POCML write `metrics/<method>/*_paper_precision.json` during their training/evaluation pass
+- CSCG writes paper-precision JSON only after an explicit `--evaluate_study_snapshots` pass over snapshot files
 
 ### Study outputs
 
@@ -362,6 +373,8 @@ CLI options:
 
 When enabled, single runs log one W&B run with validated config, subsystem status, Mercury precision stats, native baseline metrics, and current-run artifacts only.
 Paper-style fixed-map precision is opt-in. Use `--paper_precision_mode final` for one post-training evaluation or `--paper_precision_mode per_iteration` to record training-time history. Mercury interprets `per_iteration` as step-interval evaluation along its online pass; CSCG and POCML use their native iteration units. The evaluation workload is configurable with `--paper_precision_num_walks` and `--paper_precision_walk_length`. When paper precision is enabled, `metrics/<method>/*_precision.png` visualizes paper precision; the rolling precision diagnostic remains in `*_precision.parquet`.
+
+The intended architecture separates evaluation from training for all methods: training saves model snapshots, and metrics are computed in a dedicated post-training pass that shares evaluation walks across runs. CSCG implements this fully — training writes to `snapshots/cscg/paper_precision/` and metrics are computed by `--evaluate_study_snapshots`. Mercury and POCML currently compute metrics inline during training; migrating them to the same pattern is the intended direction.
 
 Structure metrics compare learned graph connectivity against ground-truth transition structure after aligning learned nodes to ground-truth states. The mean total variation metric uses the learned adjacency or transition tensor, not consecutive decoded-state counts alone. Given a learned adjacency `W_hat`, dominant alignment `phi`, and learned-state occupancy `mu` on the evaluation walks, the aligned learned transition weight is:
 
@@ -490,6 +503,31 @@ Training semantics:
 - `--cscg_train_algorithm em` means EM-only training
 - `--cscg_train_algorithm viterbi` means EM followed by Viterbi refinement
 - CSCG reporting uses native CSCG objective metrics, decode summaries, and `n_step_observation_prediction_accuracy`
+
+### CSCG paper precision: two-phase workflow
+
+Training saves model snapshots but does not compute metrics. After all runs in a study are complete, run evaluation as a separate step:
+
+```bash
+python main.py \
+  --evaluate_study_snapshots \
+  --study_root results/current/studies \
+  --study_name default
+```
+
+This iterates over every run directory in the study, loads all CSCG snapshots for each run, and evaluates them using a shared `WalkCache` keyed by `(level, sensor, sensor_range, rand_prob, eval_seed, n_walks, walk_length)`. Evaluation walks are generated once per unique protocol and reused across all runs and checkpoints. The canonical `project_and_evaluate_transition_structure` function is used for all structure metrics, so collapsed TV and action-conditioned TV share the same GT alignment. Results are written to `metrics/cscg/<run_id>_paper_precision.json` in each run directory.
+
+If `--cscg_eval_viterbi True` was set during training, a `stage="viterbi_eval"` snapshot is also saved at the end of training and included in the evaluation pass.
+
+To re-evaluate snapshots for a single run without touching training artifacts:
+
+```bash
+python main.py \
+  --reevaluate_paper_precision_snapshots \
+  --study_root results/current/studies \
+  --study_name default \
+  --run_id <run_id>
+```
 
 Run all three methods in one run:
 

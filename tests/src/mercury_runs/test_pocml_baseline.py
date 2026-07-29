@@ -244,6 +244,9 @@ class _TrainModel:
         self.V = _FakeParam([[q_value]])
         self.M = _FakeParam([[[1.0, 0.0], [0.0, 1.0]]])
 
+    def state_dict(self):
+        return {"Q": self.Q.arr, "V": self.V.arr, "M": self.M.arr}
+
 
 class _FakePOCMLModule:
     class POCML(_TrainModel):
@@ -350,17 +353,14 @@ def test_run_pocml_baseline_uses_best_model_and_posterior_proxy(monkeypatch, tmp
         written.update(kwargs)
         return tmp_path / "states.parquet"
 
+    saved_snapshots: list[dict] = []
     monkeypatch.setattr("mercury_runs.algorithms.pocml.api.save_pocml_embeddings", _capture_embeddings)
     monkeypatch.setattr("mercury_runs.algorithms.pocml.api.save_pocml_checkpoint", _capture_checkpoint)
     monkeypatch.setattr("mercury_runs.algorithms.pocml.artifacts.write_bundle_parquet", _capture_write_bundle_parquet)
     monkeypatch.setattr("mercury_runs.algorithms.pocml.api.compute_pocml_precision", lambda **kwargs: None)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.pocml.api.compute_pocml_paper_precision_metrics_from_model",
-        lambda **kwargs: {"capacity_precision": 0.5},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.pocml.api.write_pocml_paper_precision_payload",
-        lambda **kwargs: paper_precision.update(kwargs),
+        "mercury_runs.algorithms.pocml.api.write_pocml_paper_precision_snapshot",
+        lambda **kwargs: saved_snapshots.append({"step": int(kwargs["step"]), "observed_samples": int(kwargs["observed_samples"])}),
     )
 
     config = POCMLConfig(
@@ -373,6 +373,7 @@ def test_run_pocml_baseline_uses_best_model_and_posterior_proxy(monkeypatch, tmp
         valid_trajectories_only=True,
         epochs=2,
         paper_precision_enabled=True,
+        paper_precision_mode="final",
     )
     result = run_pocml(config)
 
@@ -406,13 +407,14 @@ def test_run_pocml_baseline_uses_best_model_and_posterior_proxy(monkeypatch, tmp
     assert written["meta"].run_parameters["pocml_eval"]["precision_state_series"] == "latent_proxy_state_id"
     assert written["meta"].run_parameters["pocml_eval"]["primary_precision_capacity"] == 3
     assert written["meta"].run_parameters["pocml_eval"]["precision_capacities"] == [3]
-    assert paper_precision["resolved_capacities"] == [3]
-    assert paper_precision["metrics_by_capacity"] == {"3": {"capacity_precision": 0.5}}
+    # final snapshot is saved (one for the final epoch)
+    assert len(saved_snapshots) == 1
+    assert saved_snapshots[0]["step"] == 2
 
 
 def test_run_pocml_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
-    captured_payload: dict = {}
+    saved_snapshots: list[dict] = []
     torch_mod, nn_mod, functional_mod, utils_mod, data_mod = _fake_torch_modules()
     monkeypatch.setitem(sys.modules, "torch", torch_mod)
     monkeypatch.setitem(sys.modules, "torch.nn", nn_mod)
@@ -462,12 +464,8 @@ def test_run_pocml_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path:
     monkeypatch.setattr("mercury_runs.algorithms.pocml.artifacts.write_bundle_parquet", lambda **kwargs: written.update(kwargs) or (tmp_path / "states.parquet"))
     monkeypatch.setattr("mercury_runs.algorithms.pocml.api.compute_pocml_precision", lambda **kwargs: None)
     monkeypatch.setattr(
-        "mercury_runs.algorithms.pocml.api.compute_pocml_paper_precision_metrics_from_model",
-        lambda **kwargs: {"capacity_precision": 0.5},
-    )
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.pocml.api.write_pocml_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
+        "mercury_runs.algorithms.pocml.api.write_pocml_paper_precision_snapshot",
+        lambda **kwargs: saved_snapshots.append({"step": int(kwargs["step"]), "observed_samples": int(kwargs["observed_samples"])}),
     )
 
     config = POCMLConfig(
@@ -483,17 +481,16 @@ def test_run_pocml_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path:
         paper_precision_mode="per_iteration",
         paper_precision_eval_interval=1000,
         paper_precision_num_points=3,
+        paper_precision_schedule="linear",
     )
     run_pocml(config)
 
-    assert [item["step"] for item in captured_payload["history_by_capacity"]["3"]] == [1, 3, 6]
-    assert [item["observed_samples"] for item in captured_payload["history_by_capacity"]["3"]] == [10, 30, 60]
-    assert captured_payload["metrics_by_capacity"] == {"3": {"capacity_precision": 0.5}}
+    snapshot_steps = [s["step"] for s in saved_snapshots]
+    assert snapshot_steps == [1, 3, 6]
 
 
 def test_run_pocml_writes_multi_capacity_paper_precision_payload(monkeypatch, tmp_path: Path) -> None:
     written: dict = {}
-    captured_payload: dict = {}
 
     def _fake_single_capacity(*, config, precision_capacities):
         capacity = int(config.n_states)
@@ -502,17 +499,12 @@ def test_run_pocml_writes_multi_capacity_paper_precision_payload(monkeypatch, tm
         return {
             "states_path": tmp_path / f"{config.run_id}_states.parquet",
             "resolved_capacity": capacity,
-            "paper_precision_metrics": {"capacity_precision": capacity / 10.0},
-            "paper_precision_history": [{"step": 1, "observed_samples": 15, "capacity_precision": capacity / 10.0}],
             "checkpoint_path": tmp_path / f"{config.run_id}.pt",
             "embeddings_path": tmp_path / f"{config.run_id}.npz",
         }
 
     monkeypatch.setattr("mercury_runs.algorithms.pocml.api._run_single_pocml_capacity", _fake_single_capacity)
-    monkeypatch.setattr(
-        "mercury_runs.algorithms.pocml.api.write_pocml_paper_precision_payload",
-        lambda **kwargs: captured_payload.update(kwargs),
-    )
+    monkeypatch.setattr("mercury_runs.algorithms.pocml.api.compute_pocml_precision", lambda **kwargs: None)
 
     result = run_pocml(
         POCMLConfig(
@@ -530,12 +522,6 @@ def test_run_pocml_writes_multi_capacity_paper_precision_payload(monkeypatch, tm
 
     assert result == tmp_path / "run-pocml-multi_states.parquet"
     assert written["primary_precision_capacities"] == [3, 5]
-    assert captured_payload["resolved_capacities"] == [3, 5]
-    assert captured_payload["history_by_capacity"]["3"][0]["observed_samples"] == 15
-    assert captured_payload["metrics_by_capacity"] == {
-        "3": {"capacity_precision": 0.3},
-        "5": {"capacity_precision": 0.5},
-    }
 
 
 def test_load_pocml_checkpoint_prepares_model_for_single_sequence_eval(monkeypatch, tmp_path: Path) -> None:

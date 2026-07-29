@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
-from ..application import run_single, run_study
+from ..application import evaluate_study, evaluate_study_snapshots, run_single, run_study
 from ..infrastructure import strtobool
 
 
@@ -10,7 +11,12 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--study", action="store_true", help="Run parametric study instead of single run")
     parser.add_argument("--_worker_run", action="store_true", default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--method", type=str, default=None, choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"])
+    parser.add_argument(
+        "--method",
+        type=str,
+        default=None,
+        choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "mercury_cscg_hybrid_mercury"],
+    )
     parser.add_argument("--max_workers", type=int, default=1, help="Study mode: number of concurrent runs")
     parser.add_argument("--no_parallel", action="store_true", default=False)
     parser.add_argument("--resume", action="store_true", default=False)
@@ -99,6 +105,25 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--structure_metrics_scope", type=str, default="exact_level", choices=["exact_level", "walk_local"])
     parser.add_argument("--structure_metrics_ground_truth_source", type=str, default="empirical_walks", choices=["empirical_walks", "maze_topology"])
     parser.add_argument("--reevaluate_paper_precision_snapshots", action="store_true", default=False)
+    parser.add_argument("--evaluate_study_snapshots", action="store_true", default=False)
+    parser.add_argument("--evaluate_study", action="store_true", default=False,
+                        help="Run canonical-v4 snapshot evaluation over a completed study")
+    parser.add_argument("--eval_num_walks", type=int, default=100,
+                        help="Number of evaluation walks for evaluate-study")
+    parser.add_argument("--eval_walk_length", type=int, default=10_000,
+                        help="Length of each evaluation walk for evaluate-study")
+    parser.add_argument("--eval_seed", type=int, default=0,
+                        help="Evaluation seed for evaluate-study")
+    parser.add_argument("--eval_edge_thresholds", type=float, nargs="+", default=[1e-6],
+                        help="Edge probability thresholds for evaluate-study")
+    parser.add_argument("--eval_force", action="store_true", default=False,
+                        help="Force re-evaluation even if results exist")
+    parser.add_argument("--eval_snapshot_steps", type=int, nargs="+", default=None,
+                        help="Restrict evaluate-study to these snapshot steps")
+    parser.add_argument("--eval_cscg_batch_size", type=int, default=None,
+                        help="Restrict evaluate-study to runs with this CSCG batch size")
+    parser.add_argument("--eval_cscg_clone_preset", type=str, default=None,
+                        help="Restrict evaluate-study to runs with this CSCG clone preset")
     parser.add_argument("--snapshot_source_run_id", type=str, default=None)
     parser.add_argument("--computational_eval", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--computational_eval_profile", type=str, default="full", choices=["full"])
@@ -146,9 +171,48 @@ def parse_arguments() -> argparse.Namespace:
 
 
 
+def _run_evaluate_study(args: argparse.Namespace) -> None:
+    from pathlib import Path
+    from ..application.evaluation_protocol import EvaluationProtocol
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    study_root = Path(args.study_root) / args.study_name
+    protocol = EvaluationProtocol(
+        sensor=str(args.sensor),
+        sensor_range=args.sensor_range,
+        rand_prob=float(args.rand_prob),
+        evaluation_seed=int(args.eval_seed),
+        number_of_walks=int(args.eval_num_walks),
+        walk_length=int(args.eval_walk_length),
+        valid_trajectories_only=bool(args.valid_trajectories_only),
+        edge_thresholds=list(args.eval_edge_thresholds),
+    )
+    method = str(args.method) if args.method else "cscg"
+    snapshot_steps = None if args.eval_snapshot_steps is None else {int(step) for step in args.eval_snapshot_steps}
+    evaluate_study(
+        study_root=study_root,
+        level=int(args.level),
+        method=method,
+        protocol=protocol,
+        resume=not bool(args.eval_force),
+        force=bool(args.eval_force),
+        max_workers=int(args.max_workers),
+        no_parallel=bool(args.no_parallel),
+        run_rand_prob=float(args.rand_prob),
+        snapshot_steps=snapshot_steps,
+        cscg_batch_size=args.eval_cscg_batch_size,
+        cscg_clone_preset=args.eval_cscg_clone_preset,
+    )
+
+
 def main() -> None:
     args = parse_arguments()
-    if args.study:
+    if bool(getattr(args, "evaluate_study", False)):
+        _run_evaluate_study(args)
+    elif bool(getattr(args, "evaluate_study_snapshots", False)):
+        evaluate_study_snapshots(args)
+    elif args.study:
         run_study(args)
     else:
         run_single(args)

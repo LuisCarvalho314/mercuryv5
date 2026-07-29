@@ -8,12 +8,9 @@ import numpy as np
 from .artifacts import write_cscg_artifacts
 from .config import CSCGConfig
 from .evaluate import (
-    compute_cscg_paper_precision,
-    compute_cscg_paper_precision_metrics_from_model,
     compute_cscg_precision,
     decode_cscg_states,
     summarize_cscg_observation_prediction_accuracy,
-    write_cscg_paper_precision_payload,
 )
 from .prepare import (
     action_to_indices,
@@ -231,14 +228,6 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 "iteration": int(iteration),
                 "step": int(current_step),
                 "observed_samples": int(observed_samples),
-                **compute_cscg_paper_precision_metrics_from_model(
-                    model_npz=model_npz,
-                    n_clones=n_clones,
-                    config=config,
-                    obs_uniques=np.asarray(obs_values),
-                    action_uniques=np.asarray(action_values),
-                    chmm_mod=chmm_mod,
-                ),
             }
         )
 
@@ -422,58 +411,35 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         clone_states=clone_states,
         observation_prediction_eval=observation_prediction_eval,
     )
-    if bool(config.paper_precision_enabled):
-        eval_viterbi_metrics = None
+    if bool(config.paper_precision_enabled) and paper_precision_mode == "final":
+        final_step = int(last_em_step) if int(last_em_step) > 0 else int(config.n_iter)
+        final_iteration = int(last_em_iteration) if int(last_em_iteration) > 0 else int(config.n_iter)
         if bool(getattr(config, "eval_viterbi", False)):
-            eval_model_npz = viterbi_refined_eval_model_npz(
+            final_stage = "viterbi_eval"
+            final_model_npz = viterbi_refined_eval_model_npz(
                 model,
                 obs_idx=obs_idx,
                 act_idx=act_idx,
                 n_clones=n_clones,
                 n_iter=int(config.n_iter),
             )
-            eval_viterbi_metrics = compute_cscg_paper_precision_metrics_from_model(
-                model_npz=eval_model_npz,
-                n_clones=n_clones,
-                config=config,
-                obs_uniques=np.asarray(obs_values),
-                action_uniques=np.asarray(action_values),
-                chmm_mod=chmm_mod,
-            )
-        if paper_precision_mode == "per_iteration":
-            write_cscg_paper_precision_payload(
-                config=config,
-                metrics=(
-                    eval_viterbi_metrics
-                    if eval_viterbi_metrics is not None
-                    else
-                    {
-                        key: value
-                        for key, value in paper_precision_history[-1].items()
-                        if key not in {"stage", "iteration", "step", "observed_samples"}
-                    }
-                    if paper_precision_history
-                    else {}
-                ),
-                history=paper_precision_history,
-                mode=str(config.paper_precision_mode),
-            )
         else:
-            if progress_callback is not None:
-                progress_callback(stage="paper_precision", current=0, total=1, message="Starting paper precision")
-            if eval_viterbi_metrics is not None:
-                write_cscg_paper_precision_payload(
-                    config=config,
-                    metrics=eval_viterbi_metrics,
-                    history=[],
-                    mode=str(config.paper_precision_mode),
-                )
-            else:
-                compute_cscg_paper_precision(config=config)
+            final_stage = "final"
+            final_model_npz = {"T": np.asarray(model.T), "n_clones": n_clones}
+        write_cscg_paper_precision_snapshot(
+            config=config,
+            stage=final_stage,
+            iteration=final_iteration,
+            step=final_step,
+            observed_samples=final_step,
+            model_npz=final_model_npz,
+            obs_uniques=np.asarray(obs_values),
+            action_uniques=np.asarray(action_values),
+        )
     compute_cscg_precision(config=config)
     if progress_callback is not None:
         progress_callback(stage="native_eval", current=1, total=1, message="Native eval complete")
     return states_path
 
 
-__all__ = ["CSCGConfig", "compute_cscg_precision", "compute_cscg_paper_precision", "run_cscg"]
+__all__ = ["CSCGConfig", "compute_cscg_precision", "run_cscg"]

@@ -181,6 +181,7 @@ def train_pocml_model(*, config, paper_precision_callback=None, progress_callbac
                     obs_values=np.asarray(obs_values),
                     action_values=np.asarray(action_values),
                     torch_module=torch,
+                    n_states=int(n_states),
                 )
         loss_record = np.concatenate(loss_epochs, axis=0) if loss_epochs else np.zeros((0, 0), dtype=np.float64)
     elif progress_callback is not None:
