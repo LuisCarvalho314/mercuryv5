@@ -692,6 +692,74 @@ def test_parse_arguments_accepts_lambda_trace(monkeypatch) -> None:
     assert args.lambda_trace == 0.125
 
 
+def test_parse_arguments_rejects_memory_for_sensory(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--method", "sensory", "--level", "13", "--memory_length", "10"],
+    )
+
+    try:
+        parse_arguments()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("parse_arguments should reject memory_length for sensory")
+
+
+def test_parse_arguments_rejects_latent_args_for_tmgwr_hybrid(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["main.py", "--method", "tmgwr_cscg_hybrid", "--level", "13", "--latent_max_neurons", "80"],
+    )
+
+    try:
+        parse_arguments()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("parse_arguments should reject latent args for tmgwr_cscg_hybrid")
+
+
+def test_parse_arguments_accepts_cscg_args_for_tmgwr_hybrid(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--method",
+            "tmgwr_cscg_hybrid",
+            "--level",
+            "13",
+            "--cscg_structural_preset",
+            "source_graph_first_order",
+        ],
+    )
+
+    args = parse_arguments()
+
+    assert args.method == "tmgwr_cscg_hybrid"
+    assert args.cscg_structural_preset == "source_graph_first_order"
+
+
+def test_parse_arguments_filters_help_for_sensory(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["main.py", "--method", "sensory", "--help"])
+
+    try:
+        parse_arguments()
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("parse_arguments should exit after rendering help")
+
+    help_text = capsys.readouterr().out
+    assert "--sensory_max_neurons" in help_text
+    assert "--memory_length" not in help_text
+    assert "--latent_max_neurons" not in help_text
+    assert "--cscg_n_iter" not in help_text
+
+
 def _parsed_args(monkeypatch, *extra_args: str):
     monkeypatch.setattr(sys, "argv", ["main.py", "--level", "13", "--wandb_mode", "disabled", *extra_args])
     return parse_arguments()

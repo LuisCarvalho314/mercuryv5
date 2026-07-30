@@ -99,6 +99,57 @@ CSCG_CLONE_PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+CSCG_STRUCTURAL_PRESETS: Dict[str, Dict[str, Any]] = {
+    "vanilla_cscg": {
+        "cscg_clone_allocation": "uniform",
+        "cscg_clones_per_obs": 10,
+        "cscg_clones_per_state": 1,
+        "cscg_clone_capacity_mode": "fixed",
+        "cscg_structural_transfer_level": "first_order_observation",
+        "cscg_structural_init_mode": "none",
+        "cscg_structural_source": "none",
+    },
+    "oracle_capacity": {
+        "cscg_clone_allocation": "ground_truth",
+        "cscg_clones_per_obs": 1,
+        "cscg_clones_per_state": 1,
+        "cscg_clone_capacity_mode": "ground_truth",
+        "cscg_structural_transfer_level": "first_order_observation",
+        "cscg_structural_init_mode": "none",
+        "cscg_structural_source": "none",
+    },
+    "oracle_capacity_structural": {
+        "cscg_clone_allocation": "ground_truth",
+        "cscg_clones_per_obs": 1,
+        "cscg_clones_per_state": 1,
+        "cscg_clone_capacity_mode": "ground_truth",
+        "cscg_structural_transfer_level": "clone_state",
+        "cscg_structural_init_mode": "binary",
+        "cscg_structural_source": "oracle_maze_topology",
+    },
+    "oracle_capacity_first_order": {
+        "cscg_clone_allocation": "ground_truth",
+        "cscg_clones_per_obs": 1,
+        "cscg_clones_per_state": 1,
+        "cscg_clone_capacity_mode": "ground_truth",
+        "cscg_structural_transfer_level": "first_order_observation",
+        "cscg_structural_init_mode": "binary",
+        "cscg_structural_source": "oracle_maze_topology",
+    },
+    "source_graph_clone_state": {
+        "cscg_clone_capacity_mode": "source",
+        "cscg_structural_transfer_level": "clone_state",
+        "cscg_structural_init_mode": "binary",
+        "cscg_structural_source": "source_graph",
+    },
+    "source_graph_first_order": {
+        "cscg_clone_capacity_mode": "source",
+        "cscg_structural_transfer_level": "first_order_observation",
+        "cscg_structural_init_mode": "binary",
+        "cscg_structural_source": "source_graph",
+    },
+}
+
 def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
     return {
         "environment": {
@@ -185,6 +236,21 @@ def apply_cscg_clone_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]
     return expanded
 
 
+def apply_cscg_structural_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]:
+    preset_name = run_configuration.get("cscg_structural_preset")
+    if preset_name is None:
+        return dict(run_configuration)
+    resolved_name = str(preset_name)
+    if resolved_name not in CSCG_STRUCTURAL_PRESETS:
+        available = ", ".join(sorted(CSCG_STRUCTURAL_PRESETS))
+        raise ValueError(f"Unknown cscg_structural_preset '{resolved_name}'. Expected one of: {available}")
+    expanded = dict(run_configuration)
+    expanded.pop("cscg_structural_preset", None)
+    expanded.update(CSCG_STRUCTURAL_PRESETS[resolved_name])
+    expanded["cscg_structural_preset"] = resolved_name
+    return expanded
+
+
 def _normalize_section(raw: Dict[str, Any]) -> Dict[str, List[Any]]:
     if not isinstance(raw, dict):
         raise ValueError("Study config sections must be JSON objects.")
@@ -210,9 +276,11 @@ def _method_flags(method: str) -> Dict[str, Any]:
     if method == "sensory":
         return {"method": "sensory", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     if method == "cscg":
-        return {"method": "cscg", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": True}
+        return {"method": "cscg", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     if method == "mercury_cscg_hybrid":
         return {"method": "mercury_cscg_hybrid", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
+    if method == "tmgwr_cscg_hybrid":
+        return {"method": "tmgwr_cscg_hybrid", "baseline_all": False, "baseline_pocml": False, "baseline_cscg": False}
     raise ValueError(f"Unknown method '{method}'")
 
 
@@ -230,8 +298,9 @@ def _expand_method_runs(
     for key, value in method_flags.items():
         parameter_space.setdefault(key, [value])
     parameter_space.setdefault("reuse_existing_run", [False])
-    if method_name != "cscg":
+    if method_name not in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
         parameter_space.pop("cscg_clone_preset", None)
+        parameter_space.pop("cscg_structural_preset", None)
 
     runs: List[Dict[str, Any]] = []
     for run_configuration in grid(parameter_space):
@@ -240,8 +309,9 @@ def _expand_method_runs(
             if method_name in {"mercury", "mercury_cscg_hybrid"}
             else dict(run_configuration)
         )
-        if method_name == "cscg":
+        if method_name in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
             expanded_configuration = apply_cscg_clone_preset(expanded_configuration)
+            expanded_configuration = apply_cscg_structural_preset(expanded_configuration)
         runs.append(expanded_configuration)
     return runs
 
@@ -254,7 +324,7 @@ def _load_hierarchical_study_config(config_path: Path, defaults: StudyDefaults) 
     common_space = _merge_sections(environment_space, evaluation_space)
 
     run_configurations: List[Dict[str, Any]] = []
-    for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"):
+    for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"):
         method_model = getattr(study_config.methods, method_name)
         if not bool(method_model.enabled):
             continue
@@ -279,7 +349,7 @@ def resolve_run_configurations(args: argparse.Namespace, defaults: StudyDefaults
         evaluation_space = _normalize_section(study_config.evaluation)
         common_space = _merge_sections(environment_space, evaluation_space)
         run_configurations: List[Dict[str, Any]] = []
-        for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"):
+        for method_name in ("mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"):
             method_model = getattr(study_config.methods, method_name)
             if not bool(method_model.enabled):
                 continue
@@ -301,6 +371,94 @@ def resolve_run_configurations(args: argparse.Namespace, defaults: StudyDefaults
 def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
     method = str(config.get("method", "mercury"))
     pruned = dict(config)
+    pocml_keys = {
+        "pocml_valid_trajectories_only",
+        "pocml_epochs",
+        "pocml_trajectory_length",
+        "pocml_max_trajectories",
+        "pocml_state_dim",
+        "pocml_random_feature_dim",
+        "pocml_n_states",
+        "pocml_precision_capacities",
+        "pocml_alpha",
+        "pocml_lr_q",
+        "pocml_lr_v",
+        "pocml_lr_all",
+        "pocml_lr_m",
+        "pocml_reg_m",
+        "pocml_max_iter_m",
+        "pocml_eps_m",
+        "pocml_batch_size",
+        "pocml_memory_bias",
+        "pocml_use_ground_truth_node_ids",
+    }
+    cscg_keys = {
+        "cscg_valid_trajectories_only",
+        "cscg_clones_per_obs",
+        "cscg_clone_preset",
+        "cscg_structural_preset",
+        "cscg_clone_allocation",
+        "cscg_clones_per_state",
+        "cscg_structural_transfer_level",
+        "cscg_structural_init_mode",
+        "cscg_structural_source",
+        "cscg_clone_capacity_mode",
+        "cscg_n_iter",
+        "cscg_pseudocount",
+        "cscg_term_early",
+        "cscg_train_algorithm",
+        "cscg_training_mode",
+        "cscg_batch_size",
+        "cscg_online_lambda",
+        "cscg_eval_viterbi",
+        "cscg_seed",
+        "mercury_cscg_prior_weight",
+    }
+    sensory_keys = {
+        "sensory_observation_mode",
+        "sensory_allow_self_loops",
+        "activation_threshold",
+        "topological_neighbourhood_threshold",
+        "sensory_max_neurons",
+        "sensory_weighting",
+        "winning_node_lr",
+        "topological_neighbourhood_lr",
+        "sensory_action_lr",
+        "global_context_lr",
+        "sensory_max_age",
+        "sensory_gaussian_shape",
+    }
+    action_map_keys = {"am_n_codebook", "am_lr", "am_sigma", "am_key", "am_identity_for_one_hot"}
+    mercury_dataset_keys = {
+        "mercury_valid_trajectories_only",
+        "mercury_split_sensory_raw_latent_valid",
+        "mercury_input_mode",
+    }
+    mercury_latent_keys = {
+        "memory_length",
+        "latent_allow_self_loops",
+        "latent_max_neurons",
+        "latent_action_lr",
+        "latent_gaussian_shape",
+        "latent_max_age",
+        "ambiguity_threshold",
+        "ambiguity_decay",
+        "ambiguity_counter_mode",
+        "trace_decay",
+        "lambda_trace",
+        "weight_memory",
+        "weight_undirected",
+        "weight_base",
+        "weight_action",
+        "memory_replay",
+        "memory_disambiguation",
+    }
+    baseline_keys = {"baseline_pocml", "baseline_cscg", "baseline_all"}
+
+    def pop_many(keys: set[str]) -> None:
+        for key in keys:
+            pruned.pop(key, None)
+
     for key in {
         "study",
         "study_config",
@@ -314,27 +472,18 @@ def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }:
         pruned.pop(key, None)
     pruned.pop("weight_preset", None)
-    pruned.pop("cscg_clone_preset", None)
     if method == "mercury":
-        for key in list(pruned):
-            if key.startswith("pocml_") or key.startswith("cscg_"):
-                pruned.pop(key, None)
+        pop_many(pocml_keys | cscg_keys)
     elif method == "pocml":
-        for key in list(pruned):
-            if key.startswith("cscg_"):
-                pruned.pop(key, None)
+        pop_many(baseline_keys | cscg_keys | mercury_dataset_keys | mercury_latent_keys | sensory_keys | action_map_keys)
     elif method == "cscg":
-        for key in list(pruned):
-            if key.startswith("pocml_"):
-                pruned.pop(key, None)
+        pop_many(baseline_keys | pocml_keys | mercury_dataset_keys | mercury_latent_keys | sensory_keys | action_map_keys)
     elif method == "mercury_cscg_hybrid":
-        for key in list(pruned):
-            if key.startswith("pocml_"):
-                pruned.pop(key, None)
+        pop_many(baseline_keys | pocml_keys)
+    elif method == "tmgwr_cscg_hybrid":
+        pop_many(baseline_keys | pocml_keys | mercury_dataset_keys | mercury_latent_keys)
     elif method == "sensory":
-        for key in list(pruned):
-            if key.startswith("pocml_") or key.startswith("cscg_") or key.startswith("latent_"):
-                pruned.pop(key, None)
+        pop_many(baseline_keys | pocml_keys | cscg_keys | mercury_dataset_keys | mercury_latent_keys)
     return pruned
 
 
@@ -433,7 +582,7 @@ def build_study_run_records(
         "pocml_random_feature_dim", "pocml_n_states", "pocml_precision_capacities", "pocml_alpha", "pocml_lr_q", "pocml_lr_v",
         "pocml_lr_all", "pocml_lr_m", "pocml_reg_m", "pocml_max_iter_m", "pocml_eps_m",
         "pocml_use_ground_truth_node_ids", "pocml_batch_size", "pocml_memory_bias", "baseline_cscg",
-        "cscg_clones_per_obs", "cscg_clone_allocation", "cscg_clones_per_state", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
+        "cscg_clones_per_obs", "cscg_clone_allocation", "cscg_clones_per_state", "cscg_clone_preset", "cscg_structural_preset", "cscg_structural_transfer_level", "cscg_structural_init_mode", "cscg_structural_source", "cscg_clone_capacity_mode", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
         "cscg_batch_size", "cscg_online_lambda", "cscg_eval_viterbi", "cscg_seed", "method",
         "mercury_input_mode", "sensory_observation_mode",
     }
@@ -538,7 +687,7 @@ def _render_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int
     width = shutil.get_terminal_size((120, 20)).columns
     header = f"Study progress: {completed}/{total} completed"
     rows = [header[:width], "-" * min(width, max(len(header), 40))]
-    records_by_method: Dict[str, List[tuple[Dict[str, Any], List[tuple[str, Dict[str, Any]]]]]] = {"mercury": [], "sensory": [], "pocml": [], "cscg": [], "mercury_cscg_hybrid": []}
+    records_by_method: Dict[str, List[tuple[Dict[str, Any], List[tuple[str, Dict[str, Any]]]]]] = {"mercury": [], "sensory": [], "pocml": [], "cscg": [], "mercury_cscg_hybrid": [], "tmgwr_cscg_hybrid": []}
     for record in run_records:
         run_root = Path(record["config"]["study_root"]) / record["config"]["study_name"] / record["run_id"]
         tracks = load_progress_tracks(run_root)
@@ -547,7 +696,7 @@ def _render_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int
         method = str(record["config"].get("method", "mercury"))
         visible_tracks = _visible_progress_tracks(tracks)
         records_by_method.setdefault(method, []).append((record, visible_tracks))
-    for method in ["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"]:
+    for method in ["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"]:
         method_records = records_by_method.get(method) or []
         if not method_records:
             continue
@@ -686,6 +835,8 @@ __all__ = [
     "default_parameter_space",
     "normalize_parameter_space",
     "apply_weight_preset",
+    "apply_cscg_clone_preset",
+    "apply_cscg_structural_preset",
     "resolve_run_configurations",
     "load_retry_configs",
     "load_incomplete_configs",

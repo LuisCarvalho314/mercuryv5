@@ -113,11 +113,11 @@ def _utc_now() -> tuple[str, str]:
     """
     Returns:
       - timestamp_utc_iso: ISO-8601 UTC (e.g., "2026-02-02T14:03:11Z")
-      - timestamp_utc_compact: filesystem-friendly (e.g., "20260202T140311Z")
+      - timestamp_utc_compact: filesystem-friendly (e.g., "20260202T140311123456Z")
     """
-    now = datetime.datetime.utcnow().replace(microsecond=0)
+    now = datetime.datetime.now(datetime.UTC)
     timestamp_utc_iso = now.isoformat() + "Z"
-    timestamp_utc_compact = now.strftime("%Y%m%dT%H%M%SZ")
+    timestamp_utc_compact = now.strftime("%Y%m%dT%H%M%S%fZ")
     return timestamp_utc_iso, timestamp_utc_compact
 
 
@@ -355,8 +355,11 @@ def _write_artifacts(
             "collisions": _json_safe(traj.collisions),
         }
 
-    with metadata_path.open("w", encoding="utf-8") as handle:
+    metadata_tmp_path = metadata_path.with_suffix(metadata_path.suffix + f".{os.getpid()}.tmp")
+    with metadata_tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
+        handle.write("\n")
+    metadata_tmp_path.replace(metadata_path)
 
     print(f"Saved: {parquet_path}")
     print(f"Saved: {metadata_path}")

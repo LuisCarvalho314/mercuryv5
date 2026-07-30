@@ -23,6 +23,10 @@ class CSCGConfig(BaseModel):
     clones_per_obs: int = Field(default=10, gt=0)
     clone_allocation: str = Field(default="uniform")
     clones_per_state: int = Field(default=1, gt=0)
+    structural_transfer_level: str = "first_order_observation"
+    structural_init_mode: str = "binary"
+    structural_source: str = "oracle_maze_topology"
+    clone_capacity_mode: str = "source"
     n_iter: int = Field(default=1000, gt=0)
     pseudocount: float = Field(default=2e-3, ge=0.0)
     term_early: bool = True

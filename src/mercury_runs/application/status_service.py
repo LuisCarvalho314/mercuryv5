@@ -70,6 +70,14 @@ def build_run_status_model(
                     "mercury_input_mode": str(run_payload.get("mercury_input_mode", "pretrained_raw")),
                 },
             ),
+            "tmgwr_cscg_hybrid": subsystem_status(
+                name="tmgwr_cscg_hybrid",
+                status="pending" if str(run_payload.get("method", "mercury")) == "tmgwr_cscg_hybrid" else "skipped",
+                config={
+                    "cscg": ((run_payload.get("baselines") or {}).get("cscg") or {}),
+                    "source_method": "tmgwr",
+                },
+            ),
         },
     )
 

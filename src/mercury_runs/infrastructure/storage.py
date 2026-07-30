@@ -64,6 +64,7 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
     pocml_dir = method_output_dir(run_root / "bundles" / "pocml", level, sensor, sensor_range)
     cscg_dir = method_output_dir(run_root / "bundles" / "cscg", level, sensor, sensor_range)
     hybrid_dir = method_output_dir(run_root / "bundles" / "mercury_cscg_hybrid", level, sensor, sensor_range)
+    tmgwr_hybrid_dir = method_output_dir(run_root / "bundles" / "tmgwr_cscg_hybrid", level, sensor, sensor_range)
     return ArtifactLayout(
         mercury_states_parquet=mercury_dir / f"{run_id}_states.parquet",
         mercury_attribution_parquet=mercury_dir / f"{run_id}_attribution.parquet",
@@ -95,6 +96,10 @@ def artifact_layout(*, run_root: Path, run_id: str, run_payload: Dict[str, Any])
         mercury_cscg_hybrid_paper_precision_json=(run_root / "metrics" / "mercury_cscg_hybrid" / f"{run_id}_paper_precision.json"),
         mercury_cscg_hybrid_computational_json=(run_root / "metrics" / "mercury_cscg_hybrid" / f"{run_id}_computational.json"),
         mercury_cscg_hybrid_model_npz=hybrid_dir / f"{run_id}_mercury_cscg_hybrid_model.npz",
+        tmgwr_cscg_hybrid_states_parquet=tmgwr_hybrid_dir / f"{run_id}_states.parquet",
+        tmgwr_cscg_hybrid_paper_precision_json=(run_root / "metrics" / "tmgwr_cscg_hybrid" / f"{run_id}_paper_precision.json"),
+        tmgwr_cscg_hybrid_computational_json=(run_root / "metrics" / "tmgwr_cscg_hybrid" / f"{run_id}_computational.json"),
+        tmgwr_cscg_hybrid_model_npz=tmgwr_hybrid_dir / f"{run_id}_tmgwr_cscg_hybrid_model.npz",
         ground_truth_states_parquet=(run_root / "ground_truth" / f"{run_id}_ground_truth_states.parquet"),
         internal_graphs_comparison_png=run_root / "plots" / "internal_graphs_comparison.png",
         comparison_summary_json=run_root / "comparison_summary.json",
@@ -188,6 +193,11 @@ def collect_run_artifacts(
         artifacts["mercury_cscg_hybrid_paper_precision_json"] = path_if_exists(layout.mercury_cscg_hybrid_paper_precision_json)
         artifacts["mercury_cscg_hybrid_computational_json"] = path_if_exists(layout.mercury_cscg_hybrid_computational_json)
         artifacts["mercury_cscg_hybrid_model_npz"] = path_if_exists(layout.mercury_cscg_hybrid_model_npz)
+    if str(run_payload.get("method", "mercury")) == "tmgwr_cscg_hybrid":
+        artifacts["tmgwr_cscg_hybrid_states_parquet"] = path_if_exists(layout.tmgwr_cscg_hybrid_states_parquet)
+        artifacts["tmgwr_cscg_hybrid_paper_precision_json"] = path_if_exists(layout.tmgwr_cscg_hybrid_paper_precision_json)
+        artifacts["tmgwr_cscg_hybrid_computational_json"] = path_if_exists(layout.tmgwr_cscg_hybrid_computational_json)
+        artifacts["tmgwr_cscg_hybrid_model_npz"] = path_if_exists(layout.tmgwr_cscg_hybrid_model_npz)
     return artifacts
 
 
@@ -269,15 +279,18 @@ def validate_reusable_run(
             return False, "missing CSCG artifacts"
         if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="cscg"):
             return False, "missing CSCG paper precision snapshot"
-    elif method == "mercury_cscg_hybrid":
+    elif method in {"mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
+        states_path = layout.mercury_cscg_hybrid_states_parquet if method == "mercury_cscg_hybrid" else layout.tmgwr_cscg_hybrid_states_parquet
+        model_path = layout.mercury_cscg_hybrid_model_npz if method == "mercury_cscg_hybrid" else layout.tmgwr_cscg_hybrid_model_npz
+        computational_path = layout.mercury_cscg_hybrid_computational_json if method == "mercury_cscg_hybrid" else layout.tmgwr_cscg_hybrid_computational_json
         if not layout.ground_truth_states_parquet.exists():
             return False, "missing ground truth state artifact"
-        if not layout.mercury_cscg_hybrid_states_parquet.exists() or not layout.mercury_cscg_hybrid_model_npz.exists():
-            return False, "missing Mercury-CSCG hybrid artifacts"
-        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method="mercury_cscg_hybrid"):
-            return False, "missing Mercury-CSCG hybrid paper precision snapshot"
-        if computational_eval_enabled(run_payload) and not layout.mercury_cscg_hybrid_computational_json.exists():
-            return False, "missing Mercury-CSCG hybrid computational artifact"
+        if not states_path.exists() or not model_path.exists():
+            return False, f"missing {method} artifacts"
+        if paper_precision_enabled(run_payload) and not has_paper_precision_snapshot(run_root=run_root, method=method):
+            return False, f"missing {method} paper precision snapshot"
+        if computational_eval_enabled(run_payload) and not computational_path.exists():
+            return False, f"missing {method} computational artifact"
     else:
         return False, f"unsupported method {method!r}"
     if baseline_enabled(run_payload, "pocml"):
@@ -307,7 +320,7 @@ def validate_reusable_run(
             return False, "missing CSCG paper precision snapshot"
         if computational_eval_enabled(run_payload) and not layout.cscg_computational_json.exists():
             return False, "missing CSCG computational artifact"
-    if method in {"mercury", "mercury_cscg_hybrid"} and (baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg")) and not layout.comparison_summary_json.exists():
+    if method in {"mercury", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"} and (baseline_enabled(run_payload, "pocml") or baseline_enabled(run_payload, "cscg")) and not layout.comparison_summary_json.exists():
         return False, "missing comparison summary"
     return True, "ok"
 
@@ -405,9 +418,11 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
         and (bool(getattr(args, "baseline_pocml", False)) or bool(getattr(args, "baseline_all", False)))
     )
     cscg_enabled = (str(target_method) == "cscg") or (
-        str(target_method) in {"mercury", "mercury_cscg_hybrid"}
+        str(target_method) in {"mercury", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}
         and (bool(getattr(args, "baseline_cscg", False)) or bool(getattr(args, "baseline_all", False)))
     )
+    cscg_structural_transfer_level = str(getattr(args, "cscg_structural_transfer_level", "first_order_observation"))
+    cscg_structural_source = str(getattr(args, "cscg_structural_source", "oracle_maze_topology"))
     return {
         "method": str(target_method),
         "level": args.level,
@@ -518,6 +533,12 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "clones_per_obs": int(getattr(args, "cscg_clones_per_obs", 10)),
                 "clone_allocation": str(getattr(args, "cscg_clone_allocation", "uniform")),
                 "clones_per_state": int(getattr(args, "cscg_clones_per_state", 1)),
+                "clone_preset": getattr(args, "cscg_clone_preset", None),
+                "structural_preset": getattr(args, "cscg_structural_preset", None),
+                "structural_transfer_level": cscg_structural_transfer_level,
+                "structural_init_mode": str(getattr(args, "cscg_structural_init_mode", "binary")),
+                "structural_source": cscg_structural_source,
+                "clone_capacity_mode": str(getattr(args, "cscg_clone_capacity_mode", "source")),
                 "n_iter": int(getattr(args, "cscg_n_iter", 100)),
                 "pseudocount": float(getattr(args, "cscg_pseudocount", 2e-3)),
                 "term_early": bool(getattr(args, "cscg_term_early", True)),

@@ -2,9 +2,159 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 from ..application import evaluate_study, evaluate_study_snapshots, run_single, run_study
 from ..infrastructure import strtobool
+
+
+_POCML_ARGS = {
+    "pocml_valid_trajectories_only",
+    "pocml_epochs",
+    "pocml_trajectory_length",
+    "pocml_max_trajectories",
+    "pocml_state_dim",
+    "pocml_random_feature_dim",
+    "pocml_n_states",
+    "pocml_precision_capacities",
+    "pocml_alpha",
+    "pocml_lr_q",
+    "pocml_lr_v",
+    "pocml_lr_all",
+    "pocml_lr_m",
+    "pocml_reg_m",
+    "pocml_max_iter_m",
+    "pocml_eps_m",
+    "pocml_batch_size",
+    "pocml_memory_bias",
+    "pocml_use_ground_truth_node_ids",
+}
+_CSCG_ARGS = {
+    "cscg_valid_trajectories_only",
+    "cscg_clones_per_obs",
+    "cscg_clone_preset",
+    "cscg_structural_preset",
+    "cscg_clone_allocation",
+    "cscg_clones_per_state",
+    "cscg_structural_transfer_level",
+    "cscg_structural_init_mode",
+    "cscg_structural_source",
+    "cscg_clone_capacity_mode",
+    "cscg_n_iter",
+    "cscg_pseudocount",
+    "cscg_term_early",
+    "cscg_train_algorithm",
+    "cscg_training_mode",
+    "cscg_batch_size",
+    "cscg_online_lambda",
+    "cscg_eval_viterbi",
+    "cscg_seed",
+    "mercury_cscg_prior_weight",
+}
+_SENSORY_ARGS = {
+    "sensory_observation_mode",
+    "sensory_allow_self_loops",
+    "activation_threshold",
+    "topological_neighbourhood_threshold",
+    "sensory_max_neurons",
+    "sensory_weighting",
+    "winning_node_lr",
+    "topological_neighbourhood_lr",
+    "sensory_action_lr",
+    "global_context_lr",
+    "sensory_max_age",
+    "sensory_gaussian_shape",
+}
+_ACTION_MAP_ARGS = {
+    "am_n_codebook",
+    "am_lr",
+    "am_sigma",
+    "am_key",
+    "am_identity_for_one_hot",
+}
+_MERCURY_DATASET_ARGS = {
+    "mercury_valid_trajectories_only",
+    "mercury_split_sensory_raw_latent_valid",
+    "mercury_input_mode",
+}
+_MERCURY_LATENT_ARGS = {
+    "memory_length",
+    "latent_allow_self_loops",
+    "latent_max_neurons",
+    "latent_action_lr",
+    "latent_gaussian_shape",
+    "latent_max_age",
+    "ambiguity_threshold",
+    "ambiguity_decay",
+    "ambiguity_counter_mode",
+    "trace_decay",
+    "lambda_trace",
+    "weight_memory",
+    "weight_undirected",
+    "weight_base",
+    "weight_action",
+    "memory_replay",
+    "memory_disambiguation",
+}
+_BASELINE_ARGS = {"baseline_pocml", "baseline_cscg", "baseline_all"}
+_METHOD_SPECIFIC_ARGS = (
+    _BASELINE_ARGS
+    | _POCML_ARGS
+    | _CSCG_ARGS
+    | _MERCURY_DATASET_ARGS
+    | _MERCURY_LATENT_ARGS
+    | _SENSORY_ARGS
+    | _ACTION_MAP_ARGS
+)
+_APPLICABLE_ARGS_BY_METHOD = {
+    "mercury": _BASELINE_ARGS | _MERCURY_DATASET_ARGS | _MERCURY_LATENT_ARGS | _SENSORY_ARGS | _ACTION_MAP_ARGS | _POCML_ARGS | _CSCG_ARGS,
+    "mercury_cscg_hybrid": _MERCURY_DATASET_ARGS | _MERCURY_LATENT_ARGS | _SENSORY_ARGS | _ACTION_MAP_ARGS | _CSCG_ARGS,
+    "mercury_cscg_hybrid_mercury": _MERCURY_DATASET_ARGS | _MERCURY_LATENT_ARGS | _SENSORY_ARGS | _ACTION_MAP_ARGS,
+    "tmgwr_cscg_hybrid": _SENSORY_ARGS | _ACTION_MAP_ARGS | _CSCG_ARGS,
+    "sensory": _SENSORY_ARGS | _ACTION_MAP_ARGS,
+    "pocml": _POCML_ARGS,
+    "cscg": _CSCG_ARGS,
+}
+
+
+def _raw_cli_method(argv: list[str]) -> str | None:
+    for index, token in enumerate(argv[1:], start=1):
+        if token == "--method" and index + 1 < len(argv):
+            return argv[index + 1]
+        if token.startswith("--method="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _explicit_cli_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    explicit: set[str] = set()
+    for token in argv[1:]:
+        if not token.startswith("--"):
+            continue
+        option = token.split("=", 1)[0]
+        action = parser._option_string_actions.get(option)  # noqa: SLF001 - argparse exposes no public lookup.
+        if action is not None:
+            explicit.add(action.dest)
+    return explicit
+
+
+def _validate_method_specific_cli(parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str]) -> None:
+    if args.study or args.evaluate_study or args.evaluate_study_snapshots:
+        return
+    method = str(args.method or "mercury")
+    explicit = _explicit_cli_dests(parser, argv)
+    invalid = sorted(explicit & (_METHOD_SPECIFIC_ARGS - _APPLICABLE_ARGS_BY_METHOD.get(method, set())))
+    if invalid:
+        flag_lookup = {action.dest: option for option, action in parser._option_string_actions.items() if option.startswith("--")}  # noqa: SLF001
+        flags = ", ".join(flag_lookup.get(dest, f"--{dest}") for dest in invalid)
+        parser.error(f"arguments not applicable to --method {method}: {flags}")
+
+
+def _suppress_inapplicable_help(parser: argparse.ArgumentParser, method: str) -> None:
+    invalid = _METHOD_SPECIFIC_ARGS - _APPLICABLE_ARGS_BY_METHOD.get(method, set())
+    for action in parser._actions:  # noqa: SLF001 - argparse has no public action iterator.
+        if action.dest in invalid:
+            action.help = argparse.SUPPRESS
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -15,7 +165,7 @@ def parse_arguments() -> argparse.Namespace:
         "--method",
         type=str,
         default=None,
-        choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "mercury_cscg_hybrid_mercury"],
+        choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid", "mercury_cscg_hybrid_mercury"],
     )
     parser.add_argument("--max_workers", type=int, default=1, help="Study mode: number of concurrent runs")
     parser.add_argument("--no_parallel", action="store_true", default=False)
@@ -54,15 +204,21 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--pocml_use_ground_truth_node_ids", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--baseline_cscg", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--cscg_clones_per_obs", type=int, default=10)
+    parser.add_argument("--cscg_clone_preset", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cscg_structural_preset", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--cscg_clone_allocation", type=str, default="uniform", choices=["uniform", "ground_truth", "oracle_ground_truth"])
     parser.add_argument("--cscg_clones_per_state", type=int, default=1)
+    parser.add_argument("--cscg_structural_transfer_level", type=str, default="first_order_observation", choices=["clone_state", "first_order_observation"])
+    parser.add_argument("--cscg_structural_init_mode", type=str, default="binary", choices=["none", "binary", "count"])
+    parser.add_argument("--cscg_structural_source", type=str, default="oracle_maze_topology", choices=["none", "oracle_maze_topology", "oracle_empirical_ground_truth", "source_graph"])
+    parser.add_argument("--cscg_clone_capacity_mode", type=str, default="source", choices=["source", "ground_truth", "fixed"])
     parser.add_argument("--cscg_n_iter", type=int, default=1000)
     parser.add_argument("--cscg_pseudocount", type=float, default=2e-3)
     parser.add_argument("--cscg_term_early", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--cscg_train_algorithm", type=str, default="em", choices=["em", "viterbi"])
-    parser.add_argument("--cscg_training_mode", type=str, default="full", choices=["full", "online_em"])
-    parser.add_argument("--cscg_batch_size", type=int, default=1024)
-    parser.add_argument("--cscg_online_lambda", type=float, default=1.0)
+    parser.add_argument("--cscg_training_mode", type=str, default="online_em", choices=["full", "online_em"])
+    parser.add_argument("--cscg_batch_size", type=int, default=40)
+    parser.add_argument("--cscg_online_lambda", type=float, default=0.9999)
     parser.add_argument("--cscg_eval_viterbi", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--cscg_seed", type=int, default=None)
     parser.add_argument("--mercury_cscg_prior_weight", type=float, default=1.0)
@@ -80,16 +236,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--valid_trajectories_only", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--mercury_valid_trajectories_only", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--mercury_split_sensory_raw_latent_valid", nargs="?", const=True, default=False, type=strtobool)
-    parser.add_argument("--mercury_input_mode", type=str, default="pretrained_raw", choices=["pretrained_raw", "pretrained_cscg_one_hot", "direct_cscg_one_hot"])
-    parser.add_argument("--sensory_observation_mode", type=str, default="raw", choices=["raw", "cscg_one_hot"])
+    parser.add_argument("--mercury_input_mode", type=str, default="direct_cscg_one_hot", choices=["pretrained_raw", "pretrained_cscg_one_hot", "direct_cscg_one_hot"])
+    parser.add_argument("--sensory_observation_mode", type=str, default="cscg_one_hot", choices=["raw", "cscg_one_hot"])
     parser.add_argument("--pocml_valid_trajectories_only", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--cscg_valid_trajectories_only", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--no_reuse_existing_dataset", action="store_true")
-    parser.add_argument("--sensor", type=str, default="cartesian", choices=["cartesian", "cardinal distance"])
-    parser.add_argument("--sensor_range", type=int, default=None)
+    parser.add_argument("--sensor", type=str, default="cardinal distance", choices=["cartesian", "cardinal distance"])
+    parser.add_argument("--sensor_range", type=int, default=1)
     parser.add_argument("--window_length", type=int, default=100)
     parser.add_argument("--paper_precision", nargs="?", const=True, default=False, type=strtobool)
-    parser.add_argument("--paper_precision_mode", type=str, default="off", choices=["off", "final", "per_iteration"])
+    parser.add_argument("--paper_precision_mode", type=str, default="per_iteration", choices=["off", "final", "per_iteration"])
     parser.add_argument("--paper_precision_schedule", type=str, default="log", choices=["log", "linear"])
     parser.add_argument("--paper_precision_eval_interval", type=int, default=1)
     parser.add_argument("--paper_precision_eval_checkpoints", type=int, nargs="+", default=None)
@@ -128,7 +284,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--computational_eval", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--computational_eval_profile", type=str, default="full", choices=["full"])
     parser.add_argument("--memory_length", type=int, default=10)
-    parser.add_argument("--sensory_allow_self_loops", nargs="?", const=True, default=False, type=strtobool)
+    parser.add_argument("--sensory_allow_self_loops", nargs="?", const=True,
+                        default=True, type=strtobool)
     parser.add_argument("--activation_threshold", type=float, default=0.95)
     parser.add_argument("--topological_neighbourhood_threshold", type=float, default=0.6)
     parser.add_argument("--sensory_max_neurons", type=int, default=50)
@@ -143,16 +300,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--latent_max_neurons", type=int, default=300)
     parser.add_argument("--latent_action_lr", type=float, default=0.1)
     parser.add_argument("--latent_gaussian_shape", type=int, default=2)
-    parser.add_argument("--latent_max_age", type=int, default=18)
-    parser.add_argument("--ambiguity_threshold", type=int, default=10)
+    parser.add_argument("--latent_max_age", type=int, default=20)
+    parser.add_argument("--ambiguity_threshold", type=int, default=40)
     parser.add_argument("--ambiguity_decay", type=float, default=0.99)
     parser.add_argument("--ambiguity_counter_mode", type=str, default="action", choices=["action", "node"])
-    parser.add_argument("--trace_decay", type=float, default=0.99)
-    parser.add_argument("--lambda_trace", type=float, default=0.05)
-    parser.add_argument("--weight_memory", type=float, default=0.6)
-    parser.add_argument("--weight_undirected", type=float, default=0.2)
-    parser.add_argument("--weight_base", type=float, default=0.1)
-    parser.add_argument("--weight_action", type=float, default=0.05)
+    parser.add_argument("--trace_decay", type=float, default=1.0)
+    parser.add_argument("--lambda_trace", type=float, default=0.00)
+    parser.add_argument("--weight_memory", type=float, default=1.0)
+    parser.add_argument("--weight_undirected", type=float, default=0.0)
+    parser.add_argument("--weight_base", type=float, default=0.0)
+    parser.add_argument("--weight_action", type=float, default=0.0)
     parser.add_argument("--memory_replay", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--memory_disambiguation", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--am_n_codebook", type=int, default=4)
@@ -167,7 +324,13 @@ def parse_arguments() -> argparse.Namespace:
         default=True,
         type=strtobool,
     )
-    return parser.parse_args()
+    if any(token in {"-h", "--help"} for token in sys.argv[1:]):
+        method_for_help = _raw_cli_method(sys.argv)
+        if method_for_help is not None:
+            _suppress_inapplicable_help(parser, method_for_help)
+    args = parser.parse_args()
+    _validate_method_specific_cli(parser, args, sys.argv)
+    return args
 
 
 

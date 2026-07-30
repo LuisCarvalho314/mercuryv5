@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from mercury_runs.application.study_service import (
+    apply_cscg_structural_preset,
     build_study_run_records,
     resolve_run_configurations,
     write_incomplete_report,
@@ -180,7 +181,7 @@ def test_resolve_run_configurations_expands_cscg_clone_preset(tmp_path) -> None:
     }
 
 
-def test_resolve_run_configurations_does_not_expand_clone_preset_for_hybrid(tmp_path) -> None:
+def test_resolve_run_configurations_expands_clone_preset_for_hybrid(tmp_path) -> None:
     config_path = tmp_path / "hybrid_clone_preset.json"
     config_path.write_text(
         json.dumps(
@@ -223,11 +224,132 @@ def test_resolve_run_configurations_does_not_expand_clone_preset_for_hybrid(tmp_
         StudyDefaults(study_root="results/current/studies", study_name="hybrid_clone_preset"),
     )
 
-    assert len(runs) == 1
-    assert "cscg_clone_preset" not in runs[0]
-    assert all("cscg_clone_allocation" not in run for run in runs)
-    assert all("cscg_clones_per_state" not in run for run in runs)
-    assert all("cscg_clones_per_obs" not in run for run in runs)
+    assert len(runs) == 2
+    by_preset = {run["cscg_clone_preset"]: run for run in runs}
+    assert by_preset["ground_truth_state_2"]["cscg_clone_allocation"] == "ground_truth"
+    assert by_preset["ground_truth_state_2"]["cscg_clones_per_state"] == 2
+    assert by_preset["uniform_obs_4"]["cscg_clone_allocation"] == "uniform"
+    assert by_preset["uniform_obs_4"]["cscg_clones_per_obs"] == 4
+
+
+def test_apply_cscg_structural_preset_expands_default_variants() -> None:
+    vanilla = apply_cscg_structural_preset({"cscg_structural_preset": "vanilla_cscg"})
+    assert vanilla["cscg_structural_init_mode"] == "none"
+    assert vanilla["cscg_structural_source"] == "none"
+    assert vanilla["cscg_clone_capacity_mode"] == "fixed"
+    assert vanilla["cscg_clone_allocation"] == "uniform"
+
+    capacity = apply_cscg_structural_preset({"cscg_structural_preset": "oracle_capacity"})
+    assert capacity["cscg_structural_init_mode"] == "none"
+    assert capacity["cscg_clone_capacity_mode"] == "ground_truth"
+    assert capacity["cscg_clone_allocation"] == "ground_truth"
+
+    structural = apply_cscg_structural_preset({"cscg_structural_preset": "oracle_capacity_structural"})
+    assert structural["cscg_structural_transfer_level"] == "clone_state"
+    assert structural["cscg_structural_init_mode"] == "binary"
+    assert structural["cscg_structural_source"] == "oracle_maze_topology"
+
+    first_order = apply_cscg_structural_preset({"cscg_structural_preset": "oracle_capacity_first_order"})
+    assert first_order["cscg_structural_transfer_level"] == "first_order_observation"
+    assert first_order["cscg_structural_init_mode"] == "binary"
+    assert first_order["cscg_structural_source"] == "oracle_maze_topology"
+
+
+def test_resolve_run_configurations_expands_structural_preset_for_hybrids(tmp_path) -> None:
+    config_path = tmp_path / "hybrid_structural_preset.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "environment": {
+                    "level": [16],
+                    "sensor": ["cardinal distance"],
+                    "sensor_range": [1],
+                    "seed": [0],
+                    "rand_prob": [0.3],
+                    "window_length": [100],
+                },
+                "evaluation": {},
+                "methods": {
+                    "mercury": {"enabled": False, "grid": {}},
+                    "pocml": {"enabled": False, "grid": {}},
+                    "cscg": {"enabled": False, "grid": {}},
+                    "mercury_cscg_hybrid": {
+                        "enabled": True,
+                        "grid": {
+                            "memory_length": [10],
+                            "activation_threshold": [0.95],
+                            "ambiguity_threshold": [30],
+                            "am_lr": [0.5],
+                            "am_key": [0],
+                            "weight_preset": ["only_memory"],
+                            "memory_replay": [True],
+                            "memory_disambiguation": [True],
+                            "cscg_structural_preset": ["source_graph_clone_state"],
+                        },
+                    },
+                    "tmgwr_cscg_hybrid": {
+                        "enabled": True,
+                        "grid": {
+                            "memory_length": [10],
+                            "activation_threshold": [0.95],
+                            "ambiguity_threshold": [30],
+                            "am_lr": [0.5],
+                            "am_key": [0],
+                            "memory_replay": [True],
+                            "memory_disambiguation": [True],
+                            "cscg_structural_preset": ["source_graph_first_order"],
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="hybrid_structural_preset"),
+    )
+
+    by_method = {run["method"]: run for run in runs}
+    mercury_hybrid = by_method["mercury_cscg_hybrid"]
+    assert mercury_hybrid["cscg_structural_preset"] == "source_graph_clone_state"
+    assert mercury_hybrid["cscg_structural_source"] == "source_graph"
+    assert mercury_hybrid["cscg_structural_transfer_level"] == "clone_state"
+    assert mercury_hybrid["cscg_clone_capacity_mode"] == "source"
+
+    tmgwr_hybrid = by_method["tmgwr_cscg_hybrid"]
+    assert tmgwr_hybrid["cscg_structural_preset"] == "source_graph_first_order"
+    assert tmgwr_hybrid["cscg_structural_source"] == "source_graph"
+    assert tmgwr_hybrid["cscg_structural_transfer_level"] == "first_order_observation"
+    assert tmgwr_hybrid["cscg_clone_capacity_mode"] == "source"
+
+
+def test_default_study_json_schedules_standalone_default_matrix() -> None:
+    config_path = ROOT / "configs" / "studies" / "study.json"
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root="results/current/studies", study_name="default_matrix"),
+    )
+
+    assert len(runs) == 6
+    assert [run["method"] for run in runs].count("cscg") == 4
+    assert [run["method"] for run in runs].count("mercury_cscg_hybrid") == 1
+    assert [run["method"] for run in runs].count("tmgwr_cscg_hybrid") == 1
+    assert all(run["baseline_pocml"] is False for run in runs)
+    assert all(run["baseline_cscg"] is False for run in runs)
+    assert all(run["baseline_all"] is False for run in runs)
+    assert {
+        run["cscg_structural_preset"]
+        for run in runs
+    } == {
+        "vanilla_cscg",
+        "oracle_capacity",
+        "oracle_capacity_structural",
+        "oracle_capacity_first_order",
+        "source_graph_clone_state",
+        "source_graph_first_order",
+    }
 
 
 def test_structure_metrics_epsilons_do_not_expand_study_grid(tmp_path) -> None:
@@ -329,6 +451,24 @@ def test_build_study_run_records_prunes_irrelevant_method_args(tmp_path, monkeyp
     assert "mercury" in command
     assert "--pocml_epochs" not in command
     assert "--cscg_n_iter" not in command
+
+
+def test_default_matrix_smoke_config_is_lean_and_expands(tmp_path) -> None:
+    config_path = ROOT / "configs" / "studies" / "default_matrix_smoke_3_seed.json"
+
+    runs = resolve_run_configurations(
+        argparse.Namespace(study_config=str(config_path)),
+        StudyDefaults(study_root=str(tmp_path), study_name="smoke"),
+    )
+
+    assert len(runs) == 72
+    assert sorted({run["seed"] for run in runs}) == [0, 1, 2]
+    assert sorted({run["cscg_batch_size"] for run in runs}) == [1, 10, 40, 100]
+    tmgwr = [run for run in runs if run["method"] == "tmgwr_cscg_hybrid"]
+    assert len(tmgwr) == 12
+    assert all("memory_length" not in run for run in tmgwr)
+    assert all("latent_max_neurons" not in run for run in tmgwr)
+    assert {run["cscg_structural_preset"] for run in tmgwr} == {"source_graph_first_order"}
 
 
 def test_render_study_dashboard_groups_active_first_and_collapses_completed(tmp_path, monkeypatch) -> None:

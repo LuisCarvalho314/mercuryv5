@@ -18,7 +18,7 @@ from .storage import load_run_config_model, load_run_status_model, read_native_m
 
 def _target_method(run_payload: Dict[str, Any]) -> str:
     method = str(run_payload.get("method") or "").strip().lower()
-    if method in {"mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"}:
+    if method in {"mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
         return method
     baselines = run_payload.get("baselines") or {}
     if bool((baselines.get("pocml") or {}).get("enabled", False)) and not bool((baselines.get("cscg") or {}).get("enabled", False)):

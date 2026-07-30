@@ -26,6 +26,14 @@ from .prepare import (
     to_indices,
 )
 from .train import objective_scores, run_cscg_online_em, train_cscg_model, viterbi_refined_eval_model_npz
+from .structural_init import (
+    apply_observation_tensor_to_clone_counts,
+    clone_edges_from_oracle_topology,
+    fixed_or_ground_truth_capacity,
+    normalize_structural_options,
+    observation_edges_from_empirical_ground_truth,
+    observation_edges_from_oracle_topology,
+)
 from ...infrastructure.paper_precision import resolve_eval_checkpoints
 from ...infrastructure.paper_precision_snapshots import write_cscg_paper_precision_snapshot
 from ...infrastructure.runtime import progress_enabled
@@ -75,6 +83,112 @@ def _resolve_cscg_clone_allocation(
     return n_clones
 
 
+def _resolve_cscg_capacity(
+    *,
+    config: CSCGConfig,
+    obs_idx: np.ndarray,
+    ground_truth_states: np.ndarray | None,
+    n_obs: int,
+) -> np.ndarray:
+    capacity_mode = str(config.clone_capacity_mode).strip().lower()
+    if capacity_mode in {"fixed", "ground_truth"}:
+        return fixed_or_ground_truth_capacity(
+            mode=capacity_mode,
+            clone_allocation=str(config.clone_allocation),
+            clones_per_obs=int(config.clones_per_obs),
+            clones_per_state=int(config.clones_per_state),
+            n_obs=int(n_obs),
+            obs_idx=obs_idx,
+            ground_truth_states=ground_truth_states,
+        )
+    return _resolve_cscg_clone_allocation(
+        config=config,
+        obs_idx=obs_idx,
+        ground_truth_states=ground_truth_states,
+        n_obs=n_obs,
+    )
+
+
+def _initialize_cscg_structure(
+    *,
+    config: CSCGConfig,
+    model: Any,
+    n_clones: np.ndarray,
+    obs_idx: np.ndarray,
+    act_idx: np.ndarray,
+    ground_truth_states: np.ndarray | None,
+    n_obs: int,
+    n_actions: int,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    transfer_level, init_mode, structural_source, capacity_mode = normalize_structural_options(
+        transfer_level=config.structural_transfer_level,
+        init_mode=config.structural_init_mode,
+        structural_source=config.structural_source,
+        capacity_mode=config.clone_capacity_mode,
+    )
+    summary = {
+        "source_method": None,
+        "source_graph_path": None,
+        "transfer_level": transfer_level,
+        "init_mode": init_mode,
+        "structural_source": structural_source,
+        "capacity_mode": capacity_mode,
+        "clone_counts": [int(value) for value in np.asarray(n_clones, dtype=np.int64).tolist()],
+        "oracle_source": structural_source if structural_source.startswith("oracle_") else None,
+    }
+    if init_mode == "none" or structural_source == "none":
+        return None, summary
+    if structural_source.startswith("oracle_") and ground_truth_states is None:
+        raise ValueError("Oracle CSCG structural initialization requires aligned ground-truth states.")
+    if transfer_level == "clone_state":
+        if structural_source != "oracle_maze_topology":
+            raise ValueError("Pure CSCG clone/state transfer currently supports oracle_maze_topology.")
+        counts, source_n_clones = clone_edges_from_oracle_topology(
+            level=int(config.level),
+            obs_idx=obs_idx,
+            action_idx=act_idx,
+            ground_truth_states=np.asarray(ground_truth_states),
+            n_obs=int(n_obs),
+            n_actions=int(n_actions),
+            clones_per_state=int(config.clones_per_state),
+            mode=init_mode,
+        )
+        if counts.shape != model.C.shape:
+            raise ValueError(f"Structural counts shape {counts.shape} does not match model.C shape {model.C.shape}.")
+        summary["clone_counts"] = [int(value) for value in source_n_clones.tolist()]
+    else:
+        if structural_source == "oracle_maze_topology":
+            obs_tensor = observation_edges_from_oracle_topology(
+                level=int(config.level),
+                obs_idx=obs_idx,
+                action_idx=act_idx,
+                ground_truth_states=np.asarray(ground_truth_states),
+                n_obs=int(n_obs),
+                n_actions=int(n_actions),
+                mode=init_mode,
+            )
+        elif structural_source == "oracle_empirical_ground_truth":
+            obs_tensor = observation_edges_from_empirical_ground_truth(
+                obs_idx=obs_idx,
+                action_idx=act_idx,
+                ground_truth_states=np.asarray(ground_truth_states),
+                n_obs=int(n_obs),
+                n_actions=int(n_actions),
+                mode=init_mode,
+            )
+        else:
+            obs_tensor = np.zeros((int(n_actions), int(n_obs), int(n_obs)), dtype=np.float32)
+        counts = apply_observation_tensor_to_clone_counts(observation_tensor=obs_tensor, n_clones=n_clones)
+        if counts.shape != model.C.shape:
+            raise ValueError(f"Structural counts shape {counts.shape} does not match model.C shape {model.C.shape}.")
+    if not np.any(counts):
+        summary["empty"] = True
+        return None, summary
+    model.C = counts.astype(model.dtype, copy=False)
+    model.update_T()
+    return counts.astype(np.float32, copy=True), summary
+
+
 def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., None]] = None):
     show_progress = progress_enabled(default=True)
     if progress_callback is not None:
@@ -98,6 +212,8 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         "num_batches": None,
         "final_viterbi_refinement": (False if training_mode == "online_em" else None),
     }
+    initial_counts: np.ndarray | None = None
+    structural_summary: dict[str, Any] = {}
 
     if training_mode == "online_em":
         dataset_path, dataset_metadata = resolve_dataset_path_and_metadata(
@@ -120,7 +236,13 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
             raise ValueError("CSCG online EM requires at least one observation and one action.")
         allocation_ground_truth = None
         allocation_obs_idx = None
-        if str(config.clone_allocation).strip().lower() in {"ground_truth", "oracle_ground_truth"}:
+        allocation_act_idx = None
+        needs_ground_truth = (
+            str(config.clone_allocation).strip().lower() in {"ground_truth", "oracle_ground_truth"}
+            or str(config.clone_capacity_mode).strip().lower() == "ground_truth"
+            or str(config.structural_source).strip().lower().startswith("oracle_")
+        )
+        if needs_ground_truth:
             allocation_observations, allocation_actions, allocation_collisions, _, _ = load_dataset_arrays(
                 datasets_root=config.datasets_root,
                 level=config.level,
@@ -130,7 +252,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 dataset_run_id=config.dataset_run_id,
             )
             allocation_ground_truth_all = load_ground_truth_states(config.ground_truth_states_parquet)
-            allocation_observations, _, allocation_ground_truth, _ = filter_valid_cscg_rows(
+            allocation_observations, allocation_actions, allocation_ground_truth, _ = filter_valid_cscg_rows(
                 observations=allocation_observations,
                 actions=allocation_actions,
                 collisions=allocation_collisions,
@@ -138,9 +260,11 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 valid_trajectories_only=bool(config.valid_trajectories_only),
             )
             allocation_obs_idx = map_to_indices(obs_values, allocation_observations)
-        n_clones = _resolve_cscg_clone_allocation(
+            allocation_act_idx = map_to_indices(action_values, allocation_actions)
+        allocation_obs = allocation_obs_idx if allocation_obs_idx is not None else np.arange(n_obs, dtype=np.int64)
+        n_clones = _resolve_cscg_capacity(
             config=config,
-            obs_idx=(allocation_obs_idx if allocation_obs_idx is not None else np.arange(n_obs, dtype=np.int64)),
+            obs_idx=allocation_obs,
             ground_truth_states=allocation_ground_truth,
             n_obs=n_obs,
         )
@@ -153,6 +277,16 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
             pseudocount=float(config.pseudocount),
             dtype=np.float32,
             seed=int(config.seed),
+        )
+        initial_counts, structural_summary = _initialize_cscg_structure(
+            config=config,
+            model=model,
+            n_clones=n_clones,
+            obs_idx=allocation_obs,
+            act_idx=(allocation_act_idx if allocation_act_idx is not None else np.zeros_like(allocation_obs, dtype=np.int64)),
+            ground_truth_states=allocation_ground_truth,
+            n_obs=n_obs,
+            n_actions=n_actions,
         )
     else:
         observations, actions, collisions, dataset_metadata, dataset_parquet_name = load_dataset_arrays(
@@ -176,7 +310,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
         if obs_idx_seed.shape[0] < 3 or act_idx_seed.shape[0] < 3:
             raise ValueError("CSCG baseline could not align enough samples between dataset and ground truth.")
         n_obs = int(obs_idx_seed.max()) + 1
-        n_clones = _resolve_cscg_clone_allocation(
+        n_clones = _resolve_cscg_capacity(
             config=config,
             obs_idx=obs_idx_seed,
             ground_truth_states=training_ground_truth_bmu,
@@ -189,6 +323,16 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
             pseudocount=float(config.pseudocount),
             dtype=np.float32,
             seed=int(config.seed),
+        )
+        initial_counts, structural_summary = _initialize_cscg_structure(
+            config=config,
+            model=model,
+            n_clones=n_clones,
+            obs_idx=obs_idx_seed,
+            act_idx=act_idx_seed,
+            ground_truth_states=training_ground_truth_bmu,
+            n_obs=n_obs,
+            n_actions=int(action_values.shape[0]),
         )
 
     paper_precision_history: list[dict[str, Any]] = []
@@ -286,6 +430,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 max_batches=int(config.n_iter),
                 term_early=bool(config.term_early),
                 max_steps=int(config.n_iter),
+                initial_counts=initial_counts,
                 repeat_batches=True,
                 iteration_callback=training_callback,
             )
@@ -366,6 +511,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     act_idx = act_idx[:length]
     ground_truth_bmu = ground_truth_bmu[:length]
     valid_transition_stats = dict(training_stats if training_mode == "online_em" else valid_transition_stats)
+    online_training_summary["structural_initialization"] = structural_summary
 
     if training_mode == "online_em" and algo == "viterbi":
         model.pseudocount = 0.0

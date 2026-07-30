@@ -43,6 +43,10 @@ class ArtifactLayout(BaseModel):
     mercury_cscg_hybrid_paper_precision_json: Path
     mercury_cscg_hybrid_computational_json: Path
     mercury_cscg_hybrid_model_npz: Path
+    tmgwr_cscg_hybrid_states_parquet: Path
+    tmgwr_cscg_hybrid_paper_precision_json: Path
+    tmgwr_cscg_hybrid_computational_json: Path
+    tmgwr_cscg_hybrid_model_npz: Path
     ground_truth_states_parquet: Path
     internal_graphs_comparison_png: Path
     comparison_summary_json: Path
@@ -124,6 +128,7 @@ class StudyMethodsConfig(BaseModel):
     pocml: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
     cscg: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
     mercury_cscg_hybrid: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
+    tmgwr_cscg_hybrid: StudyMethodConfig = Field(default_factory=StudyMethodConfig)
 
 
 class HierarchicalStudyConfig(BaseModel):
@@ -137,7 +142,7 @@ class HierarchicalStudyConfig(BaseModel):
 class StudyGridConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    method: Literal["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid"] = "mercury"
+    method: Literal["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"] = "mercury"
     level: int = Field(ge=0)
     sensor: str = Field(min_length=1)
     sensor_range: Optional[int] = Field(default=None, ge=0)

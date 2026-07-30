@@ -233,6 +233,12 @@ def _computational_total_paths(method: str, layout: ArtifactLayout) -> list[Path
             layout.mercury_cscg_hybrid_model_npz,
             layout.mercury_cscg_hybrid_paper_precision_json,
         ]
+    if method == "tmgwr_cscg_hybrid":
+        return [
+            layout.tmgwr_cscg_hybrid_states_parquet,
+            layout.tmgwr_cscg_hybrid_model_npz,
+            layout.tmgwr_cscg_hybrid_paper_precision_json,
+        ]
     if method == "sensory":
         return [
             layout.sensory_states_parquet,
@@ -254,6 +260,8 @@ def _computational_artifact_path(method: str, layout: ArtifactLayout) -> Path:
         return layout.sensory_computational_json
     if method == "mercury_cscg_hybrid":
         return layout.mercury_cscg_hybrid_computational_json
+    if method == "tmgwr_cscg_hybrid":
+        return layout.tmgwr_cscg_hybrid_computational_json
     raise ValueError(f"Unsupported method for computational artifact: {method}")
 
 
@@ -266,7 +274,7 @@ def _track_for_stage(method: str, stage: str) -> str:
         return "eval" if stage == "native_eval" else "train"
     if method == "pocml":
         return "train" if stage == "train" else "eval"
-    if method in {"cscg", "mercury_cscg_hybrid"}:
+    if method in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
         return "train" if stage.startswith("train_") else "eval"
     if method == "sensory":
         return "eval" if stage == "native_eval" else "train"
@@ -278,7 +286,7 @@ def _resolve_eval_steps(method: str, native_metrics: Dict[str, Any]) -> int | No
         return int(((native_metrics.get("latent") or {}).get("steps"))) if ((native_metrics.get("latent") or {}).get("steps")) is not None else None
     if method == "pocml":
         return int(native_metrics.get("next_obs_steps")) if native_metrics.get("next_obs_steps") is not None else None
-    if method in {"cscg", "mercury_cscg_hybrid"}:
+    if method in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
         return int(native_metrics.get("steps")) if native_metrics.get("steps") is not None else None
     if method == "sensory":
         return int(native_metrics.get("steps")) if native_metrics.get("steps") is not None else None
@@ -311,8 +319,8 @@ def _write_computational_metrics(
         "n_train_steps_measured": train_steps,
         "n_eval_steps_measured": eval_steps,
     }
-    include_jit_note = method in {"cscg", "mercury_cscg_hybrid"}
-    if method in {"cscg", "mercury_cscg_hybrid"}:
+    include_jit_note = method in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}
+    if method in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
         raw_metrics["jit_warmup_wall_time_seconds"] = float(timing.get("jit_warmup", 0.0))
         raw_metrics["steady_state_train_wall_time_seconds"] = float(timing.get("train", 0.0))
         raw_metrics["steady_state_eval_wall_time_seconds"] = float(timing.get("eval", 0.0))
@@ -570,6 +578,7 @@ def _run_mercury_cscg_hybrid_stage(
     dataset_run_id: str | None,
     reuse_existing_run: bool,
     reuse_existing_dataset: bool,
+    method_name: str = "mercury_cscg_hybrid",
 ) -> Path:
     timer = PhaseTimer()
     steady_state_started = False
@@ -578,7 +587,7 @@ def _run_mercury_cscg_hybrid_stage(
         write_progress(
             run_root=run_root,
             run_id=run_id,
-            method="mercury_cscg_hybrid",
+            method=method_name,
             track="computational",
             stage="computational_start",
             current=0,
@@ -599,8 +608,8 @@ def _run_mercury_cscg_hybrid_stage(
         write_progress(
             run_root=run_root,
             run_id=run_id,
-            method="mercury_cscg_hybrid",
-            track=_track_for_stage("mercury_cscg_hybrid", stage),
+            method=method_name,
+            track=_track_for_stage(method_name, stage),
             stage=stage,
             current=current,
             total=total,
@@ -611,7 +620,7 @@ def _run_mercury_cscg_hybrid_stage(
     states_path = run_mercury_cscg_hybrid(
         MercuryCSCGHybridConfig(
             datasets_root=Path(args.datasets_root),
-            output_root=run_root / "bundles" / "mercury_cscg_hybrid",
+            output_root=run_root / "bundles" / method_name,
             run_id=run_id,
             level=args.level,
             sensor=args.sensor,
@@ -642,6 +651,12 @@ def _run_mercury_cscg_hybrid_stage(
             batch_size=args.cscg_batch_size,
             online_lambda=args.cscg_online_lambda,
             mercury_prior_weight=float(getattr(args, "mercury_cscg_prior_weight", 1.0)),
+            method_name=method_name,
+            source_method=("tmgwr" if method_name == "tmgwr_cscg_hybrid" else "mercury"),
+            structural_transfer_level=str(getattr(args, "cscg_structural_transfer_level", "first_order_observation")),
+            structural_init_mode=str(getattr(args, "cscg_structural_init_mode", "binary")),
+            structural_source=str(getattr(args, "cscg_structural_source", "source_graph")),
+            clone_capacity_mode=str(getattr(args, "cscg_clone_capacity_mode", "source")),
             eval_viterbi=bool(getattr(args, "cscg_eval_viterbi", False)),
             paper_precision_enabled=bool((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("enabled", False)),
             paper_precision_mode=str((run_payload.get("evaluation") or {}).get("paper_precision", {}).get("mode", "off")),
@@ -663,16 +678,18 @@ def _run_mercury_cscg_hybrid_stage(
         ),
         progress_callback=_progress_callback,
     )
-    run_status.subsystems["mercury_cscg_hybrid"].status = "completed"
-    run_status.subsystems["mercury_cscg_hybrid"].artifacts = {
+    pp_artifact = layout.mercury_cscg_hybrid_paper_precision_json if method_name == "mercury_cscg_hybrid" else layout.tmgwr_cscg_hybrid_paper_precision_json
+    model_artifact = layout.mercury_cscg_hybrid_model_npz if method_name == "mercury_cscg_hybrid" else layout.tmgwr_cscg_hybrid_model_npz
+    run_status.subsystems[method_name].status = "completed"
+    run_status.subsystems[method_name].artifacts = {
         "states_parquet": str(states_path),
-        "paper_precision_json": str(layout.mercury_cscg_hybrid_paper_precision_json),
-        "paper_precision_snapshots_dir": str(run_root / "snapshots" / "mercury_cscg_hybrid" / "paper_precision"),
-        "model_npz": str(layout.mercury_cscg_hybrid_model_npz),
+        "paper_precision_json": str(pp_artifact),
+        "paper_precision_snapshots_dir": str(run_root / "snapshots" / method_name / "paper_precision"),
+        "model_npz": str(model_artifact),
     }
-    run_status.subsystems["mercury_cscg_hybrid"].native_metrics = read_native_metrics_from_bundle(Path(states_path), "cscg_eval")
+    run_status.subsystems[method_name].native_metrics = read_native_metrics_from_bundle(Path(states_path), "cscg_eval")
     _write_computational_metrics(
-        method="mercury_cscg_hybrid",
+        method=method_name,
         layout=layout,
         run_payload=run_payload,
         run_status=run_status,
@@ -682,13 +699,13 @@ def _run_mercury_cscg_hybrid_stage(
             if str(args.cscg_training_mode).strip().lower() == "online_em"
             else int(args.num_steps) + int(args.cscg_n_iter)
         ),
-        native_metrics=run_status.subsystems["mercury_cscg_hybrid"].native_metrics,
+        native_metrics=run_status.subsystems[method_name].native_metrics,
     )
     if computational_eval_enabled(run_payload):
         write_progress(
             run_root=run_root,
             run_id=run_id,
-            method="mercury_cscg_hybrid",
+            method=method_name,
             track="computational",
             stage="computational_end",
             current=1,
@@ -881,6 +898,10 @@ def _run_baseline_stages(
                 clones_per_obs=args.cscg_clones_per_obs,
                 clone_allocation=str(getattr(args, "cscg_clone_allocation", "uniform")),
                 clones_per_state=int(getattr(args, "cscg_clones_per_state", 1)),
+                structural_transfer_level=str(getattr(args, "cscg_structural_transfer_level", "first_order_observation")),
+                structural_init_mode=str(getattr(args, "cscg_structural_init_mode", "binary")),
+                structural_source=str(getattr(args, "cscg_structural_source", "oracle_maze_topology")),
+                clone_capacity_mode=str(getattr(args, "cscg_clone_capacity_mode", "fixed")),
                 n_iter=(int(baseline_cscg_n_iter) if baseline_cscg_n_iter is not None else args.cscg_n_iter),
                 pseudocount=args.cscg_pseudocount,
                 term_early=args.cscg_term_early,
@@ -1031,7 +1052,7 @@ def execute_pipeline_run(
                 layout=layout,
                 dataset_run_id=dataset_run_id,
             )
-        elif method in {"pocml", "cscg", "mercury_cscg_hybrid"}:
+        elif method in {"pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
             dataset_run_ids = _generate_standalone_dataset_run_ids(
                 args=args,
                 reuse_existing_dataset=reuse_existing_dataset,
@@ -1044,7 +1065,7 @@ def execute_pipeline_run(
                 dataset_run_ids=dataset_run_ids,
             )
             dataset_run_id = dataset_run_ids.get(_sensor_dataset_key(args.sensor, args.sensor_range))
-            if method == "mercury_cscg_hybrid":
+            if method in {"mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
                 _run_mercury_cscg_hybrid_stage(
                     args=args,
                     run_root=run_root,
@@ -1056,6 +1077,7 @@ def execute_pipeline_run(
                     dataset_run_id=dataset_run_id,
                     reuse_existing_run=reuse_existing_run,
                     reuse_existing_dataset=reuse_existing_dataset,
+                    method_name=method,
                 )
                 baseline_states_parquet = ground_truth_states_parquet
                 baseline_select = "run_id" if dataset_run_id else "latest"
@@ -1152,8 +1174,11 @@ def execute_pipeline_run(
 
 
 def _run_worker_subprocess(*, args: argparse.Namespace, run_id: str) -> None:
+    from .study_service import _prune_command_config
+
     worker_config = dict(vars(args))
     worker_config["run_id"] = run_id
+    worker_config = _prune_command_config(worker_config)
     worker_config["_worker_run"] = True
     subprocess.run(
         [sys.executable, "main.py"] + args_from_config(worker_config),
