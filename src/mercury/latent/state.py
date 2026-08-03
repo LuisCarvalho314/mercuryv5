@@ -1756,7 +1756,8 @@ def _resolve_prev_with_memory_replay(
                     created_step=int(state.step_idx),
                 )
                 # print(bmus)
-
+            # replay_mem = update_memory(replay_mem)
+            # replay_mem = add_memory(replay_mem, mem_vec[L+j])
     # if bmu_refined not in seen_bmus:
     #     raise EnvironmentError("added bmu not seen in replay")
     return replay_state.g, int(prev_bmu), bmu, clone_created_count

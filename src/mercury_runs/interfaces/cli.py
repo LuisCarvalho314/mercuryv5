@@ -111,6 +111,7 @@ _APPLICABLE_ARGS_BY_METHOD = {
     "mercury_cscg_hybrid": _MERCURY_DATASET_ARGS | _MERCURY_LATENT_ARGS | _SENSORY_ARGS | _ACTION_MAP_ARGS | _CSCG_ARGS,
     "mercury_cscg_hybrid_mercury": _MERCURY_DATASET_ARGS | _MERCURY_LATENT_ARGS | _SENSORY_ARGS | _ACTION_MAP_ARGS,
     "tmgwr_cscg_hybrid": _SENSORY_ARGS | _ACTION_MAP_ARGS | _CSCG_ARGS,
+    "tmgwr_cscg_hybrid_tmgwr": _SENSORY_ARGS | _ACTION_MAP_ARGS,
     "sensory": _SENSORY_ARGS | _ACTION_MAP_ARGS,
     "pocml": _POCML_ARGS,
     "cscg": _CSCG_ARGS,
@@ -165,7 +166,7 @@ def parse_arguments() -> argparse.Namespace:
         "--method",
         type=str,
         default=None,
-        choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid", "mercury_cscg_hybrid_mercury"],
+        choices=["mercury", "sensory", "pocml", "cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid", "mercury_cscg_hybrid_mercury", "tmgwr_cscg_hybrid_tmgwr"],
     )
     parser.add_argument("--max_workers", type=int, default=1, help="Study mode: number of concurrent runs")
     parser.add_argument("--no_parallel", action="store_true", default=False)
