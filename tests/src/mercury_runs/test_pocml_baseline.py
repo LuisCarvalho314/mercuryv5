@@ -16,7 +16,7 @@ from mercury_runs.algorithms.pocml.evaluate import (
     evaluate_pocml_sequence,
     load_pocml_checkpoint,
 )
-from mercury_runs.algorithms.pocml.prepare import filter_valid_pocml_rows
+from mercury_runs.algorithms.pocml.prepare import align_post_action_transitions, filter_valid_pocml_rows
 
 
 class _ArrayBox:
@@ -635,6 +635,17 @@ def test_filter_valid_pocml_rows_can_preserve_collision_steps() -> None:
     assert actions.tolist() == [[0], [1], [2]]
     assert gt.tolist() == [5, 6, 7]
     assert stats == {"raw_steps": 3, "filtered_steps": 3, "dropped_collision_steps": 0}
+
+
+def test_align_post_action_transitions_uses_action_that_produced_next_observation() -> None:
+    o_pre, actions, o_next = align_post_action_transitions(
+        observations=np.array([10, 20, 30], dtype=np.int64),
+        actions=np.array([100, 200, 300], dtype=np.int64),
+    )
+
+    assert o_pre.tolist() == [10, 20]
+    assert actions.tolist() == [200, 300]
+    assert o_next.tolist() == [20, 30]
 
 
 def test_pocml_paper_precision_passes_valid_trajectory_flag(monkeypatch, tmp_path: Path) -> None:

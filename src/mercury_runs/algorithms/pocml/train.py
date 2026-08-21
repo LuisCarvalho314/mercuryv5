@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from .prepare import (
+    align_post_action_transitions,
     build_train_trajectories,
     filter_valid_pocml_rows,
     import_pocml_modules,
@@ -73,9 +74,7 @@ def train_pocml_model(*, config, paper_precision_callback=None, progress_callbac
     if length < 3:
         raise ValueError("POCML baseline could not align enough samples between dataset and ground truth.")
 
-    o_pre = obs_idx[:-1]
-    o_next = obs_idx[1:]
-    a = act_idx[:-1]
+    o_pre, a, o_next = align_post_action_transitions(obs_idx, act_idx)
     gt_pre = ground_truth_bmu[:-1].astype(np.int64, copy=False)
     gt_next = ground_truth_bmu[1:].astype(np.int64, copy=False)
     node_pre = gt_pre if bool(config.use_ground_truth_node_ids) else o_pre

@@ -80,6 +80,9 @@ def args_from_config(config: Dict[str, Any]) -> List[str]:
             if argument_name in {
                 "memory_replay",
                 "memory_disambiguation",
+                "ambiguity_response_enabled",
+                "ambiguity_refinement_enabled",
+                "transition_reconstruction_enabled",
                 "latent_allow_self_loops",
                 "sensory_allow_self_loops",
                 "wandb",

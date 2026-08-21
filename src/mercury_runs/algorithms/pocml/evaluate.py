@@ -20,7 +20,7 @@ from ...infrastructure.paper_precision import (
 from ...io_parquet import load_level_parquet, ParquetConfig
 from ...save_results import read_bundle_meta
 from .artifacts import capacity_run_id
-from .prepare import filter_valid_pocml_rows, import_pocml_modules
+from .prepare import align_post_action_transitions, filter_valid_pocml_rows, import_pocml_modules
 from .train import prepare_model_for_single_sequence_eval
 
 
@@ -342,10 +342,11 @@ def compute_pocml_paper_precision_metrics_from_model(
         act_idx_full = map_values_with_reference(reference_uniques=action_uniques, values=filtered_actions)
         if obs_idx.shape[0] < 2 or act_idx_full.shape[0] < 2:
             continue
+        _, transition_actions, _ = align_post_action_transitions(obs_idx, act_idx_full)
         walk_eval = evaluate_pocml_sequence(
             model=model,
             obs_idx=obs_idx.astype(np.int64, copy=False),
-            action_idx=act_idx_full[:-1].astype(np.int64, copy=False),
+            action_idx=transition_actions.astype(np.int64, copy=False),
             n_obs=int(obs_uniques.shape[0]),
             n_actions=int(action_uniques.shape[0]),
             torch_module=torch_module,

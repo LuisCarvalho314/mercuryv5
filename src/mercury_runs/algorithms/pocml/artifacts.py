@@ -111,6 +111,7 @@ def write_pocml_artifacts(
                 "batch_size": effective_batch_size,
                 "drop_last": training_drop_last,
                 "observation_mode": "one_hot_observation_ids",
+                "action_alignment": "post_action_row_t_plus_1",
                 "node_id_source": ("cartesian_proxy_bmu" if bool(config.use_ground_truth_node_ids) else "observation_ids"),
                 "model_selection": "best_model_by_mean_epoch_loss",
                 "memory_bias": bool(config.memory_bias),

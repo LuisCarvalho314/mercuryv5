@@ -72,6 +72,23 @@ def to_indices(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return inverse.astype(np.int64, copy=False), np.asarray(uniques)
 
 
+def align_post_action_transitions(
+    observations: np.ndarray,
+    actions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return transitions aligned for datasets whose rows are logged after acting.
+
+    Mercury records row ``t`` after executing ``actions[t]``. Therefore the
+    action taking ``observations[t]`` to ``observations[t + 1]`` is
+    ``actions[t + 1]``.
+    """
+    obs = np.asarray(observations)
+    act = np.asarray(actions)
+    if obs.shape[0] != act.shape[0]:
+        raise ValueError("observations and actions must have matching row counts for POCML alignment.")
+    return obs[:-1], act[1:], obs[1:]
+
+
 def filter_valid_pocml_rows(
     *,
     observations: np.ndarray,

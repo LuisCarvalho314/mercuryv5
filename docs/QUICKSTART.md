@@ -260,8 +260,12 @@ python -m mercury_runs.analysis.plots.threshold_edge_metrics \
 python -m mercury_runs.analysis.plots.threshold_robustness \
   --collapsed_summary results/..../threshold_edge_metrics_summary.csv \
   --action_summary results/..../threshold_edge_metrics_summary.csv \
-  --output_dir results/current/notebook_plots/<study_name>_robustness
+  --output_dir results/current/notebook_plots/<study_name>_robustness \
+  --compact
 ```
+
+`--compact` adds the 4×3 single-column action-conditioned edge-F1 checkpoint figure; the
+existing per-scenario figures are still written unchanged.
 
 **Per-run residual maps** (single run, reads snapshots directly):
 ```bash

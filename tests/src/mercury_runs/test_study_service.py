@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from mercury_runs.application.study_service import (
+    apply_ambiguity_response_preset,
     apply_cscg_structural_preset,
     build_study_run_records,
     resolve_run_configurations,
@@ -19,6 +20,23 @@ from mercury_runs.application.study_service import (
 from mercury_runs.domain.models import StudyDefaults
 from mercury_runs.infrastructure.progress import write_progress
 from mercury_runs.interfaces.cli import parse_arguments
+
+
+def test_ambiguity_response_presets_define_four_orthogonal_conditions() -> None:
+    expected = {
+        "no_ambiguity_response": (False, False, False),
+        "local_repair_only": (True, False, True),
+        "refinement_without_reconstruction": (True, True, False),
+        "full_mercury": (True, True, True),
+    }
+
+    for mode, flags in expected.items():
+        run = apply_ambiguity_response_preset({"ambiguity_response_mode": mode})
+        assert (
+            run["ambiguity_response_enabled"],
+            run["ambiguity_refinement_enabled"],
+            run["transition_reconstruction_enabled"],
+        ) == flags
 
 
 def test_resolve_run_configurations_expands_weight_preset(tmp_path) -> None:

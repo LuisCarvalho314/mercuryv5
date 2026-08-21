@@ -290,10 +290,47 @@ def _structural_metric_row_for_step(
     graph = latent_state.g
     node_ages = active_node_ages(graph, step)
     edge_ages = active_edge_ages(graph, step)
+    node_features = getattr(graph, "node_features", {})
+    node_created_at = np.asarray(node_features.get("node_created_at", []), dtype=np.int32).reshape(-1)
+    clone_mask = node_created_at > 0
+    first_incoming_at = np.asarray(
+        node_features.get("first_incoming_at", np.full(node_created_at.shape, -1, dtype=np.int32)),
+        dtype=np.int32,
+    ).reshape(-1)
+    first_outgoing_at = np.asarray(
+        node_features.get("first_outgoing_at", np.full(node_created_at.shape, -1, dtype=np.int32)),
+        dtype=np.int32,
+    ).reshape(-1)
+    completed_step = max(int(step) - 1, 0)
+    incoming_integrated = clone_mask & (first_incoming_at == completed_step)
+    outgoing_integrated = clone_mask & (first_outgoing_at == completed_step)
+    incoming_delays = first_incoming_at[incoming_integrated] - node_created_at[incoming_integrated]
+    outgoing_delays = first_outgoing_at[outgoing_integrated] - node_created_at[outgoing_integrated]
     row: dict[str, Any] = {
         "bmu_memory_depth": int(bmu_memory_depth(graph, latent_bmu, memory_length)),
         "clone_created_count": int(getattr(latent_state, "last_clone_created_count", 0)),
         "clone_created_cumulative": int(getattr(latent_state, "clone_created_count", 0)),
+        "surviving_clone_count": int(
+            np.count_nonzero(
+                node_created_at > 0
+            )
+        ),
+        "clone_incoming_integration_delay": incoming_delays.astype(np.int32, copy=False).tolist(),
+        "clone_outgoing_integration_delay": outgoing_delays.astype(np.int32, copy=False).tolist(),
+        "clone_pruned_before_support_count": int(
+            getattr(latent_state, "last_clone_pruned_before_support_count", 0)
+        ),
+        "clone_pruned_before_support_cumulative": int(
+            getattr(latent_state, "clone_pruned_before_support_count", 0)
+        ),
+        "ambiguity_response_count": int(getattr(latent_state, "last_ambiguity_response_count", 0)),
+        "ambiguity_response_cumulative": int(getattr(latent_state, "ambiguity_response_count", 0)),
+        "replay_inference_count": int(getattr(latent_state, "last_replay_inference_count", 0)),
+        "replay_inference_cumulative": int(getattr(latent_state, "replay_inference_count", 0)),
+        "replay_context_count": int(getattr(latent_state, "last_replay_context_count", 0)),
+        "replay_context_cumulative": int(getattr(latent_state, "replay_context_count", 0)),
+        "reconstructed_transition_count": int(getattr(latent_state, "last_reconstructed_transition_count", 0)),
+        "reconstructed_transition_cumulative": int(getattr(latent_state, "reconstructed_transition_count", 0)),
         "edge_prune_count": int(getattr(latent_state, "last_edge_prune_count", 0)),
         "edge_prune_cumulative": int(getattr(latent_state, "edge_prune_count", 0)),
         "node_prune_count": int(getattr(latent_state, "last_node_prune_count", 0)),
@@ -311,6 +348,19 @@ def _empty_structural_metric_arrays(length: int) -> dict[str, np.ndarray | list[
         "bmu_memory_depth": np.zeros((length,), dtype=np.int32),
         "clone_created_count": np.zeros((length,), dtype=np.int32),
         "clone_created_cumulative": np.zeros((length,), dtype=np.int32),
+        "surviving_clone_count": np.zeros((length,), dtype=np.int32),
+        "clone_incoming_integration_delay": [[] for _ in range(length)],
+        "clone_outgoing_integration_delay": [[] for _ in range(length)],
+        "clone_pruned_before_support_count": np.zeros((length,), dtype=np.int32),
+        "clone_pruned_before_support_cumulative": np.zeros((length,), dtype=np.int32),
+        "ambiguity_response_count": np.zeros((length,), dtype=np.int32),
+        "ambiguity_response_cumulative": np.zeros((length,), dtype=np.int32),
+        "replay_inference_count": np.zeros((length,), dtype=np.int32),
+        "replay_inference_cumulative": np.zeros((length,), dtype=np.int32),
+        "replay_context_count": np.zeros((length,), dtype=np.int32),
+        "replay_context_cumulative": np.zeros((length,), dtype=np.int32),
+        "reconstructed_transition_count": np.zeros((length,), dtype=np.int32),
+        "reconstructed_transition_cumulative": np.zeros((length,), dtype=np.int32),
         "edge_prune_count": np.zeros((length,), dtype=np.int32),
         "edge_prune_cumulative": np.zeros((length,), dtype=np.int32),
         "node_prune_count": np.zeros((length,), dtype=np.int32),
@@ -341,12 +391,28 @@ def _structural_metric_columns(rows: list[dict[str, Any]], length: int) -> dict[
         "bmu_memory_depth",
         "clone_created_count",
         "clone_created_cumulative",
+        "surviving_clone_count",
+        "clone_pruned_before_support_count",
+        "clone_pruned_before_support_cumulative",
+        "ambiguity_response_count",
+        "ambiguity_response_cumulative",
+        "replay_inference_count",
+        "replay_inference_cumulative",
+        "replay_context_count",
+        "replay_context_cumulative",
+        "reconstructed_transition_count",
+        "reconstructed_transition_cumulative",
         "edge_prune_count",
         "edge_prune_cumulative",
         "node_prune_count",
         "node_prune_cumulative",
     }
-    list_keys = {"node_age_distribution", "edge_age_distribution"}
+    list_keys = {
+        "node_age_distribution",
+        "edge_age_distribution",
+        "clone_incoming_integration_delay",
+        "clone_outgoing_integration_delay",
+    }
     for key in keys:
         values = [row[key] for row in rows[:length]]
         if key in list_keys:

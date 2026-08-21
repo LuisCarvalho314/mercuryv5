@@ -95,6 +95,9 @@ _MERCURY_LATENT_ARGS = {
     "weight_action",
     "memory_replay",
     "memory_disambiguation",
+    "ambiguity_response_enabled",
+    "ambiguity_refinement_enabled",
+    "transition_reconstruction_enabled",
 }
 _BASELINE_ARGS = {"baseline_pocml", "baseline_cscg", "baseline_all"}
 _METHOD_SPECIFIC_ARGS = (
@@ -305,6 +308,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--ambiguity_threshold", type=int, default=40)
     parser.add_argument("--ambiguity_decay", type=float, default=0.99)
     parser.add_argument("--ambiguity_counter_mode", type=str, default="action", choices=["action", "node"])
+    parser.add_argument(
+        "--ambiguity_response_mode",
+        type=str,
+        default=None,
+        choices=[
+            "no_ambiguity_response",
+            "local_repair_only",
+            "refinement_without_reconstruction",
+            "full_mercury",
+        ],
+    )
     parser.add_argument("--trace_decay", type=float, default=1.0)
     parser.add_argument("--lambda_trace", type=float, default=0.00)
     parser.add_argument("--weight_memory", type=float, default=1.0)
@@ -313,6 +327,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--weight_action", type=float, default=0.0)
     parser.add_argument("--memory_replay", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--memory_disambiguation", nargs="?", const=True, default=True, type=strtobool)
+    parser.add_argument("--ambiguity_response_enabled", nargs="?", const=True, default=True, type=strtobool)
+    parser.add_argument("--ambiguity_refinement_enabled", nargs="?", const=True, default=True, type=strtobool)
+    parser.add_argument("--transition_reconstruction_enabled", nargs="?", const=True, default=True, type=strtobool)
     parser.add_argument("--am_n_codebook", type=int, default=4)
     parser.add_argument("--am_lr", type=float, default=0.5)
     parser.add_argument("--am_sigma", type=float, default=0.0)

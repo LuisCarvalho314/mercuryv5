@@ -168,6 +168,9 @@ class StudyGridConfig(BaseModel):
     weight_action: float = Field(ge=0.0)
     memory_replay: bool
     memory_disambiguation: bool
+    ambiguity_response_enabled: bool = True
+    ambiguity_refinement_enabled: bool = True
+    transition_reconstruction_enabled: bool = True
     study_root: str = Field(min_length=1)
     study_name: str = Field(min_length=1)
     reuse_existing_run: bool = False

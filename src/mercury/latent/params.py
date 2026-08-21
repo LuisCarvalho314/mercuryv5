@@ -1,5 +1,14 @@
 from dataclasses import dataclass
 
+
+AMBIGUITY_RESPONSE_MODES: dict[str, tuple[bool, bool, bool]] = {
+    "no_ambiguity_response": (False, False, False),
+    "local_repair_only": (True, False, True),
+    "refinement_without_reconstruction": (True, True, False),
+    "full_mercury": (True, True, True),
+}
+
+
 @dataclass(frozen=True)
 class LatentParams:
     # ------------------------------------------------------------------
@@ -52,6 +61,9 @@ class LatentParams:
     # ------------------------------------------------------------------
     memory_replay: bool = True
     memory_disambiguation: bool = True
+    ambiguity_response_enabled: bool = True
+    ambiguity_refinement_enabled: bool = True
+    transition_reconstruction_enabled: bool = True
 
     # ------------------------------------------------------------------
     # Helper: normalized energy weights

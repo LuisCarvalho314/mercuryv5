@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from mercury.latent.params import AMBIGUITY_RESPONSE_MODES
+
 from ..analysis.study_history_plots import generate_study_history_plots
 from ..domain.models import HierarchicalStudyConfig, StudyDefaults, StudyGridConfig
 from ..infrastructure import (
@@ -64,6 +66,21 @@ WEIGHT_PRESETS: Dict[str, Dict[str, float]] = {
         "weight_base": 0.0,
         "weight_action": 0.0,
     },
+}
+
+AMBIGUITY_RESPONSE_PRESETS: Dict[str, Dict[str, bool]] = {
+    name: dict(
+        zip(
+            (
+                "ambiguity_response_enabled",
+                "ambiguity_refinement_enabled",
+                "transition_reconstruction_enabled",
+            ),
+            flags,
+            strict=True,
+        )
+    )
+    for name, flags in AMBIGUITY_RESPONSE_MODES.items()
 }
 
 CSCG_CLONE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -186,8 +203,9 @@ def default_parameter_space(defaults: StudyDefaults) -> Dict[str, Any]:
                     "weight_undirected": [0.2],
                     "weight_base": [0.2],
                     "weight_action": [0.2],
-                    "memory_replay": [False, True],
-                    "memory_disambiguation": [False, True],
+                    "ambiguity_response_mode": list(AMBIGUITY_RESPONSE_PRESETS),
+                    "memory_replay": [True],
+                    "memory_disambiguation": [True],
                 },
             },
             "pocml": {"enabled": False, "grid": {}},
@@ -251,6 +269,19 @@ def apply_cscg_structural_preset(run_configuration: Dict[str, Any]) -> Dict[str,
     return expanded
 
 
+def apply_ambiguity_response_preset(run_configuration: Dict[str, Any]) -> Dict[str, Any]:
+    preset_name = run_configuration.get("ambiguity_response_mode")
+    if preset_name is None:
+        return dict(run_configuration)
+    resolved_name = str(preset_name)
+    if resolved_name not in AMBIGUITY_RESPONSE_PRESETS:
+        available = ", ".join(sorted(AMBIGUITY_RESPONSE_PRESETS))
+        raise ValueError(f"Unknown ambiguity_response_mode '{resolved_name}'. Expected one of: {available}")
+    expanded = dict(run_configuration)
+    expanded.update(AMBIGUITY_RESPONSE_PRESETS[resolved_name])
+    return expanded
+
+
 def _normalize_section(raw: Dict[str, Any]) -> Dict[str, List[Any]]:
     if not isinstance(raw, dict):
         raise ValueError("Study config sections must be JSON objects.")
@@ -309,6 +340,8 @@ def _expand_method_runs(
             if method_name in {"mercury", "mercury_cscg_hybrid"}
             else dict(run_configuration)
         )
+        if method_name in {"mercury", "mercury_cscg_hybrid"}:
+            expanded_configuration = apply_ambiguity_response_preset(expanded_configuration)
         if method_name in {"cscg", "mercury_cscg_hybrid", "tmgwr_cscg_hybrid"}:
             expanded_configuration = apply_cscg_clone_preset(expanded_configuration)
             expanded_configuration = apply_cscg_structural_preset(expanded_configuration)
@@ -452,6 +485,9 @@ def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "weight_action",
         "memory_replay",
         "memory_disambiguation",
+        "ambiguity_response_enabled",
+        "ambiguity_refinement_enabled",
+        "transition_reconstruction_enabled",
     }
     baseline_keys = {"baseline_pocml", "baseline_cscg", "baseline_all"}
 
@@ -835,6 +871,7 @@ __all__ = [
     "default_parameter_space",
     "normalize_parameter_space",
     "apply_weight_preset",
+    "apply_ambiguity_response_preset",
     "apply_cscg_clone_preset",
     "apply_cscg_structural_preset",
     "resolve_run_configurations",

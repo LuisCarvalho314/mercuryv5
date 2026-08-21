@@ -243,6 +243,8 @@ def test_run_all_bundled_can_split_raw_sensory_from_valid_latent(monkeypatch, tm
         "latent_node_count": [1, 1, 2],
     }
     assert captured["bundle_rows"]["states"]["clone_created_cumulative"] == [0, 0, 0]
+    assert captured["bundle_rows"]["states"]["replay_inference_cumulative"] == [0, 0, 0]
+    assert captured["bundle_rows"]["states"]["reconstructed_transition_cumulative"] == [0, 0, 0]
     assert captured["bundle_rows"]["states"]["node_age_distribution"] == [[], [], []]
     assert captured["bundle_rows"]["attribution"]["latent_bmu"] == [300]
 
@@ -358,6 +360,7 @@ def test_run_latent_returns_frozen_sensory_bmus(monkeypatch) -> None:
     assert attribution_rows[0]["selected_memory_drive_weighted"] == 1.0
     assert len(structural_metric_rows) == 3
     assert structural_metric_rows[0]["bmu_memory_depth"] == 0
+    assert structural_metric_rows[0]["replay_inference_cumulative"] == 0
     assert action_map.step_calls == 3
     assert action_map.predict_calls == 3
 

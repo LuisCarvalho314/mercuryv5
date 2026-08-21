@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from mercury.latent.params import AMBIGUITY_RESPONSE_MODES
+
 from ..domain.models import (
     ArtifactLayout,
     PIPELINE_SCHEMA_VERSION,
@@ -423,6 +425,19 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
     )
     cscg_structural_transfer_level = str(getattr(args, "cscg_structural_transfer_level", "first_order_observation"))
     cscg_structural_source = str(getattr(args, "cscg_structural_source", "oracle_maze_topology"))
+    response_flags = (
+        bool(getattr(args, "ambiguity_response_enabled", True)),
+        bool(getattr(args, "ambiguity_refinement_enabled", True)),
+        bool(getattr(args, "transition_reconstruction_enabled", True)),
+    )
+    ambiguity_response_mode = getattr(args, "ambiguity_response_mode", None)
+    if ambiguity_response_mode is not None:
+        response_flags = AMBIGUITY_RESPONSE_MODES[str(ambiguity_response_mode)]
+    else:
+        ambiguity_response_mode = next(
+            (name for name, flags in AMBIGUITY_RESPONSE_MODES.items() if flags == response_flags),
+            "custom",
+        )
     return {
         "method": str(target_method),
         "level": args.level,
@@ -439,6 +454,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
         "random_start": bool(getattr(args, "random_start", True)),
         "memory_length": args.memory_length,
         "window_length": args.window_length,
+        "ambiguity_response_mode": str(ambiguity_response_mode),
         "evaluation": {
             "paper_precision": {
                 "enabled": enabled,
@@ -496,6 +512,9 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
             "weight_action": args.weight_action,
             "memory_replay": args.memory_replay,
             "memory_disambiguation": args.memory_disambiguation,
+            "ambiguity_response_enabled": response_flags[0],
+            "ambiguity_refinement_enabled": response_flags[1],
+            "transition_reconstruction_enabled": response_flags[2],
         },
         "action_map": {
             "n_codebook": args.am_n_codebook,

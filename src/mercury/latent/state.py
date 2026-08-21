@@ -11,8 +11,7 @@ from mercury.graph.core import Graph
 from mercury.graph.maintenance import age_maintenance
 from .params import LatentParams
 from ..memory.state import (MemoryState, mem_id, activations_at_t,
-                            memory_view_at_global_timestep, init_mem,
-                            add_memory, update_memory)
+                            init_mem, add_memory, update_memory)
 from ..sensory.state import SensoryState
 
 type Array = np.ndarray
@@ -23,6 +22,23 @@ class _MemoryView:
     activations: np.ndarray  # shape (S*L,)
     gs: Any                  # must have .n so compute_bmu doesn't break
     sensory_n_nodes: int
+
+
+@dataclass(frozen=True)
+class ReplayWindow:
+    """
+    Retained replay data.
+
+    observations contains 2L observations:
+        observations[:L] -> constructs x_0
+        observations[L:] -> advances x_0, ..., x_{L-1} to x_1, ..., x_L
+
+    actions contains L actions:
+        actions[k] maps x_k -> x_{k+1}
+    """
+    length: int
+    observations: np.ndarray
+    actions: np.ndarray
 
 
 
@@ -42,6 +58,16 @@ class LatentState:
     last_clone_created_count: int = 0
     last_edge_prune_count: int = 0
     last_node_prune_count: int = 0
+    ambiguity_response_count: int = 0
+    replay_inference_count: int = 0
+    replay_context_count: int = 0
+    reconstructed_transition_count: int = 0
+    last_ambiguity_response_count: int = 0
+    last_replay_inference_count: int = 0
+    last_replay_context_count: int = 0
+    last_reconstructed_transition_count: int = 0
+    clone_pruned_before_support_count: int = 0
+    last_clone_pruned_before_support_count: int = 0
 
     @property
     def mem_adj(self) -> Array:
@@ -95,6 +121,8 @@ def _register_features(g: Graph, mem_len: int, n_actions: int = 1) -> Graph:
     g.register_node_feature("ambiguity_score", n_actions, init_value=0)
     g.register_node_feature("ambiguity_score_node", 1, init_value=0)
     g.register_node_feature("node_created_at", 1, dtype=np.int32, init_value=0)
+    g.register_node_feature("first_incoming_at", 1, dtype=np.int32, init_value=-1)
+    g.register_node_feature("first_outgoing_at", 1, dtype=np.int32, init_value=-1)
     g.register_edge_feature("age", 1, dtype=np.int32, init_value=0)
     g.register_edge_feature("action", 1, dtype=np.int32, init_value=0)
     g.register_edge_feature("edge_created_at", 1, dtype=np.int32, init_value=-1)
@@ -191,6 +219,8 @@ def _add_node(
             ),
             "ambiguity_score_node": np.array(0.0, dtype=np.float32),
             "node_created_at": np.array(int(created_step), dtype=np.int32),
+            "first_incoming_at": np.array(-1, dtype=np.int32),
+            "first_outgoing_at": np.array(-1, dtype=np.int32),
         },
         edge_defaults_for_new_node={
             "age": np.array([0], dtype=np.int32),
@@ -1465,6 +1495,13 @@ def _update_edge(
         u, v, weight=new_w,
         edge_feat=edge_feat,
     )
+    if new_w != 0.0:
+        first_outgoing = g.node_features.get("first_outgoing_at")
+        if first_outgoing is not None and int(first_outgoing[u]) < 0:
+            first_outgoing[u] = int(created_step)
+        first_incoming = g.node_features.get("first_incoming_at")
+        if first_incoming is not None and int(first_incoming[v]) < 0:
+            first_incoming[v] = int(created_step)
     return g
 
 def _edge_action_row(g: Graph, u: int, v: int, *, am: ActionMap) -> Array:
@@ -1634,6 +1671,176 @@ def rollback_k_memory_state(ms: MemoryState, mem_vec: Array, k: int, L: int) -> 
     replay_mem = rollback_memory_state(replay_mem, mem_vec, length-k)
     return replay_mem
 
+def _build_replay_window(
+    ms: MemoryState,
+    mem_vec: list,
+    action_mem: list[int],
+) -> ReplayWindow:
+    length = int(ms.length)
+
+    observations = np.asarray(mem_vec[-2 * length:])
+    actions = np.asarray(action_mem[-length:], dtype=np.int32)
+
+    if observations.shape[0] < 2 * length:
+        raise ValueError(
+            f"Replay requires {2 * length} observations, "
+            f"but received {observations.shape[0]}."
+        )
+
+    if actions.shape[0] < length:
+        raise ValueError(
+            f"Replay requires {length} actions, "
+            f"but received {actions.shape[0]}."
+        )
+
+    return ReplayWindow(
+        length=length,
+        observations=observations,
+        actions=actions,
+    )
+
+def _initialise_replay_memory(
+    ms: MemoryState,
+    window: ReplayWindow,
+) -> MemoryState:
+    replay_mem = init_mem(ms.sensory_n_nodes, ms.length)
+    return rollback_memory_state(
+        replay_mem,
+        window.observations,
+        window.length,
+    )
+
+def _infer_replay_bmu(
+    replay_state: LatentState,
+    replay_mem: MemoryState,
+    action_bmu: int,
+    cfg: LatentParams,
+    *,
+    use_temporal_memory: bool,
+) -> int:
+    if use_temporal_memory:
+        return int(
+            compute_bmu(
+                replay_state,
+                replay_mem,
+                action_bmu,
+                cfg,
+            )
+        )
+
+    return int(
+        compute_bmu_current_timestep_only(
+            replay_state,
+            replay_mem,
+            action_bmu,
+            cfg,
+        )
+    )
+
+def _refine_ambiguous_replay_contexts(
+    replay_state: LatentState,
+    ms: MemoryState,
+    window: ReplayWindow,
+    deficient_bmu: int,
+    preds: Array,
+    cfg: LatentParams,
+    *,
+    created_step: int,
+) -> int:
+    replay_mem = _initialise_replay_memory(ms, window)
+    clone_created_count = 0
+
+    for k in range(window.length):
+        action_bmu = int(window.actions[k])
+
+        inferred_bmu = _infer_replay_bmu(
+            replay_state,
+            replay_mem,
+            action_bmu,
+            cfg,
+            use_temporal_memory=bool(cfg.memory_disambiguation),
+        )
+
+        if inferred_bmu == deficient_bmu:
+            refined_graph, _, created = add_temporal_edge_at_first_gap_clone(
+                replay_state.g,
+                replay_mem,
+                deficient_bmu,
+                preds,
+                created_step=created_step,
+            )
+            replay_state.g = refined_graph
+            _align_prev_activations_to_graph(replay_state)
+
+            if created:
+                clone_created_count += 1
+
+        replay_mem = update_memory(replay_mem)
+        replay_mem = add_memory(
+            replay_mem,
+            window.observations[window.length + k],
+        )
+
+    return clone_created_count
+
+def _reconstruct_replay_transitions(
+    replay_state: LatentState,
+    ms: MemoryState,
+    window: ReplayWindow,
+    action_map: ActionMap,
+    cfg: LatentParams,
+    *,
+    created_step: int,
+) -> tuple[int, int]:
+    replay_mem = _initialise_replay_memory(ms, window)
+
+    current_bmu = _infer_replay_bmu(
+        replay_state,
+        replay_mem,
+        int(window.actions[0]),
+        cfg,
+        use_temporal_memory=bool(cfg.memory_replay),
+    )
+
+    live_prev_bmu: int | None = None
+
+    for k in range(window.length):
+        previous_bmu = current_bmu
+        action_bmu = int(window.actions[k])
+
+        replay_mem = update_memory(replay_mem)
+        replay_mem = add_memory(
+            replay_mem,
+            window.observations[window.length + k],
+        )
+
+        current_bmu = _infer_replay_bmu(
+            replay_state,
+            replay_mem,
+            action_bmu,
+            cfg,
+            use_temporal_memory=bool(cfg.memory_replay),
+        )
+
+        if k < window.length - 1:
+            replay_state.g = _update_edges_with_actions(
+                replay_state.g,
+                prev_bmu=previous_bmu,
+                bmu=current_bmu,
+                action_bmu=action_bmu,
+                action_map=action_map,
+                gaussian_shape=cfg.gaussian_shape,
+                beta=cfg.action_lr,
+                created_step=created_step,
+            )
+
+        live_prev_bmu = previous_bmu
+
+    if live_prev_bmu is None:
+        raise RuntimeError("Replay produced no predecessor state.")
+
+    return int(live_prev_bmu), int(current_bmu)
+
 def _resolve_prev_with_memory_replay(
     state: LatentState,
     ms: MemoryState,
@@ -1642,125 +1849,61 @@ def _resolve_prev_with_memory_replay(
     bmu: int,
     action_mem: list[int],
     action_map: ActionMap,
-    gaussian_shape: int,
-    max_replay: int,
     cfg: LatentParams,
     preds: Array,
 ) -> tuple[Graph, int, int, int]:
-
-
-
-
-
     replay_state = deepcopy(state)
+    length = int(ms.length)
+
+    if state.step_idx < 2 * length:
+        return replay_state.g, int(prev_bmu), int(bmu), 0
+
+    window = _build_replay_window(
+        ms=ms,
+        mem_vec=mem_vec,
+        action_mem=action_mem,
+    )
+
     clone_created_count = 0
+    if bool(getattr(cfg, "ambiguity_refinement_enabled", True)):
+        clone_created_count = _refine_ambiguous_replay_contexts(
+            replay_state=replay_state,
+            ms=ms,
+            window=window,
+            deficient_bmu=int(prev_bmu),
+            preds=preds,
+            cfg=cfg,
+            created_step=int(state.step_idx),
+        )
+        state.last_replay_inference_count += window.length
+        state.replay_inference_count += window.length
 
-    L = int(ms.length)
-    if state.step_idx < 2*L:
-        return replay_state.g, int(prev_bmu), bmu, clone_created_count
+    resolved_prev_bmu = int(prev_bmu)
+    resolved_bmu = int(bmu)
+    if bool(getattr(cfg, "transition_reconstruction_enabled", True)):
+        resolved_prev_bmu, resolved_bmu = _reconstruct_replay_transitions(
+            replay_state=replay_state,
+            ms=ms,
+            window=window,
+            action_map=action_map,
+            cfg=cfg,
+            created_step=int(state.step_idx),
+        )
+        replay_inferences = window.length + 1
+        reconstructed_transitions = max(window.length - 1, 0)
+        state.last_replay_inference_count += replay_inferences
+        state.replay_inference_count += replay_inferences
+        state.last_replay_context_count += replay_inferences
+        state.replay_context_count += replay_inferences
+        state.last_reconstructed_transition_count += reconstructed_transitions
+        state.reconstructed_transition_count += reconstructed_transitions
 
-    am = list(action_mem)[-L:]              # oldest → newest
-    mem_vec = np.asarray(mem_vec[-2*L:])
-    replay_mem = init_mem(ms.sensory_n_nodes, ms.length)
-
-    replay_mem = rollback_memory_state(replay_mem, mem_vec, L)
-
-    if len(am) < L:
-        raise ValueError(f"action_mem length {len(am)} < L={L}")
-
-
-    for i in range(L):
-        action_bmu = int(am[i])
-        if cfg.memory_disambiguation:
-            bmu = int(compute_bmu(replay_state, replay_mem, action_bmu, cfg))
-        else:
-            bmu = int(
-                compute_bmu_current_timestep_only(replay_state, replay_mem,
-                                                  action_bmu, cfg))
-        if bmu == prev_bmu:
-        # if preds.size >1:
-        #     nov = novelty_for_prev(replay_mem, replay_state.g, int(prev_bmu))
-            # if nov >= 0.35:
-            if True:
-                g_new, bmu_refined, created = add_temporal_edge_at_first_gap_clone(
-                    replay_state.g,
-                    replay_mem,
-                    int(prev_bmu),
-                    preds,
-                    created_step=int(state.step_idx),
-                )
-                if created:
-                    clone_created_count += 1
-                # cfg.ambiguity_threshold += 1
-                replay_state.g = g_new
-                _align_prev_activations_to_graph(replay_state)
-            # # refine by spawning a clone extended at the first gap
-            # g_new, bmu_refined, created = add_temporal_edge_at_first_gap_clone(
-            #     replay_state.g, replay_mem, bmu, preds
-            # )
-            # replay_state.g = g_new
-            # _align_prev_activations_to_graph(replay_state)
-
-            # _debug_print_latent_mem_adj(g_new, ms, bmu_refined)
-            # print(f"created {created}")
-            # replay_state.g = g_new
-
-                # bmu = int(compute_bmu(replay_state, replay_mem, action_bmu,
-                #                       cfg))
-                # bmu = int(
-                #     compute_bmu_current_timestep_only(replay_state, replay_mem,
-                #                                       action_bmu, cfg))
-
-                # if bmu == bmu_refined:
-                #     print("bmu created properly")
-
-        replay_mem = update_memory(replay_mem)
-        replay_mem = add_memory(replay_mem, mem_vec[L+i])
-
-
-    seen_bmus = set()
-    bmus = []
-    for _ in range(int(max_replay)):
-        bmu = None
-        replay_mem = rollback_memory_state(replay_mem, mem_vec, L)
-        # oldest → newest frames
-        for j in range(L):
-            replay_mem = update_memory(replay_mem)
-            replay_mem = add_memory(replay_mem, mem_vec[L+j])
-            prev_bmu = bmu
-            mem_view = memory_view_at_global_timestep(ms, L-j-1)
-            action_bmu = int(am[j])
-
-            if cfg.memory_replay:
-                bmu = int(compute_bmu(replay_state, replay_mem, action_bmu, cfg))
-            else:
-                bmu = int(compute_bmu_current_timestep_only(replay_state, replay_mem, action_bmu, cfg))
-
-            # if bmu in seen_bmus:
-            #     break
-            seen_bmus.add(bmu)
-            bmus.append(bmu)
-            # if bmu == bmu_refined:
-            #     print(f"prev {prev_bmu} -> {action_bmu} -> bmu: {bmu}")
-            #
-            # elif prev_bmu == bmu_refined:
-            #     print(f"prev {prev_bmu} -> {action_bmu} -> bmu: {bmu}")
-            seen_bmus.add(bmu)
-            #
-
-            if prev_bmu is not None:
-                replay_state.g = _update_edges_with_actions(
-                    replay_state.g, prev_bmu=prev_bmu, bmu=bmu,
-                    action_bmu=action_bmu, action_map=action_map,
-                    gaussian_shape=cfg.gaussian_shape, beta=cfg.action_lr,
-                    created_step=int(state.step_idx),
-                )
-                # print(bmus)
-            # replay_mem = update_memory(replay_mem)
-            # replay_mem = add_memory(replay_mem, mem_vec[L+j])
-    # if bmu_refined not in seen_bmus:
-    #     raise EnvironmentError("added bmu not seen in replay")
-    return replay_state.g, int(prev_bmu), bmu, clone_created_count
+    return (
+        replay_state.g,
+        resolved_prev_bmu,
+        resolved_bmu,
+        clone_created_count,
+    )
 
 
 
@@ -1998,6 +2141,11 @@ def latent_step(
     state.last_clone_created_count = 0
     state.last_edge_prune_count = 0
     state.last_node_prune_count = 0
+    state.last_ambiguity_response_count = 0
+    state.last_replay_inference_count = 0
+    state.last_replay_context_count = 0
+    state.last_reconstructed_transition_count = 0
+    state.last_clone_pruned_before_support_count = 0
 
     bmu_now = compute_bmu(state, ms, action_bmu, cfg=cfg)
 
@@ -2051,7 +2199,7 @@ def latent_step(
             cfg=cfg,
         )
 
-        if ambiguity_score > cfg.ambiguity_threshold:
+        if ambiguity_score > cfg.ambiguity_threshold and bool(getattr(cfg, "ambiguity_response_enabled", True)):
             # print(f"ALIASED {state.prev_bmu}")
             state.preds.append(preds)
             # print(f"seen preds: {state.preds}")
@@ -2082,20 +2230,24 @@ def latent_step(
 
             state.g = g
 
+            state.last_ambiguity_response_count += 1
+            state.ambiguity_response_count += 1
 
-            g, resolved_prev, bmu_now, clone_created_count = _resolve_prev_with_memory_replay(
-                state=state,
-                ms=ms,
-                mem_vec=mem_vec,
-                prev_bmu=state.prev_bmu,
-                bmu=bmu_now,
-                action_mem=action_mem,
-                action_map=action_map,
-                gaussian_shape=cfg.gaussian_shape,
-                max_replay=2,
-                cfg=cfg,
-                preds=preds,
-            )
+            clone_created_count = 0
+            if bool(getattr(cfg, "ambiguity_refinement_enabled", True)) or bool(
+                getattr(cfg, "transition_reconstruction_enabled", True)
+            ):
+                g, resolved_prev, bmu_now, clone_created_count = _resolve_prev_with_memory_replay(
+                    state=state,
+                    ms=ms,
+                    mem_vec=mem_vec,
+                    prev_bmu=state.prev_bmu,
+                    bmu=bmu_now,
+                    action_mem=action_mem,
+                    action_map=action_map,
+                    cfg=cfg,
+                    preds=preds,
+                )
             state.last_clone_created_count += int(clone_created_count)
             state.clone_created_count += int(clone_created_count)
 
@@ -2120,6 +2272,15 @@ def latent_step(
         )
         #
         if state.step_idx % 1 == 0:
+            node_created_at = np.asarray(
+                g.node_features.get("node_created_at", np.zeros((g.n,), dtype=np.int32))
+            ).reshape(-1)
+            first_incoming_at = np.asarray(
+                g.node_features.get("first_incoming_at", np.full((g.n,), -1, dtype=np.int32))
+            ).reshape(-1)
+            first_outgoing_at = np.asarray(
+                g.node_features.get("first_outgoing_at", np.full((g.n,), -1, dtype=np.int32))
+            ).reshape(-1)
             g, mapping, maintenance_stats = age_maintenance(
                 resolved_prev,
                 bmu_now,
@@ -2132,6 +2293,14 @@ def latent_step(
             state.last_node_prune_count += int(maintenance_stats.node_prune_count)
             state.edge_prune_count += int(maintenance_stats.edge_prune_count)
             state.node_prune_count += int(maintenance_stats.node_prune_count)
+            removed_before_support = (
+                (mapping == -1)
+                & (node_created_at > 0)
+                & ((first_incoming_at < 0) | (first_outgoing_at < 0))
+            )
+            pruned_before_support_count = int(np.count_nonzero(removed_before_support))
+            state.last_clone_pruned_before_support_count += pruned_before_support_count
+            state.clone_pruned_before_support_count += pruned_before_support_count
 
 
             bmu_now = mapping[bmu_now]
