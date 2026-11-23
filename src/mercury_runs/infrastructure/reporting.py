@@ -146,9 +146,15 @@ def load_action_series(dataset_parquet_path: Path) -> np.ndarray:
 
 
 def fit_transition_probs(state_series: np.ndarray, action_series: np.ndarray) -> Dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]:
+    """Fit transitions from persisted post-step state/action samples.
+
+    ``action_series[t + 1]`` caused ``state_series[t] -> state_series[t + 1]``.
+    This is the same persistence convention used by the environment walk and
+    training datasets.
+    """
     counts: Dict[tuple[int, int], Dict[int, int]] = {}
     for t in range(min(len(state_series), len(action_series)) - 1):
-        key = (int(state_series[t]), int(action_series[t]))
+        key = (int(state_series[t]), int(action_series[t + 1]))
         counts.setdefault(key, {})
         next_state = int(state_series[t + 1])
         counts[key][next_state] = counts[key].get(next_state, 0) + 1
@@ -203,7 +209,7 @@ def rollout_n_step_observation_prediction_metrics(
                 continue
             dist[s0] = 1.0
             for k in range(h):
-                a = int(action_series[t + k])
+                a = int(action_series[t + k + 1])
                 next_dist = np.zeros_like(dist)
                 for s in np.nonzero(dist > 0.0)[0].tolist():
                     p_s = float(dist[s])
@@ -229,7 +235,7 @@ def rollout_n_step_observation_prediction_metrics(
         if s0 >= n_state:
             continue
         dist[s0] = 1.0
-        a = int(action_series[t])
+        a = int(action_series[t + 1])
         next_dist = np.zeros_like(dist)
         for s in np.nonzero(dist > 0.0)[0].tolist():
             p_s = float(dist[s])

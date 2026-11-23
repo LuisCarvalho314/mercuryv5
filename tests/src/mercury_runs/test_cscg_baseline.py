@@ -8,8 +8,13 @@ import pytest
 
 from mercury_runs.algorithms.cscg.api import run_cscg
 from mercury_runs.algorithms.cscg.config import CSCGConfig
-from mercury_runs.algorithms.cscg.prepare import action_to_indices, filter_valid_cscg_rows, map_to_indices
-from mercury_runs.algorithms.cscg.train import run_cscg_online_em
+from mercury_runs.algorithms.cscg.prepare import (
+    action_to_indices,
+    align_post_step_actions_to_cscg,
+    filter_valid_cscg_rows,
+    map_to_indices,
+)
+from mercury_runs.algorithms.cscg.train import run_cscg_online_em, train_cscg_model
 
 
 class _FakeCHMM:
@@ -101,6 +106,36 @@ def test_cscg_action_indices_preserve_environment_one_hot_order() -> None:
     assert action_idx.tolist() == [3, 2, 1, 0]
     assert action_values.tolist() == np.eye(4, dtype=np.int64).tolist()
     assert map_to_indices(action_values, actions).tolist() == [3, 2, 1, 0]
+
+
+def test_post_step_actions_are_shifted_to_cscg_transition_indexing() -> None:
+    actions = np.asarray([3, 0, 2, 1], dtype=np.int64)
+
+    aligned = align_post_step_actions_to_cscg(actions)
+
+    assert aligned.tolist() == [0, 2, 1, 1]
+    assert actions.tolist() == [3, 0, 2, 1]
+
+
+def test_full_cscg_training_receives_transition_aligned_actions() -> None:
+    received: list[np.ndarray] = []
+
+    class _RecordingModel:
+        def learn_em_T(self, x, a, n_iter, term_early):
+            del x, n_iter, term_early
+            received.append(np.asarray(a).copy())
+            return [1.0]
+
+    train_cscg_model(
+        _RecordingModel(),
+        algo="em",
+        obs_idx=np.asarray([0, 1, 2, 3], dtype=np.int64),
+        act_idx=np.asarray([3, 0, 2, 1], dtype=np.int64),
+        n_iter=1,
+        term_early=False,
+    )
+
+    assert [values.tolist() for values in received] == [[0, 2, 1, 1]]
 
 
 def _base_config(tmp_path: Path, train_algorithm: str) -> CSCGConfig:
@@ -443,6 +478,114 @@ def test_run_cscg_online_em_can_repeat_batches_with_initial_counts() -> None:
     assert factory_calls == 3
     assert callbacks == [(1, 2), (2, 4), (3, 6), (4, 8), (5, 10)]
     assert model.C[0, 0, 0] == 6.0
+
+
+def test_online_em_local_passes_blend_final_counts_once_and_count_batches() -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.C = np.array([[[4.0]]], dtype=np.float32)
+            self.T = np.array([[[1.0]]], dtype=np.float32)
+            self.Pi_x = np.array([1.0], dtype=np.float32)
+            self.n_clones = np.array([1], dtype=np.int64)
+            self.dtype = np.float32
+
+        def update_T(self) -> None:
+            self.T = self.C.copy()
+
+    class Module:
+        @staticmethod
+        def forward(T, Pi_x, n_clones, x, a, store_messages=False):
+            return np.array([-float(T[0, 0, 0])]), None
+
+        @staticmethod
+        def backward(T, n_clones, x, a):
+            return None
+
+        @staticmethod
+        def updateC(C, T, n_clones, mess_fwd, mess_bwd, x, a):
+            C[:] = T + 1.0
+
+    batch = {
+        "observations": np.array([0, 0], dtype=np.int64),
+        "actions": np.array([0, 0], dtype=np.int64),
+        "filtered_steps": 2,
+    }
+
+    def train(iterations_per_batch=None):
+        model = Model()
+        callbacks = []
+        kwargs = {} if iterations_per_batch is None else {"iterations_per_batch": iterations_per_batch}
+        convergence = run_cscg_online_em(
+            model,
+            chmm_mod=Module,
+            batch_iterator_factory=lambda: iter([batch, batch]),
+            map_observations=lambda values: values,
+            map_actions=lambda values: values,
+            online_lambda=0.5,
+            max_batches=2,
+            max_steps=4,
+            term_early=False,
+            initial_counts=model.C,
+            iteration_callback=lambda **values: callbacks.append((values["iteration"], values["step"])),
+            **kwargs,
+        )
+        return model, convergence, callbacks
+
+    default_model, default_convergence, default_callbacks = train()
+    one_model, one_convergence, one_callbacks = train(1)
+    two_model, two_convergence, two_callbacks = train(2)
+
+    np.testing.assert_array_equal(one_model.C, default_model.C)
+    np.testing.assert_array_equal(one_convergence, default_convergence)
+    assert one_callbacks == default_callbacks == two_callbacks == [(1, 2), (2, 4)]
+    assert one_model.C[0, 0, 0] == pytest.approx(3.5)
+    assert two_model.C[0, 0, 0] == pytest.approx(4.5)
+    assert len(two_convergence) == 2
+
+
+def test_online_cscg_training_aligns_each_post_step_action_batch() -> None:
+    received: list[np.ndarray] = []
+
+    def _recording_forward(T_tr, Pi_x, n_clones, x, a, store_messages=False):
+        received.append(np.asarray(a).copy())
+        return _fake_forward(T_tr, Pi_x, n_clones, x, a, store_messages=store_messages)
+
+    module = type(
+        "RecordingModule",
+        (),
+        {
+            "forward": staticmethod(_recording_forward),
+            "backward": staticmethod(_fake_backward),
+            "updateC": staticmethod(_fake_updateC),
+        },
+    )
+    model = _FakeCHMM(
+        n_clones=np.asarray([1], dtype=np.int64),
+        x=np.asarray([0, 0], dtype=np.int64),
+        a=np.asarray([0, 3], dtype=np.int64),
+        pseudocount=0.0,
+    )
+
+    run_cscg_online_em(
+        model,
+        chmm_mod=module,
+        batch_iterator_factory=lambda: iter(
+            [
+                {
+                    "observations": np.asarray([0, 0, 0, 0], dtype=np.int64),
+                    "actions": np.asarray([3, 0, 2, 1], dtype=np.int64),
+                    "filtered_steps": 4,
+                }
+            ]
+        ),
+        map_observations=lambda values: values,
+        map_actions=lambda values: values,
+        online_lambda=1.0,
+        max_batches=1,
+        term_early=False,
+    )
+
+    assert [values.tolist() for values in received] == [[0, 2, 1, 1]]
 
 
 def test_run_cscg_per_iteration_uses_num_points_schedule(monkeypatch, tmp_path: Path) -> None:

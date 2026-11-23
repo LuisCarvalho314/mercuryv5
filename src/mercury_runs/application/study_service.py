@@ -442,6 +442,7 @@ def _prune_command_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "cscg_train_algorithm",
         "cscg_training_mode",
         "cscg_batch_size",
+        "cscg_iterations_per_batch",
         "cscg_online_lambda",
         "cscg_eval_viterbi",
         "cscg_seed",
@@ -619,7 +620,7 @@ def build_study_run_records(
         "pocml_lr_all", "pocml_lr_m", "pocml_reg_m", "pocml_max_iter_m", "pocml_eps_m",
         "pocml_use_ground_truth_node_ids", "pocml_batch_size", "pocml_memory_bias", "baseline_cscg",
         "cscg_clones_per_obs", "cscg_clone_allocation", "cscg_clones_per_state", "cscg_clone_preset", "cscg_structural_preset", "cscg_structural_transfer_level", "cscg_structural_init_mode", "cscg_structural_source", "cscg_clone_capacity_mode", "cscg_n_iter", "cscg_pseudocount", "cscg_term_early", "cscg_train_algorithm", "cscg_training_mode",
-        "cscg_batch_size", "cscg_online_lambda", "cscg_eval_viterbi", "cscg_seed", "method",
+        "cscg_batch_size", "cscg_iterations_per_batch", "cscg_online_lambda", "cscg_eval_viterbi", "cscg_seed", "method",
         "mercury_input_mode", "sensory_observation_mode",
     }
     for run_index, run_configuration in enumerate(run_configurations):
@@ -729,6 +730,8 @@ def _render_study_dashboard(*, run_records: List[Dict[str, Any]], completed: int
         tracks = load_progress_tracks(run_root)
         if not tracks:
             continue
+        if _is_terminal_stage(str((tracks.get("lifecycle") or {}).get("stage") or "")):
+            continue
         method = str(record["config"].get("method", "mercury"))
         visible_tracks = _visible_progress_tracks(tracks)
         records_by_method.setdefault(method, []).append((record, visible_tracks))
@@ -812,7 +815,7 @@ def run_study(args: argparse.Namespace) -> None:
             while pending:
                 done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                 now = time.monotonic()
-                if first_render or (now - last_render_at >= 0.5):
+                if first_render or (now - last_render_at >= 30.0):
                     _print_study_dashboard(
                         run_records=run_records,
                         completed=completed_count,

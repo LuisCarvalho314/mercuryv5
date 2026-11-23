@@ -1,0 +1,96 @@
+{
+  "environment": {
+    "level": [13],
+    "sensor": ["cardinal distance"],
+    "sensor_range": [1],
+    "seed": [0, 1, 2],
+    "rand_prob": [0.3],
+    "num_steps": [200],
+    "datasets_root": ["datasets"],
+    "valid_trajectories_only": [false],
+    "cscg_valid_trajectories_only": [false],
+    "random_start": [true],
+    "reuse_existing_run": [false],
+    "window_length": [50],
+    "wandb": [false]
+  },
+  "evaluation": {
+    "paper_precision": [false],
+    "paper_precision_mode": ["off"],
+    "structure_metrics": [false],
+    "computational_eval": [false]
+  },
+  "methods": {
+    "mercury": {
+      "enabled": false,
+      "grid": {}
+    },
+    "sensory": {
+      "enabled": false,
+      "grid": {}
+    },
+    "pocml": {
+      "enabled": false,
+      "grid": {}
+    },
+    "cscg": {
+      "enabled": false,
+      "grid": {}
+    },
+    "mercury_cscg_hybrid": {
+      "enabled": false,
+      "grid": {}
+    },
+    "tmgwr_cscg_hybrid": {
+      "enabled": true,
+      "grid": {
+        "baseline_cscg": [false],
+        "memory_length": [10],
+        "sensory_allow_self_loops": [false],
+        "activation_threshold": [0.95],
+        "topological_neighbourhood_threshold": [0.6],
+        "sensory_max_neurons": [50],
+        "sensory_weighting": [1.0],
+        "winning_node_lr": [0.55],
+        "topological_neighbourhood_lr": [0.9],
+        "sensory_action_lr": [0.5],
+        "global_context_lr": [0.9],
+        "sensory_max_age": [18],
+        "sensory_gaussian_shape": [2],
+        "latent_allow_self_loops": [true],
+        "latent_max_neurons": [50],
+        "latent_action_lr": [0.1],
+        "latent_gaussian_shape": [2],
+        "latent_max_age": [18],
+        "ambiguity_threshold": [10],
+        "ambiguity_decay": [0.99],
+        "ambiguity_counter_mode": ["action"],
+        "trace_decay": [0.99],
+        "lambda_trace": [0.05],
+        "weight_preset": ["only_memory"],
+        "memory_replay": [true],
+        "memory_disambiguation": [true],
+        "am_n_codebook": [4],
+        "am_lr": [0.5],
+        "am_sigma": [0.0],
+        "am_key": [0],
+        "am_identity_for_one_hot": [false],
+        "cscg_clone_preset": ["uniform_obs_1"],
+        "cscg_structural_transfer_level": ["first_order_observation"],
+        "cscg_structural_init_mode": ["binary"],
+        "cscg_structural_source": ["source_graph"],
+        "cscg_clone_capacity_mode": ["source"],
+        "cscg_n_iter": [2],
+        "cscg_pseudocount": [0.002],
+        "cscg_term_early": [false],
+        "cscg_train_algorithm": ["em"],
+        "cscg_training_mode": ["full"],
+        "cscg_batch_size": [200],
+        "cscg_online_lambda": [1.0],
+        "cscg_eval_viterbi": [false],
+        "cscg_seed": [null],
+        "mercury_cscg_prior_weight": [1.0]
+      }
+    }
+  }
+}

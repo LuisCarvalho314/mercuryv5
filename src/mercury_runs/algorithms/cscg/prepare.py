@@ -125,6 +125,52 @@ def action_to_indices(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return to_indices(action_array)
 
 
+def prepare_cscg_transition_inputs(
+    observations: np.ndarray,
+    post_step_actions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert persisted post-step samples into CSCG transition tuples.
+
+    Persisted sample ``t`` contains the observation reached by
+    ``post_step_actions[t]``.  Therefore the transition between two persisted
+    observations is ``(observation[t], post_step_actions[t + 1],
+    observation[t + 1])``.
+    """
+    observation_array = np.asarray(observations)
+    action_array = np.asarray(post_step_actions)
+    if observation_array.ndim == 0 or action_array.ndim == 0:
+        raise ValueError("CSCG observations and actions must have a leading timestep dimension.")
+    if observation_array.shape[0] != action_array.shape[0]:
+        raise ValueError("Persisted CSCG observations and actions must have matching lengths.")
+    return observation_array[:-1], action_array[1:], observation_array[1:]
+
+
+def align_post_step_actions_to_cscg(actions: np.ndarray) -> np.ndarray:
+    """Convert environment post-step actions to CSCG transition indexing.
+
+    Maze trajectories store ``action[t]`` beside the observation produced by
+    that action.  Consequently, the transition ``observation[t] ->
+    observation[t + 1]`` was caused by ``action[t + 1]``.  The vendored CSCG
+    implementation instead consumes ``a[t]`` for that transition.
+
+    CSCG expects an action array with the same length as the observation array,
+    although its final element is unused.  Shift left and repeat the final
+    action to preserve that shape without inventing a new action identifier.
+    """
+    action_array = np.asarray(actions)
+    if action_array.ndim == 0:
+        raise ValueError("CSCG actions must have a leading timestep dimension.")
+    aligned = np.array(action_array, copy=True)
+    if aligned.shape[0] > 1:
+        placeholder_observations = np.empty((aligned.shape[0], 0), dtype=np.uint8)
+        _, transition_actions, _ = prepare_cscg_transition_inputs(
+            placeholder_observations,
+            action_array,
+        )
+        aligned[:-1] = transition_actions
+    return aligned
+
+
 def map_to_indices(reference_uniques: np.ndarray, values: np.ndarray) -> np.ndarray:
     if reference_uniques.ndim == 1:
         lookup = {value.item() if hasattr(value, "item") else value: idx for idx, value in enumerate(reference_uniques.tolist())}

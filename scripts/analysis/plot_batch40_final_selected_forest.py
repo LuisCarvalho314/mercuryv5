@@ -1,0 +1,17 @@
+"""Thin shim — canonical implementation has moved to src.
+
+Use:
+    python -m mercury_runs.analysis.plots.batch_summary_forest [args]
+or run this script directly as before.
+"""
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from mercury_runs.analysis.plots.batch_summary_forest import main
+
+if __name__ == "__main__":
+    main()

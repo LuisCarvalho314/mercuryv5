@@ -14,6 +14,7 @@ from .evaluate import (
 )
 from .prepare import (
     action_to_indices,
+    align_post_step_actions_to_cscg,
     collect_streaming_cscg_metadata,
     filter_valid_cscg_rows,
     fit_state_to_gt_map,
@@ -208,6 +209,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     online_training_summary = {
         "training_mode": training_mode,
         "batch_size": None if training_mode == "full" else int(config.batch_size),
+        "iterations_per_batch": None if training_mode == "full" else int(config.iterations_per_batch),
         "online_lambda": None if training_mode == "full" else float(config.online_lambda),
         "num_batches": None,
         "final_viterbi_refinement": (False if training_mode == "online_em" else None),
@@ -429,6 +431,7 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
                 online_lambda=float(config.online_lambda),
                 max_batches=int(config.n_iter),
                 term_early=bool(config.term_early),
+                iterations_per_batch=int(config.iterations_per_batch),
                 max_steps=int(config.n_iter),
                 initial_counts=initial_counts,
                 repeat_batches=True,
@@ -516,7 +519,11 @@ def run_cscg(config: CSCGConfig, *, progress_callback: Optional[Callable[..., No
     if training_mode == "online_em" and algo == "viterbi":
         model.pseudocount = 0.0
         convergence_by_stage["viterbi"] = np.asarray(
-            model.learn_viterbi_T(obs_idx, act_idx, n_iter=int(config.n_iter)),
+            model.learn_viterbi_T(
+                obs_idx,
+                align_post_step_actions_to_cscg(act_idx),
+                n_iter=int(config.n_iter),
+            ),
             dtype=np.float32,
         )
         training_stages = ["em", "viterbi"]

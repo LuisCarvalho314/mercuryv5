@@ -111,7 +111,7 @@
         "cscg_train_algorithm": ["em"],
         "cscg_training_mode": ["online_em"],
         "cscg_batch_size": [10, 40, 100],
-        "cscg_online_lambda": [0.9999],
+        "cscg_online_lambda": [0.99],
         "cscg_eval_viterbi": [false],
         "cscg_seed": [null]
       }

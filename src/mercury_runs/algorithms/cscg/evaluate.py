@@ -35,11 +35,17 @@ from ...infrastructure.paper_precision import (
 from ...infrastructure.paper_precision_snapshots import load_cscg_paper_precision_snapshot
 from ...io_parquet import ParquetConfig, load_level_parquet
 from ...infrastructure.reporting import rollout_n_step_observation_prediction_metrics
-from .prepare import action_to_indices, filter_valid_cscg_rows, import_cscg_module, map_to_indices
+from .prepare import (
+    action_to_indices,
+    align_post_step_actions_to_cscg,
+    filter_valid_cscg_rows,
+    import_cscg_module,
+    map_to_indices,
+)
 
 
 def decode_cscg_states(model: Any, obs_idx: np.ndarray, act_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    decode_log2_lik, clone_states = model.decode(obs_idx, act_idx)
+    decode_log2_lik, clone_states = model.decode(obs_idx, align_post_step_actions_to_cscg(act_idx))
     return np.asarray(decode_log2_lik, dtype=np.float64), np.asarray(clone_states, dtype=np.int32)
 
 
@@ -177,7 +183,7 @@ def compute_cscg_paper_precision_metrics_from_model(
         )
         model.T = np.asarray(model_npz["T"], dtype=np.float32)
         try:
-            _, clone_states = model.decode(obs_idx, act_idx)
+            _, clone_states = model.decode(obs_idx, align_post_step_actions_to_cscg(act_idx))
         except AssertionError:
             unsupported_walks += 1
             continue
@@ -518,7 +524,7 @@ def _decode_model_on_walk_cache(
         )
         model.T = np.asarray(model_npz["T"], dtype=np.float32)
         try:
-            _, clone_states = model.decode(obs_idx, act_idx)
+            _, clone_states = model.decode(obs_idx, align_post_step_actions_to_cscg(act_idx))
         except AssertionError:
             unsupported += 1
             continue

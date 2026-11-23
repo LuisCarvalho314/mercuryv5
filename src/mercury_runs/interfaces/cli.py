@@ -46,6 +46,7 @@ _CSCG_ARGS = {
     "cscg_train_algorithm",
     "cscg_training_mode",
     "cscg_batch_size",
+    "cscg_iterations_per_batch",
     "cscg_online_lambda",
     "cscg_eval_viterbi",
     "cscg_seed",
@@ -222,6 +223,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--cscg_train_algorithm", type=str, default="em", choices=["em", "viterbi"])
     parser.add_argument("--cscg_training_mode", type=str, default="online_em", choices=["full", "online_em"])
     parser.add_argument("--cscg_batch_size", type=int, default=40)
+    parser.add_argument("--cscg_iterations_per_batch", type=int, default=1)
     parser.add_argument("--cscg_online_lambda", type=float, default=0.9999)
     parser.add_argument("--cscg_eval_viterbi", nargs="?", const=True, default=False, type=strtobool)
     parser.add_argument("--cscg_seed", type=int, default=None)
@@ -267,7 +269,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--reevaluate_paper_precision_snapshots", action="store_true", default=False)
     parser.add_argument("--evaluate_study_snapshots", action="store_true", default=False)
     parser.add_argument("--evaluate_study", action="store_true", default=False,
-                        help="Run canonical-v4 snapshot evaluation over a completed study")
+                        help="Run versioned canonical snapshot evaluation over a completed study")
     parser.add_argument("--eval_num_walks", type=int, default=100,
                         help="Number of evaluation walks for evaluate-study")
     parser.add_argument("--eval_walk_length", type=int, default=10_000,

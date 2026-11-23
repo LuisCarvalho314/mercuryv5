@@ -564,6 +564,7 @@ def build_run_payload(args: argparse.Namespace) -> Dict[str, Any]:
                 "train_algorithm": str(getattr(args, "cscg_train_algorithm", "em")),
                 "training_mode": str(getattr(args, "cscg_training_mode", "full")),
                 "batch_size": int(getattr(args, "cscg_batch_size", 1024)),
+                "iterations_per_batch": int(getattr(args, "cscg_iterations_per_batch", 1)),
                 "online_lambda": float(getattr(args, "cscg_online_lambda", 1.0)),
                 "eval_viterbi": bool(getattr(args, "cscg_eval_viterbi", False)),
                 "mercury_cscg_prior_weight": float(getattr(args, "mercury_cscg_prior_weight", 1.0)),

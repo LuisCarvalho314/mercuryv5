@@ -1,0 +1,80 @@
+{
+  "environment": {
+    "level": [13],
+    "sensor": ["cardinal distance"],
+    "sensor_range": [1],
+    "seed": [0, 1, 2],
+    "rand_prob": [0.3],
+    "num_steps": [2000],
+    "datasets_root": ["datasets"],
+    "valid_trajectories_only": [false],
+    "pocml_valid_trajectories_only": [false],
+    "random_start": [true],
+    "no_reuse_existing_dataset": [false],
+    "reuse_existing_run": [false],
+    "no_reuse_existing_run": [false],
+    "window_length": [100],
+    "wandb": [false],
+    "wandb_mode": ["disabled"],
+    "wandb_log_artifacts": [false]
+  },
+  "evaluation": {
+    "paper_precision": [true],
+    "paper_precision_mode": ["final"],
+    "paper_precision_num_walks": [20],
+    "paper_precision_walk_length": [1000],
+    "structure_metrics": [true],
+    "structure_metrics_epsilon": [0.2],
+    "structure_metrics_epsilons": [[0.2]],
+    "structure_metrics_ignore_self_loops": [true],
+    "structure_metrics_scope": ["exact_level"],
+    "structure_metrics_ground_truth_source": ["empirical_walks"],
+    "computational_eval": [false],
+    "computational_eval_profile": ["full"]
+  },
+  "methods": {
+    "mercury": {
+      "enabled": false,
+      "grid": {}
+    },
+    "sensory": {
+      "enabled": false,
+      "grid": {}
+    },
+    "pocml": {
+      "enabled": true,
+      "grid": {
+        "pocml_epochs": [30],
+        "pocml_trajectory_length": [15],
+        "pocml_max_trajectories": [null],
+        "pocml_state_dim": [50],
+        "pocml_random_feature_dim": [500],
+        "pocml_n_states": [8],
+        "pocml_precision_capacities": [null],
+        "pocml_alpha": [2.0],
+        "pocml_lr_q": [0.1],
+        "pocml_lr_v": [0.08],
+        "pocml_lr_all": [0.05],
+        "pocml_lr_m": [1.0],
+        "pocml_reg_m": [0.0],
+        "pocml_max_iter_m": [1],
+        "pocml_eps_m": [0.001],
+        "pocml_batch_size": [64],
+        "pocml_memory_bias": [false],
+        "pocml_use_ground_truth_node_ids": [false]
+      }
+    },
+    "cscg": {
+      "enabled": false,
+      "grid": {}
+    },
+    "mercury_cscg_hybrid": {
+      "enabled": false,
+      "grid": {}
+    },
+    "tmgwr_cscg_hybrid": {
+      "enabled": false,
+      "grid": {}
+    }
+  }
+}

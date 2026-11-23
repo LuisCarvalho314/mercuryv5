@@ -489,7 +489,7 @@ def test_default_matrix_smoke_config_is_lean_and_expands(tmp_path) -> None:
     assert {run["cscg_structural_preset"] for run in tmgwr} == {"source_graph_first_order"}
 
 
-def test_render_study_dashboard_groups_active_first_and_collapses_completed(tmp_path, monkeypatch) -> None:
+def test_render_study_dashboard_shows_active_runs_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("shutil.get_terminal_size", lambda fallback=(120, 20): __import__("os").terminal_size((120, 20)))
     study_root = tmp_path / "studies"
     study_name = "demo"
@@ -520,18 +520,18 @@ def test_render_study_dashboard_groups_active_first_and_collapses_completed(tmp_
     dashboard = _render_study_dashboard(run_records=records, completed=2, total=4)
     lines = dashboard.splitlines()
 
+    assert lines[0] == "Study progress: 2/4 completed"
     mercury_header = lines.index("MERCURY")
     pocml_header = lines.index("POCML")
-    cscg_header = lines.index("CSCG")
-    assert mercury_header < pocml_header < cscg_header
+    assert mercury_header < pocml_header
+    assert "CSCG" not in lines
     assert any("mactive01 mercury" in line and "lifecycle" in line for line in lines)
     assert any("train" in line and "training" in line for line in lines)
     assert any("eval" in line and "evaluating" in line for line in lines)
     assert not any("paper_precision" in line and "mactive01" in line for line in lines)
     mercury_rows = [line for line in lines[mercury_header + 1:pocml_header] if line.strip()]
     assert "mactive01 mercury" in mercury_rows[0]
-    assert any("mdone001 mercury" in line and "done" in line for line in mercury_rows)
-    assert any("cdone001 cscg" in line and "failed" in line for line in lines[cscg_header + 1:])
+    assert not any("mdone001" in line or "cdone001" in line for line in lines)
 
 
 def test_write_incomplete_report_ignores_stale_runs_outside_manifest(tmp_path, monkeypatch) -> None:

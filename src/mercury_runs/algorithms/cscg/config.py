@@ -33,6 +33,7 @@ class CSCGConfig(BaseModel):
     train_algorithm: str = Field(default="em")
     training_mode: str = Field(default="full")
     batch_size: int = Field(default=1024, gt=0)
+    iterations_per_batch: int = Field(default=1, gt=0)
     online_lambda: float = Field(default=1.0, gt=0.0, le=1.0)
     eval_viterbi: bool = False
     seed: int = Field(default=42, ge=0)

@@ -515,6 +515,67 @@ def action_ids_from_action_vectors(actions: np.ndarray) -> np.ndarray:
     return np.argmax(action_array, axis=1).astype(np.int64, copy=False)
 
 
+_ACTION_ID_BY_CARTESIAN_DISPLACEMENT = {
+    (-1, 0): 0,  # north
+    (0, 1): 1,   # east
+    (1, 0): 2,   # south
+    (0, -1): 3,  # west
+}
+
+
+def action_id_from_cartesian_displacement(source: Sequence[int], target: Sequence[int]) -> int | None:
+    """Return the environment action ID for a realised unit displacement.
+
+    A self transition returns ``None`` because position alone cannot identify
+    which action collided with a wall.
+    """
+    source_position = np.asarray(source, dtype=np.int64).reshape(-1)
+    target_position = np.asarray(target, dtype=np.int64).reshape(-1)
+    if source_position.shape != (2,) or target_position.shape != (2,):
+        raise ValueError("Cartesian source and target positions must each contain two coordinates.")
+    displacement = tuple((target_position - source_position).tolist())
+    if displacement == (0, 0):
+        return None
+    try:
+        return int(_ACTION_ID_BY_CARTESIAN_DISPLACEMENT[displacement])
+    except KeyError as exc:
+        raise ValueError(f"Expected a unit cardinal displacement, got {displacement!r}.") from exc
+
+
+def validate_evaluation_walk_action_alignment(
+    *,
+    positions: np.ndarray,
+    actions: np.ndarray,
+) -> int:
+    """Require exact post-step action agreement with every realised move."""
+    position_array = np.asarray(positions)
+    action_ids = action_ids_from_action_vectors(np.asarray(actions))
+    if position_array.ndim != 2 or position_array.shape[1] != 2:
+        raise ValueError(f"Expected positions with shape (N, 2), got {position_array.shape!r}.")
+    if position_array.shape[0] != action_ids.shape[0]:
+        raise ValueError("Evaluation positions and actions must have matching lengths.")
+
+    checked = 0
+    for timestep in range(max(0, position_array.shape[0] - 1)):
+        expected = action_id_from_cartesian_displacement(
+            position_array[timestep],
+            position_array[timestep + 1],
+        )
+        if expected is None:
+            continue
+        actual = int(action_ids[timestep + 1])
+        if actual != expected:
+            raise ValueError(
+                "Evaluation action alignment invariant failed at transition "
+                f"{timestep}->{timestep + 1}: expected action {expected} from realised "
+                f"displacement, found post-step action {actual}."
+            )
+        checked += 1
+    if checked == 0:
+        raise ValueError("Evaluation action alignment invariant checked no non-self transitions.")
+    return checked
+
+
 def build_action_conditioned_tensor_from_walks(
     *,
     state_walks: Iterable[np.ndarray],
@@ -1411,6 +1472,54 @@ def compute_occupancy_weighted_action_tv(
     return tv_occ, tv_macro, occ_weights, tv_by_state_occ, tv_by_state_macro
 
 
+def condition_non_selfloop_action_distributions(
+    P_hat: np.ndarray,
+    P_true: np.ndarray,
+    valid_rows: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Condition action rows on making a non-self transition.
+
+    V_move = {(a, i): sum_{j != i} P_GT(j | i, a) > 0}.
+    Rows outside V_move are zero.  Predicted rows with no remaining mass are
+    assigned to the explicit sink so that a missing learned row has TV = 1.
+
+    Returns (P_hat_nonself, P_true_nonself, valid_move_rows).
+    """
+    P_hat_arr = np.asarray(P_hat, dtype=np.float64)
+    P_true_arr = np.asarray(P_true, dtype=np.float64)
+    valid_arr = np.asarray(valid_rows, dtype=bool)
+    if P_hat_arr.shape != P_true_arr.shape or P_hat_arr.ndim != 3:
+        raise ValueError("P_hat and P_true must be matching (action, source, target) tensors.")
+    n_actions, n_true, n_ext = P_hat_arr.shape
+    if valid_arr.shape != (n_actions, n_true):
+        raise ValueError("valid_rows must match the action/source dimensions.")
+    if n_ext != n_true + 1:
+        raise ValueError("Conditional no-self rows require an explicit sink target column.")
+
+    P_hat_nonself = np.zeros_like(P_hat_arr)
+    P_true_nonself = np.zeros_like(P_true_arr)
+    valid_move_rows = np.zeros_like(valid_arr)
+
+    for a, i in np.argwhere(valid_arr).tolist():
+        gt_row = P_true_arr[a, i].copy()
+        gt_row[i] = 0.0
+        gt_total = float(gt_row[:n_true].sum())
+        if gt_total <= 0.0:
+            continue
+        valid_move_rows[a, i] = True
+        P_true_nonself[a, i] = gt_row / gt_total
+
+        hat_row = P_hat_arr[a, i].copy()
+        hat_row[i] = 0.0
+        hat_total = float(hat_row.sum())
+        if hat_total <= 0.0:
+            P_hat_nonself[a, i, -1] = 1.0
+        else:
+            P_hat_nonself[a, i] = hat_row / hat_total
+
+    return P_hat_nonself, P_true_nonself, valid_move_rows
+
+
 def compute_non_selfloop_action_tv(
     P_hat: np.ndarray,
     P_true: np.ndarray,
@@ -1418,41 +1527,14 @@ def compute_non_selfloop_action_tv(
 ) -> np.ndarray:
     """Conditional non-self-loop TV diagnostic.
 
-    V_move = {(a, i): sum_{j != i} P_GT(j | i, a) > 0}.
-    For rows in V_move: remove diagonal, renormalise over j != i and ⊥, compute TV.
-    For rows not in V_move: result is 0.
-
-    TV = 1 if GT non-self-loop mass exists but predicted non-self-loop mass is zero.
+    Rows outside V_move are returned as zero and must be excluded from metric
+    aggregation using the mask from
+    :func:`condition_non_selfloop_action_distributions`.
     """
-    n_actions, n_true, n_ext = P_hat.shape
-    tv_nonsl = np.zeros((n_actions, n_true), dtype=np.float64)
-
-    for a, i in np.argwhere(valid_rows).tolist():
-        # GT non-self-loop mass (exclude ⊥ from GT).
-        gt_row = P_true[a, i].copy()
-        gt_self = float(gt_row[i])
-        gt_row[i] = 0.0
-        gt_total = float(gt_row[:n_true].sum())  # GT has no ⊥ mass
-        if gt_total <= 0:
-            continue  # not in V_move
-
-        # Renormalise GT over j != i (⊥ column is zero).
-        gt_norm = gt_row / gt_total
-
-        # Predicted: remove diagonal, renormalise over j != i and ⊥.
-        hat_row = P_hat[a, i].copy()
-        hat_row[i] = 0.0
-        hat_total = float(hat_row.sum())
-        if hat_total <= 0:
-            # No predicted non-self-loop mass → all to ⊥, TV = 1.
-            hat_norm = np.zeros(n_ext)
-            hat_norm[-1] = 1.0
-        else:
-            hat_norm = hat_row / hat_total
-
-        tv_nonsl[a, i] = 0.5 * float(np.abs(hat_norm - gt_norm).sum())
-
-    return tv_nonsl
+    P_hat_nonself, P_true_nonself, valid_move_rows = condition_non_selfloop_action_distributions(
+        P_hat, P_true, valid_rows
+    )
+    return _action_tv_by_pair(P_hat_nonself, P_true_nonself, valid_move_rows)
 
 
 def compute_action_edge_metrics_canonical(
@@ -1576,28 +1658,21 @@ def compute_collapsed_distributions_canonical(
         return {"tv_by_state": tv_by_state, "tv_occ": tv_occ, "tv_macro": tv_macro}
 
     def _non_self_loop_tv_stats(P_hat_c: np.ndarray, P_true_c: np.ndarray) -> dict:
-        tv_by_state = np.zeros(n_true, dtype=np.float64)
-        for i in np.flatnonzero(valid_collapsed).tolist():
-            gt_row = P_true_c[i].copy()
-            gt_row[i] = 0.0
-            gt_total = float(gt_row[:n_true].sum())
-            if gt_total <= 0:
-                continue
-            gt_norm = gt_row / gt_total
-
-            hat_row = P_hat_c[i].copy()
-            hat_row[i] = 0.0
-            hat_total = float(hat_row.sum())
-            if hat_total <= 0:
-                hat_norm = np.zeros_like(hat_row)
-                hat_norm[-1] = 1.0
-            else:
-                hat_norm = hat_row / hat_total
-
-            tv_by_state[i] = 0.5 * float(np.abs(hat_norm - gt_norm).sum())
-        tv_occ = float((tv_by_state * d_state).sum())
-        n_vc = int(valid_collapsed.sum())
-        tv_macro = float(tv_by_state[valid_collapsed].mean()) if n_vc > 0 else 0.0
+        hat_ns, true_ns, valid_move_2d = condition_non_selfloop_action_distributions(
+            P_hat_c[np.newaxis, :, :],
+            P_true_c[np.newaxis, :, :],
+            valid_collapsed[np.newaxis, :],
+        )
+        valid_move = valid_move_2d[0]
+        tv_by_state = _action_tv_by_pair(hat_ns, true_ns, valid_move_2d)[0]
+        move_count = int(valid_move.sum())
+        move_total = float(N_i_arr[valid_move].sum())
+        if move_total > 0.0:
+            move_weights = np.where(valid_move, N_i_arr / move_total, 0.0)
+        else:
+            move_weights = np.where(valid_move, 1.0 / move_count if move_count else 0.0, 0.0)
+        tv_occ = float((tv_by_state * move_weights).sum())
+        tv_macro = float(tv_by_state[valid_move].mean()) if move_count else 0.0
         return {"tv_non_self_loop_by_state": tv_by_state, "tv_non_self_loop_occ": tv_occ, "tv_non_self_loop_macro": tv_macro}
 
     eval_tv = _tv_stats(P_hat_eval, P_true_eval)
@@ -1658,6 +1733,7 @@ class CanonicalTransitionEvaluationResult:
     P_true_full: np.ndarray                    # (n_actions, n_true, n_true+1)
     P_hat_full: np.ndarray                     # (n_actions, n_true, n_true+1)
     valid_action_rows: np.ndarray              # (n_actions, n_true) bool
+    valid_non_self_loop_rows: np.ndarray       # (n_actions, n_true) bool -- V_move
 
     # --- Unmatched target mass ---
     unmatched_target_mass: np.ndarray          # (n_actions, n_true) float64
@@ -1834,9 +1910,12 @@ def evaluate_transition_structure_canonical(
     )
 
     # --- Step 10: Non-self-loop diagnostic ---
-    tv_nonsl = compute_non_selfloop_action_tv(P_hat_full, P_true_ext, valid_rows)
+    P_hat_nonsl, P_true_nonsl, valid_move_rows = condition_non_selfloop_action_distributions(
+        P_hat_full, P_true_ext, valid_rows
+    )
+    tv_nonsl = _action_tv_by_pair(P_hat_nonsl, P_true_nonsl, valid_move_rows)
     tv_nonsl_occ, tv_nonsl_macro, _, tv_nonsl_state_occ, tv_nonsl_state_macro = compute_occupancy_weighted_action_tv(
-        tv_nonsl, valid_rows, N_ai
+        tv_nonsl, valid_move_rows, N_ai
     )
 
     # --- Step 11: Action edge metrics ---
@@ -1860,6 +1939,7 @@ def evaluate_transition_structure_canonical(
         P_true_full=P_true_ext,
         P_hat_full=P_hat_full,
         valid_action_rows=valid_rows,
+        valid_non_self_loop_rows=valid_move_rows,
         unmatched_target_mass=unmatched_mass,
         total_unmatched_target_mass=total_unmatched,
         tv_by_pair_full=tv_full,

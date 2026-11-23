@@ -1,0 +1,56 @@
+{
+  "environment": {
+    "level": [21],
+    "sensor": ["cardinal distance"],
+    "sensor_range": [1],
+    "seed": [0, 1, 2],
+    "rand_prob": [0.1],
+    "num_steps": [2000],
+    "datasets_root": ["datasets"],
+    "valid_trajectories_only": [false],
+    "cscg_valid_trajectories_only": [false],
+    "random_start": [true],
+    "no_reuse_existing_dataset": [false],
+    "reuse_existing_run": [true],
+    "wandb": [false],
+    "wandb_mode": ["disabled"],
+    "wandb_log_artifacts": [false]
+  },
+  "evaluation": {
+    "paper_precision": [true],
+    "paper_precision_mode": ["final"],
+    "paper_precision_num_walks": [20],
+    "paper_precision_walk_length": [1000],
+    "structure_metrics": [true],
+    "structure_metrics_epsilon": [0.2],
+    "structure_metrics_epsilons": [[0.2]],
+    "structure_metrics_ignore_self_loops": [true],
+    "structure_metrics_scope": ["exact_level"],
+    "structure_metrics_ground_truth_source": ["empirical_walks"],
+    "computational_eval": [true],
+    "computational_eval_profile": ["full"]
+  },
+  "methods": {
+    "mercury": {"enabled": false, "grid": {}},
+    "sensory": {"enabled": false, "grid": {}},
+    "pocml": {"enabled": false, "grid": {}},
+    "cscg": {
+      "enabled": true,
+      "grid": {
+        "cscg_structural_preset": ["vanilla_cscg"],
+        "cscg_n_iter": [2000],
+        "cscg_pseudocount": [0.002],
+        "cscg_term_early": [false],
+        "cscg_train_algorithm": ["em"],
+        "cscg_training_mode": ["online_em"],
+        "cscg_batch_size": [40],
+        "cscg_iterations_per_batch": [1, 2, 5],
+        "cscg_online_lambda": [0.9999],
+        "cscg_eval_viterbi": [false],
+        "cscg_seed": [null]
+      }
+    },
+    "mercury_cscg_hybrid": {"enabled": false, "grid": {}},
+    "tmgwr_cscg_hybrid": {"enabled": false, "grid": {}}
+  }
+}
