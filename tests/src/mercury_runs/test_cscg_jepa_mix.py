@@ -525,3 +525,20 @@ def test_fixed_tensor_makes_the_historical_window_exact():
         for H in range(2, u + 2):
             longer = smooth_window(T, groups, x[u - H + 1:u + 2], a[u - H + 1:u + 1], filters[u - H + 1])[0][-2]
             np.testing.assert_allclose(longer, one, rtol=0, atol=1e-13)
+
+
+@pytest.mark.parametrize("rho", [0., .5, 1.])
+def test_teacher_snapshots_are_recorded_at_checkpoints_only(rho):
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    config = mixed(rho, student_inference="smooth")
+    result = train_experiment(T, clones, x, a, "predictive", config, [0, 4, len(x)])
+    if rho == 0:
+        assert result["teacher_snapshots"] == {}
+        return
+    assert sorted(result["teacher_snapshots"]) == [0, 4, len(x)]
+    np.testing.assert_array_equal(result["teacher_snapshots"][0], T)
+    np.testing.assert_array_equal(result["teacher_snapshots"][len(x)], result["teacher_T"])
+    # Recording never changes learning: same student trajectory with a denser schedule.
+    dense = train_experiment(T, clones, x, a, "predictive", config, range(len(x) + 1))
+    np.testing.assert_array_equal(dense["teacher_snapshots"][4], result["teacher_snapshots"][4])
+    np.testing.assert_array_equal(dense["final_T"], result["final_T"])

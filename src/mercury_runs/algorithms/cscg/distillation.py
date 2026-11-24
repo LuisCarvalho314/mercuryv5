@@ -328,6 +328,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     # at arrival u+1 under that arrival's pre-update student tensor (smooth mode only).
     cached_source = {}
     snapshots, diagnostics = {}, []
+    teacher_snapshots = {}   # recording only: the EMA teacher at each checkpoint (empty without a teacher)
     work = dict(filter_block_entries=0, smoothing_block_entries=0,
                 replay_block_entries=0, tensor_entries=0, base_msteps=0,
                 refinements=0, loss_evaluations=0, transitions=0,
@@ -343,6 +344,8 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
         support[key] = value if support[key] is None else min(support[key], value)
     if 0 in checkpoints:
         snapshots[0] = T.copy()
+        if teacher_active:
+            teacher_snapshots[0] = teacher.copy()
         if callback:
             callback(0, T.copy(), dict(train_seconds=0., **work, **support_record()))
     episode_start = 0
@@ -516,8 +519,10 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
         elapsed += time.perf_counter() - started
         if (t + 1) in checkpoints:
             snapshots[t + 1] = T.copy()
+            if teacher_active:
+                teacher_snapshots[t + 1] = teacher.copy()
             if callback:
                 callback(t + 1, T.copy(), dict(train_seconds=elapsed, **work, **support_record()))
             support = dict(student=None, teacher=None)
-    return dict(snapshots=snapshots, diagnostics=diagnostics, counts=S,
+    return dict(snapshots=snapshots, teacher_snapshots=teacher_snapshots, diagnostics=diagnostics, counts=S,
                 final_T=T, teacher_T=teacher, train_seconds=elapsed, work=work)

@@ -440,8 +440,10 @@ def run_case(output, level, seed, method, config, checkpoints, data, n_clones, i
                                                  checkpoint_metadata=metadata, provenance=provenance))
         print(f"FAILED level={level} seed={seed} {method}: {error}", flush=True)
         return []
+    teacher = ({} if not result["teacher_snapshots"] else
+               dict(teacher_T=np.stack([result["teacher_snapshots"][s] for s in checkpoints])))
     np.savez_compressed(folder / "snapshots.npz", steps=np.array(checkpoints),
-                        T=np.stack([result["snapshots"][s] for s in checkpoints]), n_clones=n_clones,
+                        T=np.stack([result["snapshots"][s] for s in checkpoints]), n_clones=n_clones, **teacher,
                         obs_uniques=data["vocabulary"], action_uniques=data["action_vocabulary"])
     write_json(folder / "training.json", dict(provenance=provenance, diagnostics=result["diagnostics"],
                                               checkpoint_metadata=metadata))

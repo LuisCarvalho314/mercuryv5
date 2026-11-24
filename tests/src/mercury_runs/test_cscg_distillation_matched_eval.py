@@ -92,3 +92,7 @@ def test_reduced_budget_changes_only_walk_count_and_length():
     other = protocol_for(21, 1, 10, 500, .8)
     assert {k for k, v in vars(reduced).items() if vars(other)[k] != v} == {"rand_prob"}
     assert other.walk_cache_key() != reduced.walk_cache_key()
+
+
+def test_teacher_is_decoded_with_its_windowed_inference():
+    assert decoder_lag("teacher", 100) == 99 and decoder_lag("teacher", 40) == 39

@@ -85,7 +85,10 @@ def protocol_for(level, lag, walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BU
 
 
 def decoder_lag(method, window):
-    return window - 1 if method == "long" else 1
+    """Training-matched lag: W - 1 for windowed smoothers (long EM, and the EMA teacher with its
+    context W_T), 1 for lag-one inference (short EM, controls, and the JEPA student at any
+    student context: under a frozen tensor the carried filter makes the context exact)."""
+    return window - 1 if method in ("long", "teacher") else 1
 
 
 @numba.njit(cache=True)
@@ -189,12 +192,18 @@ def level_context(level, cache_root, path=None, budget=CANONICAL_BUDGET):
     return _CONTEXT[level, budget]
 
 
-def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CANONICAL_BUDGET):
+def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CANONICAL_BUDGET, teacher_window=None):
+    """Student snapshots, plus EMA-teacher snapshots when the run saved them (method "teacher",
+    records under teacher_<decoder>/; training-matched lag W_T - 1, as for long EM)."""
     rows = json.loads((folder / "rows.json").read_text())
-    level, seed, method = rows[0]["level"], rows[0]["seed"], rows[0]["method"]
+    level, seed, student = rows[0]["level"], rows[0]["seed"], rows[0]["method"]
     walks, gt, source = level_context(level, cache_root, cache_paths[level], budget)
     with np.load(folder / "snapshots.npz") as saved:
-        steps, Ts, n_clones = saved["steps"], saved["T"].astype(np.float64), saved["n_clones"]
+        steps, n_clones = saved["steps"], saved["n_clones"]
+        models = [(student, saved["T"].astype(np.float64), decoder_lag(student, window), "")]
+        if "teacher_T" in saved:
+            models.append(("teacher", saved["teacher_T"].astype(np.float64),
+                           decoder_lag("teacher", teacher_window or window), "teacher_"))
         obs_uniques, action_uniques = saved["obs_uniques"], saved["action_uniques"]
     starts = np.r_[0, np.cumsum(n_clones)[:-1]].astype(np.int64); sizes = n_clones.astype(np.int64)
     indexed = [(map_to_indices(obs_uniques, np.asarray(x)).astype(np.int64),
@@ -204,13 +213,13 @@ def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CAN
                                           walks["gt_exact_per_walk"], walks["gt_action_per_walk"])]
     selected = range(len(steps)) if steps_mode == "all" else [len(steps) - 1]
     out = []
-    matched = decoder_lag(method, window)
-    for k in selected:
+    for method, Ts, matched, prefix in models:
+      for k in selected:
         T = np.ascontiguousarray(Ts[k])
         # common_lag1: one decoder configuration for every arm (carried filter + lag-one
         # smoothing), separating the learned tensor from each arm's inference context.
         for decoder, lag in (("training_matched", matched), ("filter", 0), ("common_lag1", 1)):
-            target = folder / output_name(*budget) / decoder / f"step={int(steps[k]):05d}.json"
+            target = folder / output_name(*budget) / f"{prefix}{decoder}" / f"step={int(steps[k]):05d}.json"
             if target.exists():
                 record = json.loads(target.read_text())
             else:
@@ -247,6 +256,7 @@ def evaluate(args):
     run = args.run.resolve()
     manifest = json.loads((run / "experiment.json").read_text())
     window = int(manifest["experiment"]["window"])
+    teacher_window = int(manifest["experiment"].get("teacher_window") or window)
     folders = [p.parent for p in sorted(run.glob("level=*/seed=*/*/rows.json"))
                if p.parent.name in (args.methods or manifest["methods"])]
     cache_root = args.walk_cache_root.resolve()
@@ -257,7 +267,8 @@ def evaluate(args):
     cache_paths = {level: context[2] for (level, b), context in _CONTEXT.items() if b == budget}
     rows = []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(evaluate_run, f, window, args.steps, cache_root, cache_paths, budget): f for f in folders}
+        futures = {pool.submit(evaluate_run, f, window, args.steps, cache_root, cache_paths, budget, teacher_window): f
+                   for f in folders}
         for done, future in enumerate(as_completed(futures), start=1):
             rows.extend(future.result())
             print(f"[{done}/{len(folders)}] {futures[future].relative_to(run)}", flush=True)
@@ -267,7 +278,8 @@ def evaluate(args):
         protocol=asdict(protocol_for(13, 1, *budget)), window=window,
         evaluation_budget=dict(walks=budget[0], walk_length=budget[1], total_steps=budget[0] * budget[1],
                                rand_prob=budget[2], canonical=budget == CANONICAL_BUDGET),
-        lags={m: decoder_lag(m, window) for m in manifest["methods"]},
+        lags={**{m: decoder_lag(m, window) for m in manifest["methods"]},
+              "teacher": decoder_lag("teacher", teacher_window)},
         walk_caches={str(level): path for level, path in sorted(cache_paths.items())}), indent=2) + "\n")
     print(f"Wrote {output / f'canonical_metrics_{args.steps}.csv'}")
 

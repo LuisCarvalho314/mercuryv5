@@ -41,10 +41,10 @@ def arm_of(directory, method):
     return name, None
 
 
-def structural_change(path):
+def structural_change(path, key="T"):
     """Mean row TV between consecutive checkpoint tensors, keyed by the later step."""
     with np.load(path) as saved:
-        steps, Ts = saved["steps"], saved["T"]
+        steps, Ts = saved["steps"], saved[key]
     tv = .5 * np.abs(np.diff(Ts, axis=0)).sum(-1).mean(axis=(1, 2))
     return dict(zip(steps[1:].tolist(), tv.tolist()))
 
@@ -126,24 +126,54 @@ def load(sweep, evaluation):
                 if len(same) == 1:
                     record.update({"common_" + m: float(same.iloc[0][m]) for m in METRICS})
                 curves.append(record)
+            # The run's EMA teacher, evaluated from its saved checkpoint tensors (arm <arm>_teacher).
+            teacher_rows = (matched[(matched.level == level) & (matched.seed == seed) & (matched.method == "teacher")]
+                            if not matched.empty else matched)
+            if len(teacher_rows):
+                teacher_change = structural_change(path.parent / "snapshots.npz", "teacher_T")
+                for _, hit in teacher_rows.iterrows():
+                    step = int(hit.step)
+                    record = dict(arm=arm + "_teacher", rho=rho, level=level, seed=seed, step=step,
+                                  train_seconds=np.nan, structural_change=teacher_change.get(step),
+                                  eval_seconds_matched=np.nan, eval_seconds_filter=np.nan,
+                                  **{m: float(hit[m]) for m in METRICS})
+                    same = common[(common.level == level) & (common.seed == seed) & (common.method == "teacher")
+                                  & (common.step == step)]
+                    if len(same) == 1:
+                        record.update({"common_" + m: float(same.iloc[0][m]) for m in METRICS})
+                    curves.append(record)
     return pd.DataFrame(curves), pd.DataFrame(rows_out), pd.DataFrame(failures)
+
+
+TEACHER = "_teacher"
+
+
+def mix_of(arm):
+    return float(arm[len("jepa_mix"):].removesuffix(TEACHER))
 
 
 def order(arms):
     fixed = [a for a in ("short", "long", "legacy") if a in arms]
-    return fixed + sorted((a for a in arms if a.startswith("jepa_mix")), key=lambda a: float(a[8:]))
+    students = sorted((a for a in arms if a.startswith("jepa_mix") and not a.endswith(TEACHER)), key=mix_of)
+    teachers = sorted((a for a in arms if a.startswith("jepa_mix") and a.endswith(TEACHER)), key=mix_of)
+    return fixed + students + teachers
 
 
 def label(arm):
-    return BASELINES[arm][0] if arm in BASELINES else f"jepa_mix={arm[8:]}"
+    if arm in BASELINES:
+        return BASELINES[arm][0]
+    return f"teacher, jepa_mix={mix_of(arm):g}" if arm.endswith(TEACHER) else f"jepa_mix={arm[8:]}"
 
 
 def style(arm, arms):
+    """Students solid; each EMA teacher dotted in its student's colour."""
     if arm in BASELINES:
         return dict(color=BASELINES[arm][1], linestyle="--")
-    mixes = [a for a in order(arms) if a.startswith("jepa_mix")]
+    mixes = [a for a in order(arms) if a.startswith("jepa_mix") and not a.endswith(TEACHER)]
     ramp = RHO_RAMP[-len(mixes):] if len(mixes) <= len(RHO_RAMP) else RHO_RAMP
-    return dict(color=ramp[mixes.index(arm) % len(ramp)], linestyle="-")
+    student = arm.removesuffix(TEACHER)
+    color = ramp[mixes.index(student) % len(ramp)] if student in mixes else "#888780"
+    return dict(color=color, linestyle=":" if arm.endswith(TEACHER) else "-")
 
 
 def convergence(part, metric):
