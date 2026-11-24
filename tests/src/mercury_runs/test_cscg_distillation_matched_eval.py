@@ -87,3 +87,8 @@ def test_reduced_budget_changes_only_walk_count_and_length():
     assert reduced.walk_cache_key() != canonical.walk_cache_key()
     assert output_name() == output_name(100, 10_000) == OUTPUT
     assert output_name(10, 500) == f"{OUTPUT}_walks10x500"
+    assert output_name(10, 500, .8) == f"{OUTPUT}_walks10x500_p0.8"
+    assert output_name(rand_prob=.8) == f"{OUTPUT}_p0.8"
+    other = protocol_for(21, 1, 10, 500, .8)
+    assert {k for k, v in vars(reduced).items() if vars(other)[k] != v} == {"rand_prob"}
+    assert other.walk_cache_key() != reduced.walk_cache_key()

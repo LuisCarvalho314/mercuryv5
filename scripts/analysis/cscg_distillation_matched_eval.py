@@ -47,12 +47,13 @@ from scripts.analysis.evaluate_v5 import EvaluationV5Protocol, _evaluate_metrics
 ROOT = Path(__file__).resolve().parents[2]
 SHORT_LAG = ("short", "nll_control", "predictive", "posterior")
 OUTPUT = "evaluation_v5_training_matched"
-CANONICAL_BUDGET = (100, 10_000)   # evaluation-v5 walks x steps per walk
+CANONICAL_BUDGET = (100, 10_000, 0.1)   # evaluation-v5 walks, steps per walk, random-action probability
 
 
-def output_name(walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BUDGET[1]):
-    """Canonical budget -> OUTPUT; any other budget gets its own directory, never mixed."""
-    return OUTPUT if (walks, walk_length) == CANONICAL_BUDGET else f"{OUTPUT}_walks{walks}x{walk_length}"
+def output_name(walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BUDGET[1], rand_prob=CANONICAL_BUDGET[2]):
+    """Canonical setting -> OUTPUT; any other setting gets its own directory, never mixed."""
+    name = OUTPUT if (walks, walk_length) == CANONICAL_BUDGET[:2] else f"{OUTPUT}_walks{walks}x{walk_length}"
+    return name if rand_prob == CANONICAL_BUDGET[2] else f"{name}_p{rand_prob:g}"
 
 
 @dataclass
@@ -74,11 +75,12 @@ class TrainingMatchedOnlineProtocol(EvaluationV5Protocol):
     decoder_lag: int = 1
 
 
-def protocol_for(level, lag, walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BUDGET[1]):
-    # Canonical study walk set (main_study / cscg_batch_sweep evaluation-v5); a reduced
-    # budget keeps the seed, rand_prob, metrics and decoder and changes only the walk count/length.
+def protocol_for(level, lag, walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BUDGET[1],
+                 rand_prob=CANONICAL_BUDGET[2]):
+    # Canonical study walk set (main_study / cscg_batch_sweep evaluation-v5); a non-canonical
+    # setting keeps the seed, metrics and decoder and changes only walk count/length/rand_prob.
     return TrainingMatchedOnlineProtocol(
-        sensor="cardinal distance", sensor_range=1, rand_prob=0.1, evaluation_seed=0,
+        sensor="cardinal distance", sensor_range=1, rand_prob=float(rand_prob), evaluation_seed=0,
         number_of_walks=int(walks), walk_length=int(walk_length), edge_thresholds=[1e-6], decoder_lag=int(lag))
 
 
@@ -234,7 +236,7 @@ def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CAN
                 target.write_text(json.dumps(record))
             scores = canonical_metrics(record)
             out.append(dict(level=level, seed=seed, method=method, step=int(steps[k]), decoder=decoder, lag=int(lag),
-                            evaluation_walks=budget[0], walk_length=budget[1],
+                            evaluation_walks=budget[0], walk_length=budget[1], evaluation_rand_prob=budget[2],
                             evaluation_seconds=record.get("evaluation_seconds"), **{m: scores[m] for m in METRICS}))
     return out
 
@@ -246,7 +248,7 @@ def evaluate(args):
     folders = [p.parent for p in sorted(run.glob("level=*/seed=*/*/rows.json"))
                if p.parent.name in (args.methods or manifest["methods"])]
     cache_root = args.walk_cache_root.resolve()
-    budget = (args.walks, args.walk_length)
+    budget = (args.walks, args.walk_length, args.rand_prob)
     output = run / output_name(*budget); output.mkdir(parents=True, exist_ok=True)
     for level in sorted({json.loads((f / "rows.json").read_text())[0]["level"] for f in folders}):
         level_context(level, cache_root, budget=budget)   # locate or generate caches once, before the workers start
@@ -262,7 +264,7 @@ def evaluate(args):
     (output / "protocol.json").write_text(json.dumps(dict(
         protocol=asdict(protocol_for(13, 1, *budget)), window=window,
         evaluation_budget=dict(walks=budget[0], walk_length=budget[1], total_steps=budget[0] * budget[1],
-                               canonical=budget == CANONICAL_BUDGET),
+                               rand_prob=budget[2], canonical=budget == CANONICAL_BUDGET),
         lags={m: decoder_lag(m, window) for m in manifest["methods"]},
         walk_caches={str(level): path for level, path in sorted(cache_paths.items())}), indent=2) + "\n")
     print(f"Wrote {output / f'canonical_metrics_{args.steps}.csv'}")
@@ -363,6 +365,8 @@ def main():
     e.add_argument("--walks", type=int, default=CANONICAL_BUDGET[0],
                    help="Held-out walks (canonical 100); a non-canonical budget writes to its own directory")
     e.add_argument("--walk-length", type=int, default=CANONICAL_BUDGET[1], help="Steps per walk (canonical 10,000)")
+    e.add_argument("--rand-prob", type=float, default=CANONICAL_BUDGET[2],
+                   help="Random-action probability of the held-out walks (canonical 0.1)")
     e.add_argument("--walk-cache-root", type=Path, default=ROOT / "results/diagnostics/evaluation_v5_online_matched_walks",
                    help="Where canonical walks are generated when no existing evaluation-v5 cache matches")
     r = sub.add_parser("report")

@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from scripts.analysis.cscg_distillation_matched_eval import CANONICAL_BUDGET, output_name
+from scripts.analysis.cscg_distillation_matched_eval import CANONICAL_BUDGET, OUTPUT, output_name
 
 METRICS = ("action_tv_similarity", "action_no_self_loop_tv_similarity", "action_edge_f1_auc",
            "action_no_self_loop_edge_f1_auc", "latent_precision", "latent_recall", "eval_nll_bps",
@@ -264,10 +264,12 @@ def main():
     parser.add_argument("--sweep", type=Path, required=True)
     parser.add_argument("--walks", type=int, default=CANONICAL_BUDGET[0])
     parser.add_argument("--walk-length", type=int, default=CANONICAL_BUDGET[1])
+    parser.add_argument("--rand-prob", type=float, default=CANONICAL_BUDGET[2],
+                        help="Random-action probability of the evaluation walks")
     args = parser.parse_args()
-    budget = (args.walks, args.walk_length)
+    budget = (args.walks, args.walk_length, args.rand_prob)
     sweep = args.sweep.resolve()
-    output = sweep / ("report" if budget == CANONICAL_BUDGET else f"report_walks{budget[0]}x{budget[1]}")
+    output = sweep / output_name(*budget).replace(OUTPUT, "report")
     output.mkdir(exist_ok=True)
     curves, row_masses, failures = load(sweep, output_name(*budget))
     curves.to_csv(output / "curves.csv", index=False)
@@ -279,12 +281,14 @@ def main():
     figures(curves, output)
     scope = ", ".join(f"level {l}: seeds {sorted(curves[curves.level == l].seed.unique().tolist())}"
                       for l in sorted(curves.level.unique()))
-    reduced = budget != CANONICAL_BUDGET
+    reduced = budget[:2] != CANONICAL_BUDGET[:2]
     lines = [f"# Accumulated predictive JEPA-CSCG vs EM: {sweep.name}", "",
              f"Scope: {scope}; final step {int(curves.step.max()):,}. Means ± population SD over seeds.",
              f"Canonical metrics use the training-matched decoder; evaluation budget {budget[0]} walks × "
              f"{budget[1]:,} steps = {budget[0] * budget[1]:,} steps per checkpoint (evaluation-v5 seed 0,",
-             "rand_prob 0.1), identical walks for every arm and checkpoint.",
+             f"rand_prob {budget[2]:g}), identical walks for every arm and checkpoint.",
+             *(["", f"**Non-canonical evaluation rand_prob {budget[2]:g}** (canonical 0.1)."]
+               if budget[2] != CANONICAL_BUDGET[2] else []),
              *(["", "**Reduced evaluation budget** (canonical: 100 × 10,000). For rapid methodological comparison",
                 "between these arms only; not comparable with full-budget results."] if reduced else []),
              "", "All margins and contributions are recorded, never fed back into learning.", "",

@@ -23,12 +23,14 @@ STEPS=${STEPS:-20000}
 WORKERS=${WORKERS:-2}
 MIXES=${MIXES:-"0.5 0.99 1"}
 LOCAL_UPDATES=${LOCAL_UPDATES:-5}
+RAND_PROB=${RAND_PROB:-0.3}            # training stream
+EVAL_RAND_PROB=${EVAL_RAND_PROB:-0.1}  # held-out walks (canonical 0.1)
 EVAL_WALKS=${EVAL_WALKS:-100}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-10000}
 OUT=${OUT:-results/diagnostics/cscg_jepa_accumulated_v1}
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation ground_truth
         --student-inference smooth --local-updates "$LOCAL_UPDATES" --forgetting 1.0 --pseudocount 0.002
-        --window 40 --teacher-window 40 --half-life 40 --workers "$WORKERS")
+        --window 40 --teacher-window 40 --half-life 40 --rand-prob "$RAND_PROB" --workers "$WORKERS")
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 
 mkdir -p "$OUT"
@@ -47,11 +49,11 @@ wait
 
 # Training-matched canonical evaluation (lag 1 for predictive/short, W-1 for long).
 for dir in "$OUT"/*/; do
-  [[ "$(basename "$dir")" == report ]] && continue
+  [[ "$(basename "$dir")" == report* ]] && continue
   ls "$dir"level=*/seed=*/*/rows.json > /dev/null 2>&1 || { echo "skip evaluation of $dir (no completed case)"; continue; }
   "${PY[@]}" scripts/analysis/cscg_distillation_matched_eval.py evaluate --run "$dir" --steps all --workers "$WORKERS" \
-    --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" > "${dir%/}.eval.log" 2>&1
+    --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --rand-prob "$EVAL_RAND_PROB" > "${dir%/}.eval.log" 2>&1
   echo "$(basename "$dir") eval exit=$?" | tee -a "$OUT/status.txt"
 done
 "${PY[@]}" scripts/analysis/cscg_jepa_mix_sweep_report.py --sweep "$OUT" \
-  --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH"
+  --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --rand-prob "$EVAL_RAND_PROB"
