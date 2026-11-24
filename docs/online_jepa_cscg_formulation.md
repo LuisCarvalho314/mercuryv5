@@ -4,9 +4,13 @@ This document formulates the online predictive JEPA–CSCG learner: a clone-stru
 hidden Markov model whose transition tensor is learned online. It interpolates between an
 online EM objective and a latent-space predictive term. In that term the student must
 predict an exponential-moving-average teacher's smoothed posterior over the next latent
-state. A coefficient $\rho \in [0,1]$ (`jepa_mix`) selects pure EM ($\rho = 0$), a hybrid,
-or pure predictive self-supervision ($\rho = 1$) (Sections 4.6 and 5.8–5.11). The earlier
-penalty parameterisation is retained as a legacy configuration (Sections 4.5 and 5.10).
+state. The predictive learner keeps the online EM machinery (running sufficient
+statistics, forgetting, pseudocounts, row-normalised MM updates) and changes only the
+learning objective: a coefficient $\rho \in [0,1]$ (`jepa_mix`) sets the share of each
+arrival's new expected counts that is teacher-derived, from conventional online EM
+($\rho = 0$) to teacher-derived evidence only ($\rho = 1$) (Sections 4.6 and 5.8–5.11).
+The earlier penalty parameterisation is retained as a legacy configuration (Sections 4.5
+and 5.10).
 
 Scope: the *predictive* JEPA objective, with smoothed student source beliefs. This is the
 configuration evaluated in the reported runs. Other auxiliary objectives and baselines are
@@ -473,62 +477,78 @@ grows without bound when $\lambda = 1$. A fixed penalty weight would become negl
 time. Scaling by $\eta \langle \tilde S, \mathbf 1\rangle$ keeps the teacher's influence a
 constant fraction of the data's influence. Section 5.2 makes this exact.
 
-### 4.6 Explicit mixing objective
+### 4.6 Accumulated predictive objective (`jepa_mix`)
 
-The penalty of Section 4.5 never removes the EM term, so pure predictive self-supervision
-is not reachable from it, not even as $\eta \to \infty$. The learner therefore exposes the
-interpolation between the two objectives directly, through a mixing coefficient
-$\rho \in [0, 1]$ (`jepa_mix`).
+The penalty of Section 4.5 never removes the EM term, so it cannot express learning from
+teacher supervision alone. The `jepa_mix` learner instead changes the *learning objective*
+and keeps the online EM machinery of Section 3.2 unchanged: the running sufficient
+statistics, the forgetting rule, the pseudocount and the closed-form row-normalised update.
+Only the source of each arrival's newly accumulated evidence changes. A coefficient
+$\rho \in [0, 1]$ (`jepa_mix`) sets the teacher-derived fraction of that evidence.
 
-The EM counts at local iteration $k$ have total mass
-
-$$
-\beta_t
-= \big\langle B^{(k)}, \mathbf 1 \big\rangle
-= \lambda \langle S_t, \mathbf 1\rangle + \gamma_\lambda + \kappa A N^2 .
-$$
-
-It does not depend on $k$, because $\langle \xi_t(T), \mathbf 1\rangle = 1$. Note that it
-includes the pseudocounts. The normalised per-iteration EM objective is
+At arrival $t \notin \mathcal E$ the learner minimises
 
 $$
-\widehat{\mathcal L}^{(k)}_{\mathrm{EM}}(T)
-= -\frac{1}{\beta_t}\,\big\langle B^{(k)}, \log T \big\rangle ,
+F_{\rho,t}(T)
+= -\big\langle \lambda S_t + \kappa \mathbf 1,\ \log T \big\rangle
+  \;+\; \gamma_\lambda \Big[ (1-\rho)\big(-\log Z_t(T)\big) + \rho\, \mathcal L^t(T) \Big],
+\qquad T \in \mathcal T .
 $$
 
-and the per-iteration mixed objective is
+The first term is exactly the historical term of $G^{\mathrm{EM}}_t$ (Section 3.2). The
+second replaces a fraction $\rho$ of the newest transition's observation likelihood with
+the teacher-matching loss $\mathcal L^t$ of Section 4.4. $\mathcal L^t$ is unchanged, and
+in particular it keeps its implicit observation-likelihood component (Proposition 1). It
+is not replaced by the normalised posterior-matching KL. For $\rho = 0$,
+$F_{0,t} = G^{\mathrm{EM}}_t$.
+
+**Compatible mass.** Both sources of new evidence carry unit mass for every $T$:
+$\langle \xi_t(T), \mathbf 1\rangle = 1$ (Section 2), and $\langle D^{(k)}, \mathbf 1\rangle = 1$
+(Section 5.2), because the window counts are averaged over the $n_t$ window transitions
+(the factor $1/n_t$ in $\mathcal L^t$). So $\rho$ is the teacher-derived share of a
+unit of new evidence per arrival, and the statistics grow exactly as in online EM:
+$\langle S_t, \mathbf 1\rangle$ is the number of processed transitions for $\lambda = 1$,
+and $1 - \lambda^{m}$ after $m$ transitions for $\lambda < 1$. Without the $1/n_t$
+normalisation the teacher would add $n_t$ units per arrival; the normalisation is retained.
+
+**How history enters.** The committed statistics are
 
 $$
-\mathcal L^{(k)}_{\rho}(T)
-= (1-\rho)\, \widehat{\mathcal L}^{(k)}_{\mathrm{EM}}(T) + \rho\, \mathcal L^t(T).
+S_{t+1} = \lambda S_t + \gamma_\lambda C_t,
+\qquad
+C_t = (1-\rho)\, \xi_t\big(T^{(K-1)}_t\big) + \rho\, D^{(K-1)}_t ,
 $$
 
-$\mathcal L^t$ is the predictive loss of Section 4.4, unchanged. In particular it keeps its
-implicit replayed-evidence component (Proposition 1). It is not replaced by the
-normalised latent-matching KL. $\mathcal L^{(k)}_\rho$ is fixed *within* iteration $k$,
-because $B^{(k)}$ is frozen there. It is a different function at iteration $k+1$, because
-$B^{(k+1)}$ uses $\xi_t(T^{(k+1)})$.
+the new counts at the last local iteration of arrival $t$ (Section 5.8). By Lemmas 1 and 2,
+$-\langle C_{t'}, \log T\rangle$ majorises arrival $t'$'s loss
+$(1-\rho)(-\log Z_{t'}) + \rho\,\mathcal L^{t'}$ up to a constant, with equality at the
+iterate $T^{(K-1)}_{t'}$ of that arrival, not at the current $T$. So
+$-\langle S_t, \log T\rangle$ is the online-EM approximation of the cumulative loss, built
+from historical responsibilities that are never revised. It is not claimed to minimise the
+predictive objective over the whole observation history exactly.
 
-A single function of $T$ that is fixed for the whole arrival is obtained by replacing the
-linearised data term with the marginal one:
-
-$$
-F_{\rho,t}(T) = \frac{1-\rho}{\beta_t}\, G^{\mathrm{EM}}_t(T) + \rho\, \mathcal L^t(T).
-$$
-
-Section 5.8 shows that the local iterations descend both: each $\mathcal L^{(k)}_\rho$ over
-its own step, and $F_{\rho,t}$ over the whole arrival.
+**Overlapping windows are replayed supervision.** Consecutive windows share up to $W-2$
+transitions, so a transition $u$ is supervised by every window that contains it, up to
+$W-1$ times, each time with weight $\gamma_\lambda\rho/n_{t'}$ and with the teacher target
+current at that arrival. Each arrival's normalised window counts are one training
+contribution to $S$. These repeated contributions are *replayed teacher supervision*, not
+independent environmental observations. No deduplication, delayed consolidation or
+per-transition bookkeeping is applied, and none is intended.
 
 Three regimes follow.
 
-| `jepa_mix` | Regime | Objective at every local iteration |
+| `jepa_mix` | Regime | New evidence $C_t$ per arrival |
 |---|---|---|
-| $\rho = 0$ | pure EM | $\widehat{\mathcal L}^{(k)}_{\mathrm{EM}}$: short-context online EM |
-| $0 < \rho < 1$ | hybrid | $\mathcal L^{(k)}_\rho$ |
-| $\rho = 1$ | pure JEPA | $\mathcal L^t$ only |
+| $\rho = 0$ | conventional online CSCG (short EM) | $\xi_t$ |
+| $0 < \rho < 1$ | mixed | $(1-\rho)\,\xi_t + \rho\, D_t$ |
+| $\rho = 1$ | teacher-derived only | $D_t$ |
 
-The coefficient is a fraction of a unit-mass objective. It is not the legacy penalty scale
-$\eta$, which multiplies the running count mass; Section 5.10 gives the exact relation.
+At $\rho = 1$ the statistics, forgetting and pseudocount are all retained; only the
+observation-derived contribution is removed. The objective is then
+$-\langle \lambda S_t + \kappa\mathbf 1, \log T\rangle + \gamma_\lambda \mathcal L^t(T)$:
+*prior-regularised predictive learning*, where the prior consists of the historical
+(teacher-derived) statistics and the existing Dirichlet pseudocount. It is not an
+unregularised predictive objective.
 
 ---
 
@@ -692,80 +712,67 @@ online EM of Section 3.2 ("short EM") with the same $K$. The predictive JEPA lea
 differs from short EM *only* by the term $w_t \mathcal L^t$. The same holds for
 `jepa_mix` $= 0$, which in addition skips the teacher entirely (Section 5.9).
 
-### 5.8 Mixed update
+### 5.8 Accumulated update
 
-Fix the arrival $t$ and the current iterate $T^{(k)}$. Let $D^{(k)}$ be the teacher-derived
-expected counts of Lemma 2,
+Fix the arrival $t$ and the current iterate $T^{(k)}$. Let $\xi^{(k)} = \xi_t(T^{(k)})$ and
+let $D^{(k)}$ be the teacher-derived expected counts of Lemma 2,
 
 $$
 D^{(k)}_{a,ij}
 = \frac{1}{n_t} \sum_{\substack{u \in \mathcal U_t \\ a_u = a}}
   r^{u,(k)}_{ij}\, q^t_{u+1}(j),
 \qquad
-r^{u,(k)}_{ij} = \frac{b_u(i)\, T^{(k)}_{a_u,ij}}{p_u(j;T^{(k)})} .
+r^{u,(k)}_{ij} = \frac{b_u(i)\, T^{(k)}_{a_u,ij}}{p_u(j;T^{(k)})} ,
 $$
 
-As before, $j$ ranges over $C(x_{u+1})$ only, which is the destination-clone support
-restriction, and $\langle D^{(k)}, \mathbf 1\rangle = 1$. Define the combined update counts
-
-$$
-M^{(k)} = (1-\rho)\, \frac{B^{(k)}}{\beta_t} + \rho\, D^{(k)},
-\qquad \langle M^{(k)}, \mathbf 1 \rangle = 1,
-$$
-
-and the update
+the existing MM responsibilities, unchanged. Each local iteration forms
 
 $$
 \boxed{\;
-T^{(k+1)}_{a,i,:} =
-\begin{cases}
-\operatorname{rowNorm}\big(M^{(k)}\big)_{a,i,:},
-  & \sum_j M^{(k)}_{a,ij} > 0, \\[2pt]
-T^{(k)}_{a,i,:}, & \sum_j M^{(k)}_{a,ij} = 0,
-\end{cases}
+\begin{aligned}
+C^{(k)} &= (1-\rho)\, \xi^{(k)} + \rho\, D^{(k)}, \\
+\tilde S^{(k)} &= \lambda S_t + \gamma_\lambda\, C^{(k)}, \\
+T^{(k+1)} &= \operatorname{rowNorm}\big(\tilde S^{(k)} + \kappa \mathbf 1\big),
+\end{aligned}
 \;}
 \qquad k = 0,\dots,K-1 .
 $$
 
-The second case can occur only at $\rho = 1$; see Section 5.11.
+Every iteration starts from the *same* pre-arrival statistics $S_t$. After the last
+iteration the statistics are committed once, $S_{t+1} = \tilde S^{(K-1)}$, and
+$T_{t+1} = T^{(K)}$. The batch is never accumulated $K$ times. For $\rho = 0$,
+$C^{(k)} = \xi^{(k)}$ and the iteration is exactly the online EM step of Section 3.2. For
+$\rho = 1$, $C^{(k)} = D^{(k)}$ and $\xi$ is not formed.
 
-**Lemma 3′ (zero counts).** Let $C \ge 0$. A row with positive mass has the unique
-minimiser $\operatorname{rowNorm}(C)_{a,i,:}$ of $-\sum_j C_{a,ij} \log T_{a,ij}$ over the
-simplex, using $0 \log 0 = 0$. That minimiser is zero wherever $C_{a,ij} = 0$. A row with
-zero mass makes the objective constant, so every distribution minimises it, including
-$T^{(k)}_{a,i,:}$.
-
-**Derivation.** Lemmas 1 and 2 give, for all $T \in \mathcal T$,
+**Derivation.** The historical term $-\langle \lambda S_t + \kappa\mathbf 1, \log T\rangle$
+is linear in $\log T$, so it is its own majoriser. Lemmas 1 and 2 give, for all
+$T \in \mathcal T$,
 
 $$
 \begin{aligned}
-G^{\mathrm{EM}}_t(T) &\le -\big\langle B^{(k)}, \log T\big\rangle + c_1^{(k)}, \\
+-\log Z_t(T) &\le -\big\langle \xi^{(k)}, \log T\big\rangle + c_1^{(k)}, \\
 \mathcal L^t(T) &\le -\big\langle D^{(k)}, \log T\big\rangle + c_2^{(k)},
 \end{aligned}
 $$
 
-both with equality at $T^{(k)}$. Multiplying by $(1-\rho)/\beta_t$ and $\rho$ and adding
-gives the surrogate
+both with equality at $T^{(k)}$. Weighting by $\gamma_\lambda(1-\rho)$ and
+$\gamma_\lambda\rho$ and adding the historical term gives the surrogate
 
 $$
-Q^{(k)}_\rho(T) = -\big\langle M^{(k)}, \log T \big\rangle + c^{(k)},
+Q^{(k)}_\rho(T)
+= -\big\langle \lambda S_t + \kappa\mathbf 1 + \gamma_\lambda C^{(k)},\ \log T \big\rangle + c^{(k)},
 $$
 
-with $Q^{(k)}_\rho \ge F_{\rho,t}$ and equality at $T^{(k)}$. By Lemma 3′ the update above
-minimises $Q^{(k)}_\rho$. For $\rho = 1$, $M^{(k)} = D^{(k)}$ and the update is
-$\operatorname{rowNorm}(D^{(k)})$. For $\rho = 0$, $M^{(k)} = B^{(k)}/\beta_t$, and
-because $\operatorname{rowNorm}$ is scale invariant the update is exactly
-$\operatorname{rowNorm}(B^{(k)})$, the online EM step of Section 3.2.
+with $Q^{(k)}_\rho \ge F_{\rho,t}$ on $\mathcal T$ and equality at $T^{(k)}$. All entries of
+$\tilde S^{(k)} + \kappa\mathbf 1$ are at least $\kappa > 0$, so by Lemma 3 the boxed update
+is the unique minimiser of $Q^{(k)}_\rho$. The accumulation therefore follows directly
+from the existing MM surrogate: it is the same surrogate as online EM, with the
+newest-transition counts $\xi^{(k)}$ replaced by $C^{(k)}$.
 
-**Proposition 4 (MM descent within an arrival).** Assume $F_{\rho,t}(T^{(0)}) < \infty$.
-Then, for $k = 0, \dots, K-1$:
+**Proposition 4 (MM descent within an arrival).** For $k = 0, \dots, K-1$,
+$F_{\rho,t}(T^{(k+1)}) \le F_{\rho,t}(T^{(k)})$.
 
-1. *Per-iteration objective:*
-   $\mathcal L^{(k)}_\rho(T^{(k+1)}) \le \mathcal L^{(k)}_\rho(T^{(k)})$.
-2. *Fixed arrival objective:*
-   $F_{\rho,t}(T^{(k+1)}) \le F_{\rho,t}(T^{(k)})$.
-
-*Proof.* (2) is the usual MM chain:
+*Proof.*
 
 $$
 F_{\rho,t}(T^{(k+1)})
@@ -774,186 +781,113 @@ F_{\rho,t}(T^{(k+1)})
 = F_{\rho,t}(T^{(k)}).
 $$
 
-For (1), majorise only the predictive term. The resulting surrogate of
-$\mathcal L^{(k)}_\rho$ is again $Q^{(k)}_\rho$, up to a constant, with equality at
-$T^{(k)}$. The same chain applies. $\square$
+$\square$
 
-What is *not* claimed:
+$F_{\rho,t}$ is one fixed function over the whole arrival: $S_t$, $\kappa$, the sources
+$b_u$, the targets $q^t$ and the teacher $\bar T_t$ are all frozen during the local
+iterations, and $\xi$ and $D$ are recomputed at every iterate only inside the surrogate.
+The values $F_{\rho,t}(T^{(0)}), \dots, F_{\rho,t}(T^{(K)})$ therefore form a monotone
+sequence. Nothing is claimed across arrivals, because $S_t$, the window, $q^t$ and
+$\bar T_t$ all change with $t$.
 
-* The values $\mathcal L^{(k)}_\rho(T^{(k)})$, $k = 0, 1, \dots$, do not form a monotone
-  sequence. Each one is measured on a different objective, because $B^{(k)}$ changes with
-  $k$. Statement (1) is about one step on one fixed objective. Only statement (2) chains
-  across iterations.
-* No objective is monotone across arrivals. $S_t$, $\beta_t$, the window, $q^t$ and
-  $\bar T_t$ all change with $t$ (Remark R1).
-
-The implementation records $\mathcal L^{(k)}_\rho$ before and after every local iteration
-at each checkpoint. Tests check statement (1) on recorded runs and statement (2) on a
+The implementation records $F_{\rho,t}$ before and after every local iteration at each
+checkpoint, together with its three components: the historical term, the arrival NLL
+$-\log Z_t$ and $\mathcal L^t$. Tests check Proposition 4 on recorded runs and on a
 synthetic arrival.
 
 ### 5.9 Endpoint semantics and lifecycle
 
 Inference is the same in every regime. The student filter $f_t$ always runs. The smoothed
-source $b_{t-1}$ is computed whenever the JEPA term is active. Only parameter optimisation
-differs between regimes.
+source $b_{t-1}$ is computed whenever the JEPA term is active. Only the composition of
+the new evidence differs between regimes.
 
 | | $\rho = 0$ | $0 < \rho < 1$ | $\rho = 1$ |
 |---|---|---|---|
 | student filter $f_t$ | yes | yes | yes |
 | source belief $b_{t-1}$ (smooth mode) | not needed | yes | yes |
 | teacher filter $h_t$, targets $q^t$ | skipped | yes | yes |
-| EM counts $\xi_t$, $B^{(k)}$ | yes | yes | not computed |
+| data counts $\xi_t$ | yes | yes | not computed |
 | teacher counts $D^{(k)}$ | skipped | yes | yes |
-| pseudocount $\kappa$ in the update | yes | yes, inside $B^{(k)}$ | no |
-| commit $S_{t+1} = \tilde S^{(K-1)}$ | yes | yes | no $S$ exists |
-| EMA teacher step | skipped | once per arrival | once per arrival |
+| running statistics $S_t$, forgetting $\lambda$ | yes | yes | yes |
+| pseudocount $\kappa$ in the update | yes | yes | yes |
+| commit $S_{t+1} = \tilde S^{(K-1)}$, once per arrival | yes | yes | yes |
+| EMA teacher step, once per arrival | skipped | yes | yes |
 | EM-only warm-up iterations | — | none | none |
 
-Two kinds of count are kept apart:
-
-* **Persistent statistics** $S_t$ hold data expected counts only. They are committed once
-  per arrival, with forgetting.
-* **Teacher-derived counts** $D^{(k)}$ are temporary. They exist inside one local iteration,
-  shape $T^{(k+1)}$, and are never accumulated as pseudo-observations.
-
-The order of operations at an arrival $t \notin \mathcal E$ is unchanged:
+The order of operations at an arrival $t \notin \mathcal E$:
 
 1. advance $f_t$ and, if the JEPA term is active, $h_t$;
 2. cache $b_{t-1}$;
 3. build $q^t$ over the window;
 4. freeze $b_u$, $q^t$ and $\bar T_t$;
-5. run $K$ local iterations with the selected objective;
-6. commit $T_{t+1} = T^{(K)}$;
-7. commit $S_{t+1}$ if $\rho < 1$;
-8. take one EMA teacher step if $\rho > 0$.
+5. run $K$ local iterations of Section 5.8 from $\lambda S_t$;
+6. commit $T_{t+1} = T^{(K)}$ and $S_{t+1} = \tilde S^{(K-1)}$;
+7. take one EMA teacher step if $\rho > 0$.
 
-Neither the sources nor the targets are recomputed during step 5, and the teacher never
-moves between local iterations.
+Neither the sources nor the targets are recomputed during step 5. The teacher never moves
+between local iterations, keeps no statistics, does no optimisation of its own, and is
+updated only by the EMA of Section 5.6.
 
-### 5.10 The legacy penalty as a time-varying mix
+### 5.10 Relation to the legacy penalty and to the transient formulation
 
-Because $\langle D^{(k)}, \mathbf 1\rangle = 1$, the legacy count tensor of Section 5.4 is
-a positive multiple of a mixed one:
+**Legacy penalty** (`jepa_mix` unset). The update is
+$\operatorname{rowNorm}(B^{(k)} + w_t D^{(k)})$, with
+$B^{(k)} = \lambda S_t + \gamma_\lambda \xi^{(k)} + \kappa\mathbf 1$ and
+$w_t = \eta(\lambda\langle S_t,\mathbf 1\rangle + \gamma_\lambda)$ (Sections 4.5 and 5.4–5.6).
+$D^{(k)}$ is transient: it shapes $T_{t+1}$ but never enters $S$. Because $w_t$ grows with
+the history mass, the teacher window weighs $\eta$ times the whole history at every
+arrival. The legacy schedules are computed literally as at commit 852cf3b, and they
+reproduce the golden fixture of that commit bit for bit.
+
+**Transient `jepa_mix`** (commit 233eb86, replaced). The earlier `jepa_mix` update was
+$\operatorname{rowNorm}\big((1-\rho) B^{(k)}/\beta_t + \rho D^{(k)}\big)$, with
+$\beta_t = \langle B^{(k)},\mathbf 1\rangle$ and $D^{(k)}$ never committed. At $\rho = 1$
+it dropped $S$, the forgetting rule and the pseudocount entirely. It differs from the
+accumulated formulation in three ways:
+
+* *Weight of the teacher.* Up to scale, its update counts are
+  $B^{(k)} + \tfrac{\rho}{1-\rho}\,\beta_t\, D^{(k)}$. So each arrival re-imposes the
+  current window with weight $\tfrac{\rho}{1-\rho}$ times the *entire* history mass; at
+  $\rho = 0.5$ one window outweighs all accumulated data. In the accumulated formulation
+  each arrival adds teacher mass $\gamma_\lambda\rho$ against history mass
+  $\lambda\langle S_t,\mathbf 1\rangle$, exactly as one data transition would, and the
+  teacher's influence builds up through $S$.
+* *What persists.* Transient: $S$ held data counts only, and teacher evidence vanished
+  after each arrival. Accumulated: $S$ holds the mixture $C$, so teacher evidence persists,
+  with forgetting.
+* *The $\rho = 1$ endpoint.* Transient: $\operatorname{rowNorm}(D^{(k)})$, a memoryless
+  update without prior, whose minimisers drop every successor absent from the window, so
+  it lost predictive support at arrival 2 on level 21. Accumulated:
+  $\operatorname{rowNorm}(\lambda S_t + \gamma_\lambda D^{(k)} + \kappa\mathbf 1)$, which
+  has strictly positive support (Section 5.11).
+
+The objectives coincide only at $\rho = 0$. The transient objective was
+$\tfrac{1-\rho}{\beta_t} G^{\mathrm{EM}}_t + \rho\,\mathcal L^t$; the accumulated one is
+$F_{\rho,t}$ of Section 4.6. The transient formulation is reproducible from commit 233eb86;
+the training loop does not carry both.
+
+### 5.11 Support, zero predictive support and empty windows
+
+**Support.** Every update adds the pseudocount to every entry, so
 
 $$
-B^{(k)} + w_t D^{(k)}
-= (\beta_t + w_t)\,
-  \Big[ (1-\rho_t)\, \frac{B^{(k)}}{\beta_t} + \rho_t\, D^{(k)} \Big],
-\qquad
-\rho_t = \frac{w_t}{\beta_t + w_t} .
+T^{(k+1)}_{a,ij}
+\;\ge\; \frac{\kappa}{\sum_{j'} \tilde S^{(k)}_{a,ij'} + N\kappa} \;>\; 0
 $$
 
-Row normalisation removes the scalar, so a legacy coupled iteration *is* the mixed update
-with $\rho = \rho_t$. It also minimises the same surrogate, because
-$G_t = (\beta_t + w_t) F_{\rho_t,t}$. Substituting
-$w_t = \eta\, \tilde m_t$, with $\tilde m_t = \lambda\langle S_t,\mathbf 1\rangle + \gamma_\lambda$,
-gives
+in every regime, including $\rho = 1$. With $T_0 > 0$ (the runner's
+$T_0 = \operatorname{rowNorm}(U + \kappa\mathbf 1)$), every $p_u(j;T)$ and $Z_t(T)$ is
+positive, all logarithms are finite and the responsibilities are well defined. The
+pseudocount is the existing Dirichlet transition prior and support-preservation
+mechanism; there is no JEPA-specific prior. `ZeroPredictiveSupportError` is still raised,
+never clipped, if a caller supplies a tensor with zero predictive support, but it cannot
+arise from the updates themselves.
 
-$$
-\rho_t
-= \frac{\eta\, \tilde m_t}{(1+\eta)\, \tilde m_t + \kappa A N^2} .
-$$
-
-So $\rho_t \ne \eta/(1+\eta)$ whenever $\kappa > 0$. Two cases:
-
-* $\lambda = 1$: $\tilde m_t$ is the transition count, and $\rho_t \uparrow \eta/(1+\eta)$
-  only as the counts outgrow the pseudocount mass.
-* $\lambda < 1$: $\tilde m_t \to 1$, and $\rho_t \to \eta/(1+\eta+\kappa A N^2)$, which
-  stays different from $\eta/(1+\eta)$ permanently.
-
-For the level-21 ground-truth allocation ($A = N = 4$, $\kappa A N^2 = 0.128$) with
-$\eta = 1$ and $\lambda = 1$, $\rho_1 = 0.470$ and $\rho_{100} = 0.4997$. With 10 clones
-per symbol ($N = 30$, $\kappa A N^2 = 7.2$), $\rho_1 = 0.109$.
-
-No constant `jepa_mix` therefore reproduces a legacy run. The minimal reproduction
-mechanism is to keep $\eta$ as the legacy parameter and convert it to $\rho_t$ at every
-arrival (`legacy_jepa_mix`). The update itself is shared. Legacy schedules:
-
-* *coupled* (`coupled_auxiliary=True`): the mix $\rho_t$ at all $K$ iterations;
-* *historical* (default when `jepa_mix` is unset): the coefficient schedule
-  $(0, \dots, 0, \rho_t)$, that is, $K-1$ EM-only warm-up iterations and then one mixed
-  iteration (Section 5.5).
-
-The historical schedule is kept only as this explicitly identified legacy configuration.
-Setting `jepa_mix` always applies $\rho$ at every iteration, and is rejected in
-combination with `penalty_weight` or `coupled_auxiliary`. The legacy `nll_control` arm
-uses the same update, with its replay-evidence counts in place of $D^{(k)}$.
-
-Floating point: forming $\operatorname{rowNorm}(M_{\rho_t})$ instead of
-$\operatorname{rowNorm}(B + wD)$ changes results by rounding only. Against a golden fixture
-generated by the pre-change code, every legacy path is bit-identical except the
-penalised predictive and `nll_control` updates. Those agree to $\le 5.6\times10^{-16}$ over
-60 synthetic arrivals and to $\le 7.8\times10^{-16}$ over 1,000 real level-21 arrivals, in
-both legacy schedules, with identical work counters.
-
-### 5.11 Unsupported rows, zero predictive support and empty windows
-
-**Unsupported rows.** A row $(a,i)$ has zero optimisation mass when no window transition
-with action $a$ gives source $i$ positive belief and no EM count reaches it. For $\rho < 1$
-this cannot happen, because $B^{(k)} \ge \kappa > 0$. For $\rho = 1$ it is the normal case
-for every row outside the window's source support. Such a row keeps
-$T^{(k)}_{a,i,:}$ (Section 5.8). By Lemma 3′ this is a valid minimiser, so Proposition 4
-is unaffected. It is a tie-breaking rule, not an objective change. Uniform, zero and NaN
-rows are never produced.
-
-**Zero predictive support.** If $q^t_{u+1}(j) > 0$ and $p_u(j;T) = 0$, then
-$\mathcal L^t(T) = +\infty$ and $r^u_{ij} = 0/0$. The implementation never clips the
-denominator or adds mass to repair this. It raises `ZeroPredictiveSupportError`, a
-`ValueError`, with the arrival, the iteration, the number of affected clones and the
-target mass. The student filter raises the same error when $Z_t(T_t) = 0$, the
-total-support case in which the student gives probability zero to the observation itself.
-
-*When can it occur?*
-
-1. **$\rho < 1$ (and every legacy configuration): never**, given $T_0 > 0$. Every update
-   adds $(1-\rho)\kappa/\beta_t > 0$ to every entry, so $T_t > 0$ for all $t$. The
-   runner's $T_0 = \operatorname{rowNorm}(U + \kappa\mathbf 1)$ is strictly positive.
-2. **Within an arrival at $\rho = 1$: never, if it does not hold at $T^{(0)}$.** Suppose
-   $p_u(j;T^{(k)}) > 0$ for some $j$ with $q^t_{u+1}(j) > 0$. Some $i$ has
-   $b_u(i)\, T^{(k)}_{a_u,ij} > 0$, hence $D^{(k)}_{a_u,ij} > 0$. That row then has
-   positive mass, so $T^{(k+1)}_{a_u,ij} > 0$ and
-   $p_u(j;T^{(k+1)}) \ge b_u(i)\, T^{(k+1)}_{a_u,ij} > 0$.
-3. **Across arrivals at $\rho = 1$: yes.** With $T_0 > 0$, the teacher satisfies
-   $\bar T_t \ge \tau^{t} T_0 > 0$. So $h_{s_t}$ and $q^t_{u+1}$ cover all of $C(x_{u+1})$.
-   The transitions $u < t-1$ of the window were already in the previous window, so by (2)
-   they keep their support. Only the newest transition $u = t-1$ can lack it. A row
-   $(a,i)$ updated at an earlier arrival $t'$ has mass only on
-   $\bigcup \{ C(x_{u+1}) : u \in \mathcal U_{t'},\ a_u = a,\ b_u(i) > 0 \}$. When the
-   newest transition reaches a successor that is absent from that set, the student
-   predicts probability zero for it.
-
-Case 3 is a property of the objective, not of the optimiser. For any row used by the
-window, moving mass from a destination that no window transition reaches onto one that a
-window transition does reach never decreases any $p_u(j)$. If $q > 0$ there, it strictly
-decreases $\mathcal L^t$. Hence *every* minimiser of $\mathcal L^t$ assigns zero mass to
-successors absent from the window. More local iterations, or a different optimiser,
-cannot prevent this.
-
-*Empirical check (smoke, Section 10, R7).* On level 21, seed 0, pure JEPA fails at
-arrival $2$. The stream begins $x_0 = x_1$ under action $a_0 = a_1$, and then
-$x_2 \ne x_1$. Arrival 1 sends every row $(a_0, i \in C(x_0))$ to $C(x_0)$ only, so
-$Z_2(T_2) = 0$.
-
-*Numerical stabilisation versus objective modification.* The zero is exact, not an
-underflow, so no purely numerical device such as log-space arithmetic or guarded division
-can produce a finite objective. Each available remedy changes the objective, and must be
-reported as such:
-
-* **(a) JEPA Dirichlet prior.** Minimise
-  $\mathcal L^t(T) - \kappa_J \langle \mathbf 1, \log T\rangle$, with update
-  $\operatorname{rowNorm}(D^{(k)} + \kappa_J \mathbf 1)$. This is a MAP objective on the
-  predictive loss alone. It keeps $T > 0$, and Proposition 4 holds for the modified
-  objective. It is *not* the EM pseudocount: $\kappa_J$ is scaled against
-  $\langle D, \mathbf 1\rangle = 1$, not against $\beta_t$, and no data counts enter.
-* **(b) Teacher-centred prior.** Update $\operatorname{rowNorm}(D^{(k)} + \kappa_J \bar T_t)$.
-  This keeps full support because $\bar T_t > 0$, and it anchors unseen successors to the
-  slow model instead of to uniform.
-* **(c) Treat pure JEPA as ill-posed online** and study $\rho \to 1^-$. A hybrid with
-  $\rho$ close to $1$ already behaves like (a), with prior mass $(1-\rho)\kappa/\beta_t$
-  per entry, plus a small data term.
-
-Option (a) is the minimal proposal. None of them is implemented. The choice is a
-research decision, to be made after the pure-JEPA arm's failure has been recorded.
+The bound shrinks as a row accumulates mass. A successor that no window has reached keeps
+only the pseudocount and whatever historical mass it has, so at $\rho = 1$ its probability
+can become small. Whether this matters is an empirical question: the runs record the
+minimum student and teacher transition probabilities and the minimum causal evidence
+(Section 10). No additional mechanism is introduced.
 
 **Empty windows.** At an episode start $t \in \mathcal E$ there is no transition. Both
 filters reset to $\pi$. No targets are built, and $T$, $\bar T$ and $S$ are unchanged. For
@@ -981,17 +915,16 @@ $$
 3. Window: $s_t$, $\mathcal U_t$, $n_t$.
 4. Targets: $q^t = \mathcal S_{\bar T_t}(h_{s_t}; x_{s_t:t}, a_{s_t:t-1})$, frozen.
 5. Coefficient: $\rho$ = `jepa_mix`. In the legacy configuration, instead
-   $w_t = \eta(\lambda\langle S_t,\mathbf 1\rangle + \gamma_\lambda)$ and
-   $\rho_t = w_t/(\beta_t + w_t)$ (5.10).
-6. Local iterations from $T^{(0)} = T_t$. With `jepa_mix`, the mixed update (5.8) runs at
-   every iteration. In the legacy configuration, the coupled (5.4) or historical (5.5)
-   schedule runs.
-7. Commit $T_{t+1}$, then $S_{t+1}$ if $\rho < 1$, then $\bar T_{t+1}$ if $\rho > 0$
+   $w_t = \eta(\lambda\langle S_t,\mathbf 1\rangle + \gamma_\lambda)$ (4.5).
+6. Local iterations from $T^{(0)} = T_t$ and the fixed $\lambda S_t$. With `jepa_mix`, the
+   accumulated update (5.8) runs at every iteration. In the legacy configuration, the
+   coupled (5.4) or historical (5.5) schedule runs.
+7. Commit $T_{t+1}$ and $S_{t+1}$ once, then $\bar T_{t+1}$ if the teacher is active
    (5.6, 5.9).
 
 With $\rho = 0$ the teacher filter, Step 4 and the teacher update are skipped. With
-$\rho = 1$ no EM counts are formed and no $S$ exists. Step 2 still runs, because it is
-inference.
+$\rho = 1$ no data counts $\xi$ are formed, but $S$, $\lambda$ and $\kappa$ are kept.
+Step 2 still runs, because it is inference.
 
 **Proposition 3 (causality).** $T_{t+1}$, $\bar T_{t+1}$ and $S_{t+1}$ are functions of
 $x_{0:t}$, $a_{0:t-1}$, $\mathcal E \cap [0,t]$ and $T_0$ only.
@@ -1070,7 +1003,7 @@ evaluation-v5 metrics, as defined in the evaluation-v5 protocol:
 | Teacher window | $W_T$ | equal to $W$ |
 | Teacher half-life | $H$ | $40$ transitions, $\tau = 2^{-1/40}$ |
 | Penalty scale (legacy) | $\eta$ | $1$ |
-| JEPA mix | $\rho$ | unset in reported runs (legacy $\eta$); sweep $\{0, .25, .5, .75, 1\}$ prepared |
+| JEPA mix | $\rho$ | legacy runs: unset ($\eta$); accumulated runs: $\{0.5, 0.99, 1\}$ |
 | Pseudocount | $\kappa$ | $0.002$ |
 | Forgetting | $\lambda$ | $1$, so $\gamma_\lambda = 1$ |
 | Local iterations | $K$ | $5$ coupled (also $2$ historical) |
@@ -1098,10 +1031,11 @@ with `method="predictive"` and `student_inference="smooth"`. Runner:
 | $\xi_t(T^{(k)})$ | `fast` at $k=0$, otherwise `pair_counts(T, previous, ...)` |
 | $\tilde S^{(k)}$, $B^{(k)}$ | `candidate_counts`, `B` |
 | $w_t$ | `weight = eta * candidate_counts.sum()`, `eta = config.legacy_penalty_weight` |
-| $\rho$, $\rho_t$ | `jepa_mix`; `legacy_jepa_mix(weight, B)` |
-| $M^{(k)}$ | `mixed_counts(B, D, rho)` (returned unscaled at the endpoints) |
-| update of Section 5.8 | `mm_update(T, counts)` (retains zero-mass rows) |
-| $\mathcal L^{(k)}_\rho$ before/after | `diagnostics[...]["local_iterations"]` |
+| $\rho$ | `jepa_mix` |
+| $C^{(k)}$ | `expected_counts(X, D, rho)` (exact tensor at the endpoints) |
+| update of Section 5.8 | `row_normalize(B)`, `B = prior_counts + increment * C + pseudocount` |
+| $-\log Z_t(T)$ | `data_nll(T, previous, incoming, ids)` |
+| $F_{\rho,t}$ and components before/after | `diagnostics[...]["local_iterations"]`: `objective`, `prior_term`, `data_nll`, `jepa_term` |
 | zero predictive support | `ZeroPredictiveSupportError` |
 | $\mathcal L^t$, latent KL, replayed evidence, $D^{(k)}$ | `replay_terms(...)` outputs `[0]`, `[1]`, `[2]`, `[3]` |
 | $K$, coupled schedule | `local_updates`, `coupled_auxiliary` |
@@ -1168,7 +1102,8 @@ with this, but left it implicit.
 * In the data term, it uses the filtered source $f_{t-1}$, with $\xi_t$ recomputed at every
   local iteration and weight $\gamma_\lambda$.
 * In the predictive term, as $u = t-1$, it uses the frozen smoothed source $b_{t-1}$, with
-  target $q^t_t = \alpha_t$ and weight $w_t/n_t$.
+  target $q^t_t = \alpha_t$ and weight $w_t/n_t$ (legacy) or $\gamma_\lambda\rho/n_t$
+  (accumulated).
 
 This is by design, but it means the newest transition receives both data and teacher
 supervision, while older window transitions receive teacher supervision only.
@@ -1185,14 +1120,13 @@ $0.99$, while the runner's `--forgetting` defaults to $1.0$. The reported runs r
 $\lambda = 1$ in `experiment.json`. A direct library call that omits `forgetting` would use
 $\lambda = 0.99$.
 
-**R7. Pure JEPA loses transition support immediately (smoke result).** The unmodified
-$\rho = 1$ objective was run on level 21, seed 0, with ground-truth clones, smoothed
-sources and $K = 5$. It stopped with `ZeroPredictiveSupportError` at arrival $2$, in the
-student filter. Section 5.11 shows that this is forced by the objective: its minimisers
-forget every successor outside the window. Under the same settings, $\rho = 0$ reproduced
-short EM bit for bit, and $\rho = 0.5$ completed with strictly positive, row-stochastic
-tensors. No preventive mechanism has been added; Section 5.11 lists the candidate
-objective modifications.
+**R7. The transient formulation lost support at $\rho = 1$ (historical).** The transient
+`jepa_mix` of commit 233eb86 (Section 5.10) at $\rho = 1$ updated by
+$\operatorname{rowNorm}(D^{(k)})$, with no statistics or pseudocount. On level 21, seed 0,
+it stopped with `ZeroPredictiveSupportError` at arrival $2$: its minimisers forget every
+successor outside the window. That failure came from removing the statistical machinery
+together with the observation-likelihood objective. The accumulated formulation keeps
+$S$, $\lambda$ and $\kappa$ at $\rho = 1$, and is strictly positive by Section 5.11.
 
 **R8. Parameter and notation changes.** The forgetting increment previously written
 $\rho_\lambda$ is now $\gamma_\lambda$, so that $\rho$ denotes `jepa_mix` alone.
@@ -1208,20 +1142,23 @@ legacy runs. Previously reported configurations therefore run unchanged.
   smoothing ($b_u$) and the teacher's window smoothing ($q^t$) are probabilistic inference.
   They are identical in every regime whenever their outputs are needed. `jepa_mix` changes
   only which counts form the transition update.
-* **Pure EM, hybrid, pure JEPA.** $\rho = 0$ is short-context online EM, with no teacher.
-  $0 < \rho < 1$ minimises the mixed surrogate at every iteration. $\rho = 1$ minimises
-  the predictive loss alone: no EM counts, no statistics, no pseudocounts and no warm-up.
-* **Persistent versus temporary counts.** $S_t$ holds data expected counts and persists
-  across arrivals. $D^{(k)}$ is rebuilt at every local iteration from frozen targets, and is
-  never committed.
+* **Objective versus algorithm.** `jepa_mix` changes the learning objective, not the
+  learning algorithm. $\rho = 0$ is short-context online EM, with no teacher.
+  $0 < \rho < 1$ accumulates the mixture $(1-\rho)\xi + \rho D$. $\rho = 1$ accumulates
+  teacher-derived counts only, with the statistics, forgetting and pseudocount retained:
+  prior-regularised predictive learning.
+* **Persistent counts.** In `jepa_mix` runs, $S_t$ holds the accumulated mixture and is
+  committed once per arrival. Overlapping windows are replayed teacher supervision, not
+  independent observations. In legacy runs, $S_t$ holds data counts only and $D^{(k)}$ is
+  transient.
 * **Predictive objective versus posterior matching.** $\mathcal L^t$ is the unnormalised
   predictive KL. It equals the latent-matching KL plus the replayed evidence
   (Proposition 1). The normalised posterior-matching objective is a different arm
   (`posterior`) and is not part of the mix.
-* **Per-iteration descent versus online behaviour.** Proposition 4 guarantees descent of
-  $\mathcal L^{(k)}_\rho$ over one step, and of $F_{\rho,t}$ over the local iterations of
-  one arrival. Nothing is claimed across arrivals.
-* **Mixing coefficient versus legacy penalty.** $\rho$ is a fixed fraction of two
-  unit-mass objectives. The legacy $\eta$ scales the penalty by the running count mass, and
-  is equivalent to the time-varying $\rho_t = \eta\tilde m_t / ((1+\eta)\tilde m_t + \kappa A N^2)$,
-  combined with its own iteration schedule.
+* **Per-arrival descent versus online behaviour.** Proposition 4 guarantees monotone
+  descent of the fixed arrival objective $F_{\rho,t}$ over the local iterations of one
+  arrival. The running statistics are an online approximation built from historical
+  responsibilities; nothing is claimed across arrivals or over the full history.
+* **Mixing coefficient versus legacy penalty.** $\rho$ is the teacher-derived share of one
+  unit of new evidence per arrival. The legacy $\eta$ re-imposes a transient teacher term
+  weighted by the running count mass at every arrival.

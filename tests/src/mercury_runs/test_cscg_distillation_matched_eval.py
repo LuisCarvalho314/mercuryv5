@@ -4,7 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from scripts.analysis.cscg_distillation_matched_eval import decoder_lag, fixed_lag_decode, protocol_for
+from scripts.analysis.cscg_distillation_matched_eval import (
+    OUTPUT, decoder_lag, fixed_lag_decode, output_name, protocol_for,
+)
 from src.mercury_runs.algorithms.cscg.distillation import CarriedFilter, clone_groups, row_normalize, smooth_window
 
 
@@ -75,3 +77,13 @@ def test_protocol_uses_the_canonical_walk_set():
             reference.number_of_walks, reference.walk_length) == ("cardinal distance", 1, 0.1, 0, 100, 10_000)
     assert reference.walk_cache_key() == protocol_for(13, 39).walk_cache_key()
     assert reference.protocol_id() != protocol_for(13, 39).protocol_id()
+
+
+def test_reduced_budget_changes_only_walk_count_and_length():
+    canonical, reduced = protocol_for(21, 1), protocol_for(21, 1, 10, 500)
+    assert (reduced.number_of_walks, reduced.walk_length) == (10, 500)
+    differing = {k for k, v in vars(canonical).items() if vars(reduced)[k] != v}
+    assert differing == {"number_of_walks", "walk_length"}
+    assert reduced.walk_cache_key() != canonical.walk_cache_key()
+    assert output_name() == output_name(100, 10_000) == OUTPUT
+    assert output_name(10, 500) == f"{OUTPUT}_walks10x500"

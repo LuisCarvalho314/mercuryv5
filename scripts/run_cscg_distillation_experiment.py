@@ -228,7 +228,7 @@ def report(output, rows):
              f"All five arms receive identical {steps:,}-observation streams, clone allocations, initial tensors,",
              f"forgetting factors and {updates} parameter-update opportunities per transition. No teacher is fitted by EM.",
              (f"Every arm takes {updates} local MM iterations; each predictive iteration minimises "
-              f"(1 - {jepa_mix:g}) EM/sum(B) + {jepa_mix:g} L_JEPA (no EM warm-up)." if jepa_mix is not None else
+              f"accumulates C = (1 - {jepa_mix:g}) xi + {jepa_mix:g} D into the running statistics (no EM warm-up)." if jepa_mix is not None else
               f"All arms take {updates} coupled E/M iterations; every KL/NLL M-step includes its auxiliary objective."
               if coupled else f"Baselines take {updates} EM passes; KL/NLL arms take {updates - 1} EM passes and one penalty update."),
              "Auxiliary M-steps use EM-like majorization or an analytical-gradient generalized M-step, not an exact marginal argmin.",
@@ -476,8 +476,8 @@ def main():
     p.add_argument("--pseudocount", type=float, default=.002)
     p.add_argument("--weight", type=float, help="Legacy penalty scale eta (default 1.0); excludes --jepa-mix")
     p.add_argument("--jepa-mix", type=float,
-                   help="Explicit objective (1-rho) EM/sum(B) + rho L_JEPA in [0, 1] at every local iteration; "
-                        "requires --methods predictive")
+                   help="Accumulated JEPA: new counts C = (1-rho) xi + rho D, rho in [0, 1], enter the running "
+                        "statistics at every local iteration; requires --methods predictive")
     p.add_argument("--window", type=int, default=40)
     p.add_argument("--teacher-window", type=int, help="Teacher smoothing context (default: --window)")
     p.add_argument("--half-life", type=float, default=40.)
@@ -544,8 +544,9 @@ def main():
                     rand_prob=args.rand_prob, evaluation_walks=args.walks, walk_length=args.walk_length,
                     evaluation_seed=10000, methods=[m for m in METHODS if m in args.methods], local_parameter_updates=args.local_updates,
                     penalty=("current frozen window, coefficient eta * original running count mass" if config.jepa_mix is None
-                             else f"current frozen window, objective (1 - {config.jepa_mix:g}) EM / sum(B) + {config.jepa_mix:g} L_JEPA "
-                                  "at every local iteration"),
+                             else f"accumulated: new counts (1 - {config.jepa_mix:g}) xi + {config.jepa_mix:g} D (current frozen window) "
+                                  "enter the running statistics with the usual forgetting and pseudocount; "
+                                  "overlapping windows are replayed teacher supervision"),
                     inference="causal carried filter; historical boundary beliefs; destination-normalized T",
                     vocabulary="observation/action vocabulary scanned from the shared training stream",
                     schema_version=1)

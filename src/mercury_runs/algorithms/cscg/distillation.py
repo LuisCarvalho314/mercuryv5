@@ -151,42 +151,23 @@ def replay_terms(T, beliefs, actions, destination_ids, targets):
     return predictive, predictive - observation, observation, D, O
 
 
-def mixed_counts(B, D, rho):
-    """M = (1 - rho) B / <B, 1> + rho D, up to a positive scalar.
+def expected_counts(X, D, rho):
+    """C = (1 - rho) xi + rho D, the newly accumulated evidence of one arrival.
 
-    rowNorm is scale invariant, so each endpoint returns its own count tensor
-    unscaled (and the unused one may be None): rho = 0 is exactly the EM update
-    rowNorm(B), rho = 1 exactly rowNorm(D). <D, 1> = 1 by construction.
+    xi (short pair counts) and D (mean teacher-supervised window counts) both have
+    unit total mass, so C does too. Each endpoint returns its own tensor exactly
+    (the unused one may be None): rho = 0 is short EM, rho = 1 teacher counts only.
     """
     if rho == 0:
-        return B
+        return X
     if rho == 1:
         return D
-    return (1 - rho) / B.sum() * B + rho * D
+    return (1 - rho) * X + rho * D
 
 
-def mm_update(T, counts):
-    """Closed-form MM step rowNorm(counts); a row with zero count mass keeps T's row.
-
-    A zero-mass row leaves the surrogate constant in that row, so retaining the
-    current distribution is a valid minimiser and preserves MM descent. With a
-    positive pseudocount (every EM or hybrid update) no row is ever unsupported.
-    """
-    supported = counts.sum(axis=-1) > 0
-    if supported.all():
-        return row_normalize(counts)
-    result = T.copy()
-    result[supported] = row_normalize(counts[supported])
-    return result
-
-
-def legacy_jepa_mix(weight, B):
-    """Equivalent mixing coefficient of the legacy update rowNorm(B + weight * D).
-
-    Since <D, 1> = 1, B + w D = (<B, 1> + w) M_rho with rho = w / (<B, 1> + w).
-    <B, 1> includes the pseudocount, so rho != eta / (1 + eta) in general.
-    """
-    return weight / (float(B.sum()) + weight)
+def data_nll(T, source_belief, action, destination_ids):
+    """-log p(x_t | x_<t; T) of the short arrival term, under a fixed source belief."""
+    return -float(np.log((source_belief @ T[action])[destination_ids].sum()))
 
 
 def posterior_gradient(T, D, O):
@@ -244,10 +225,12 @@ class ExperimentConfig:
     # boundary belief at t-W_T+1, but only the targets for the student's replay
     # window x_{s+1:t} are used; the replay window and long EM keep `window`.
     teacher_window: int | None = None
-    # Explicit objective (method "predictive" only):
-    #   (1 - rho) * EM / sum(B) + rho * L_JEPA  at EVERY local MM iteration.
-    # 0 = pure short-context EM, 1 = pure JEPA (no EM counts, statistics or
-    # pseudocounts). None = legacy penalty parameterisation via penalty_weight.
+    # Accumulated predictive JEPA (method "predictive" only). Each arrival's new
+    # expected counts are C = (1 - rho) xi + rho D (short pair counts xi, teacher-
+    # supervised window counts D), accumulated into the usual running statistics
+    # with the usual forgetting and pseudocount: T = rowNorm(lambda S + (1-lambda) C + kappa).
+    # 0 = short EM, 1 = teacher-derived evidence only (statistics, forgetting and
+    # pseudocount retained). None = legacy penalty parameterisation via penalty_weight.
     jepa_mix: float | None = None
 
     @property
@@ -294,12 +277,14 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     arm's unit mass. The JEPA term applies to the current window only.
 
     Objective selection for "predictive":
-      * config.jepa_mix = rho: every local MM iteration minimises the surrogate of
-        (1-rho) EM / sum(B) + rho L_JEPA. rho = 0 skips the teacher entirely;
-        rho = 1 computes no EM counts and keeps no running statistics.
-      * config.jepa_mix = None (legacy): penalty w = eta * sum(S~), i.e. a
-        time-varying mix rho_t = w / (sum(B) + w), applied only at the final
-        iteration (historical schedule) or at every iteration (coupled_auxiliary).
+      * config.jepa_mix = rho: every local iteration k forms
+        C^(k) = (1-rho) xi^(k) + rho D^(k) at the current T and sets
+        T <- rowNorm(prior + inc * C^(k) + kappa) from the SAME pre-arrival
+        statistics; prior + inc * C is committed once, after the final iteration.
+        rho = 0 skips the teacher entirely; rho = 1 forms no xi.
+      * config.jepa_mix = None (legacy): rowNorm(B + w D) with w = eta * sum(S~),
+        D transient, applied only at the final iteration (historical schedule) or
+        at every iteration (coupled_auxiliary).
     """
     if method not in METHODS:
         raise ValueError(f"Unknown experimental method: {method}")
@@ -311,6 +296,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     extra = method in {"predictive", "posterior", "nll_control"}
     if mixed:
         rho = float(config.jepa_mix)
+        # em_active: the observation-derived counts xi are formed (rho < 1).
         em_active, jepa_active, teacher_active = rho < 1, rho > 0, rho > 0
     else:
         eta = config.legacy_penalty_weight
@@ -320,8 +306,8 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     teacher = T.copy()
     groups = clone_groups(n_clones)
     student_filter, teacher_filter = CarriedFilter(n_clones), CarriedFilter(n_clones)
-    # Pure JEPA has no conventional sufficient statistics at all.
-    S = np.zeros_like(T) if em_active else None
+    # Every arm keeps running sufficient statistics, including rho = 1.
+    S = np.zeros_like(T)
     cached_student, cached_teacher = [], []
     resets = set(episode_starts or ()) | {0}
     tau = 2 ** (-1 / config.teacher_half_life)
@@ -402,24 +388,21 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                            else cached_student[s:t])
                 ids = [groups[int(z)] for z in xs[1:]]
                 targets = q[1:]
-            if em_active:
-                prior_counts = S if config.forgetting == 1 else config.forgetting * S
-                increment = 1. if config.forgetting == 1 else 1 - config.forgetting
-            B = None
+            prior_counts = S if config.forgetting == 1 else config.forgetting * S
+            increment = 1. if config.forgetting == 1 else 1 - config.forgetting
             # Each E-step uses the latest T and the same pre-arrival statistics.
             local_diagnostics = []
             for local_iteration in range(config.local_updates):
+                X = None
                 if em_active:
                     if method == "long":
                         _, X = smooth_window(T, groups, xs, aa, cached_student[s])
                         work["smoothing_block_entries"] += 3 * window_entries
                     else:
                         X = fast if local_iteration == 0 else pair_counts(T, previous, incoming, groups[int(x)])
-                    candidate_counts = prior_counts + increment * X
-                    B = candidate_counts + config.pseudocount
                 final_iteration = local_iteration + 1 == config.local_updates
-                # jepa_mix: the selected objective at every iteration. Legacy: the
-                # coupled flag, or else only the final iteration (EM warm-up first).
+                # jepa_mix: teacher counts at every iteration. Legacy: the coupled
+                # flag, or else only the final iteration (EM warm-up first).
                 auxiliary_step = jepa_active and (mixed or config.coupled_auxiliary or final_iteration)
                 work["base_msteps" if local_iteration == 0 else "refinements"] += 1
                 work["tensor_entries"] += T.size
@@ -430,35 +413,52 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                         before = replay_terms(T, beliefs, aa, ids, targets)
                     except ZeroPredictiveSupportError as error:
                         raise ZeroPredictiveSupportError(f"arrival {t}, iteration {local_iteration}: {error}") from error
-                    if mixed:
-                        mix, weight = rho, None
-                    else:
-                        weight = eta * float(candidate_counts.sum())
-                        mix = legacy_jepa_mix(weight, B)
                     work["penalty_updates"] += 1
                     work["replay_block_entries"] += window_entries
+                # New evidence of this arrival: data counts xi (EM and legacy arms),
+                # or the accumulated mixture C = (1-rho) xi + rho D (jepa_mix).
+                C = expected_counts(X, before[3] if auxiliary_step else None, rho) if mixed else X
+                candidate_counts = prior_counts + increment * C
+                B = candidate_counts + config.pseudocount
+                if mixed and auxiliary_step:
+                    record = (t + 1) in checkpoints
+                    if record:
+                        # Per-arrival objective F(T) = -<prior + kappa, log T>
+                        #   + inc * [(1-rho) (-log p(x_t | x_<t; T)) + rho L_JEPA(T)];
+                        # rowNorm(B^(k)) minimises its MM majoriser at T^(k).
+                        def arrival_terms(tensor, jepa):
+                            prior_term = -float(np.sum((prior_counts + config.pseudocount) * np.log(tensor)))
+                            nll = data_nll(tensor, previous, incoming, groups[int(x)]) if em_active else None
+                            value = prior_term + increment * ((1 - rho) * (nll or 0.) + rho * jepa)
+                            return dict(objective=value, prior_term=prior_term, data_nll=nll, jepa_term=float(jepa))
+                        terms_before = arrival_terms(T, before[0])
+                        if final_iteration:
+                            # Per-row masses of this arrival's new evidence, by source,
+                            # and of the historical statistics it is added to.
+                            row_masses = dict(
+                                em_row_mass=(np.zeros(T.shape[:2]) if X is None
+                                             else increment * (1 - rho) * X.sum(-1)).tolist(),
+                                jepa_row_mass=(increment * rho * before[3].sum(-1)).tolist(),
+                                history_row_mass=(prior_counts + config.pseudocount).sum(-1).tolist())
+                    T = row_normalize(B)
+                    if record:
+                        after = replay_terms(T, beliefs, aa, ids, targets)
+                        local_diagnostics.append(dict(
+                            iteration=local_iteration + 1, jepa_mix=rho,
+                            **{f"{k}_before": v for k, v in terms_before.items()},
+                            **{f"{k}_after": v for k, v in arrival_terms(T, after[0]).items()},
+                            running_count_mass=float(candidate_counts.sum())))
+                elif auxiliary_step:
+                    # Legacy penalty, as at 852cf3b: D is transient and never committed.
+                    weight = eta * float(candidate_counts.sum())
                     objective_index = {"predictive": 0, "posterior": 1, "nll_control": 2}[method]
                     def objective(tensor, auxiliary):
-                        # Fixed per-iteration objective: B = B^(k) is frozen here.
-                        if weight is not None:
-                            return -float(np.sum(B * np.log(tensor))) + weight * auxiliary
-                        em = 0. if B is None else -float(np.sum(B * np.log(tensor))) / float(B.sum())
-                        return (1 - mix) * em + mix * auxiliary
-                    def em_term(tensor):
-                        # Normalised EM term -<B^(k), log T> / <B^(k), 1> (None without EM).
-                        return None if B is None else -float(np.sum(B * np.log(tensor))) / float(B.sum())
+                        return -float(np.sum(B * np.log(tensor))) + weight * auxiliary
                     if (t + 1) in checkpoints:
                         objective_before = objective(T, before[objective_index])
-                        em_before = em_term(T)
                     if method in {"predictive", "nll_control"}:
                         counts = before[3] if method == "predictive" else before[4]
-                        if (t + 1) in checkpoints and final_iteration:
-                            # Effective per-row contributions to M^(k) = (1-rho) B/<B,1> + rho D.
-                            row_masses = dict(
-                                em_row_mass=(np.zeros(T.shape[:2]) if B is None
-                                             else (1 - mix) * B.sum(-1) / float(B.sum())).tolist(),
-                                jepa_row_mass=(mix * counts.sum(-1)).tolist())
-                        T = mm_update(T, mixed_counts(B, counts, mix))
+                        T = row_normalize(B + weight * counts)
                         trials = 0
                     else:
                         T, trials, _, _ = posterior_refine(
@@ -468,20 +468,15 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                     if (t + 1) in checkpoints:
                         after = replay_terms(T, beliefs, aa, ids, targets)
                         local_diagnostics.append(dict(
-                            iteration=local_iteration + 1, jepa_mix=mix,
-                            objective_before=objective_before,
+                            iteration=local_iteration + 1, objective_before=objective_before,
                             objective_after=objective(T, after[objective_index]),
-                            em_term_before=em_before, em_term_after=em_term(T),
-                            jepa_term_before=float(before[objective_index]),
-                            jepa_term_after=float(after[objective_index]),
-                            **({} if B is None else dict(running_count_mass=float(candidate_counts.sum())))))
+                            running_count_mass=float(candidate_counts.sum())))
                 else:
-                    T = mm_update(T, B)
-            # A single commit after the final iteration; the statistics contain
-            # data expected counts only, never teacher-derived counts.
-            if em_active:
-                S = candidate_counts
-                work["statistics_commits"] += 1
+                    T = row_normalize(B)
+            # A single commit after the final iteration. EM and legacy arms commit
+            # data counts only; jepa_mix commits the accumulated mixture C.
+            S = candidate_counts
+            work["statistics_commits"] += 1
             if jepa_active and (t + 1) in checkpoints:
                 diagnostics.append(dict(step=t + 1, predictive_kl=after[0], posterior_kl=after[1],
                                         replay_nll=after[2],
@@ -490,7 +485,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                                             -np.sum(z[z > 0] * np.log(z[z > 0])) for z in targets])),
                                         teacher_student_tv=float(np.abs(teacher-T).sum(-1).mean()/2),
                                         local_iterations=local_diagnostics,
-                                        **(row_masses if method in {"predictive", "nll_control"} else {}),
+                                        **(row_masses if mixed else {}),
                                         min_window_student_prediction=float(min(
                                             (b[b > 0] @ T[int(act)][np.ix_(np.flatnonzero(b), j)]).min()
                                             for b, act, j in zip(beliefs, aa, ids))),

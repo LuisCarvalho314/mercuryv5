@@ -1,11 +1,14 @@
 """Report a jepa_mix sweep (scripts/run_cscg_jepa_mix_sweep.sh): read-only over saved runs.
 
-  PYTHONPATH=.:src .venv/bin/python scripts/analysis/cscg_jepa_mix_sweep_report.py --sweep DIR
+  PYTHONPATH=.:src .venv/bin/python scripts/analysis/cscg_jepa_mix_sweep_report.py --sweep DIR \
+      [--walks 100 --walk-length 10000]
 
 Inputs per arm directory: rows.json (runner evaluation + recorded support margins),
-training.json (per-checkpoint EM/JEPA terms and per-row count contributions),
-failure.json (recorded support failures), and the training-matched canonical metrics
-evaluation_v5_training_matched/canonical_metrics_all.csv. Writes DIR/report/.
+training.json (per-checkpoint arrival-objective terms and per-row count contributions),
+snapshots.npz (checkpoint tensors), failure.json (recorded support failures), and the
+training-matched canonical metrics for the requested evaluation budget
+(<evaluation dir>/canonical_metrics_all.csv). Writes DIR/report/ (DIR/report_walks<W>x<L>/
+for a non-canonical budget).
 """
 from __future__ import annotations
 
@@ -15,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from scripts.analysis.cscg_distillation_matched_eval import CANONICAL_BUDGET, output_name
 
 METRICS = ("action_tv_similarity", "action_no_self_loop_tv_similarity", "action_edge_f1_auc",
            "action_no_self_loop_edge_f1_auc", "latent_precision", "latent_recall", "eval_nll_bps",
@@ -36,12 +41,23 @@ def arm_of(directory, method):
     return name, None
 
 
-def load(sweep):
+def structural_change(path):
+    """Mean row TV between consecutive checkpoint tensors, keyed by the later step."""
+    with np.load(path) as saved:
+        steps, Ts = saved["steps"], saved["T"]
+    tv = .5 * np.abs(np.diff(Ts, axis=0)).sum(-1).mean(axis=(1, 2))
+    return dict(zip(steps[1:].tolist(), tv.tolist()))
+
+
+def load(sweep, evaluation):
     curves, rows_out, failures = [], [], []
-    for directory in sorted(p for p in sweep.iterdir() if p.is_dir() and p.name != "report"):
-        matched_path = directory / "evaluation_v5_training_matched" / "canonical_metrics_all.csv"
+    for directory in sorted(p for p in sweep.iterdir() if p.is_dir() and not p.name.startswith("report")):
+        matched_path = directory / evaluation / "canonical_metrics_all.csv"
         matched = pd.read_csv(matched_path) if matched_path.exists() else pd.DataFrame()
+        eval_seconds = pd.Series(dtype=float)
         if not matched.empty:
+            if "evaluation_seconds" in matched:
+                eval_seconds = matched.groupby(["level", "seed", "method", "decoder"]).evaluation_seconds.sum()
             matched = matched[matched.decoder == "training_matched"]
         for failure in directory.glob("level=*/seed=*/*/failure.json"):
             f = json.loads(failure.read_text())
@@ -54,34 +70,47 @@ def load(sweep):
             diag = {d["step"]: d for d in training["diagnostics"]}
             level, seed, method = rows[0]["level"], rows[0]["seed"], rows[0]["method"]
             arm, rho = arm_of(directory, method)
+            change = structural_change(path.parent / "snapshots.npz")
+            seconds = {decoder: float(eval_seconds.get((level, seed, method, decoder), np.nan))
+                       for decoder in ("training_matched", "filter")}
+            first = True
             for row in rows:
                 step = row["step"]
                 record = dict(arm=arm, rho=rho, level=level, seed=seed, step=step,
                               train_seconds=row["train_seconds"], min_T=row.get("min_T"),
                               min_teacher_T=row.get("min_teacher_T"),
                               min_student_evidence=row.get("min_student_evidence"),
-                              min_teacher_evidence=row.get("min_teacher_evidence"))
+                              min_teacher_evidence=row.get("min_teacher_evidence"),
+                              structural_change=change.get(step),
+                              # Whole-run evaluation time, carried once per case (on its first row).
+                              eval_seconds_matched=seconds["training_matched"] if first else np.nan,
+                              eval_seconds_filter=seconds["filter"] if first else np.nan)
+                first = False
                 d = diag.get(step)
                 if d is not None:
                     final = d["local_iterations"][-1]
                     mix = final["jepa_mix"]
-                    em, jepa = final["em_term_after"], final["jepa_term_after"]
-                    record.update(effective_mix=mix, em_term=em, jepa_term=jepa,
-                                  weighted_em=(1 - mix) * em if em is not None else 0.,
-                                  weighted_jepa=mix * jepa, predictive_kl=d["predictive_kl"],
+                    nll = final["data_nll_after"]
+                    record.update(effective_mix=mix, objective=final["objective_after"],
+                                  prior_term=final["prior_term_after"], data_nll=nll,
+                                  jepa_term=final["jepa_term_after"],
+                                  weighted_data_nll=(1 - mix) * nll if nll is not None else 0.,
+                                  weighted_jepa=mix * final["jepa_term_after"], predictive_kl=d["predictive_kl"],
                                   posterior_kl=d["posterior_kl"], replay_nll=d["replay_nll"],
                                   min_window_student_prediction=d["min_window_student_prediction"],
                                   min_window_teacher_target=d["min_window_teacher_target"],
                                   iteration_max_increase=max(i["objective_after"] - i["objective_before"]
                                                              for i in d["local_iterations"]))
                     em_rows, jepa_rows = np.asarray(d["em_row_mass"]), np.asarray(d["jepa_row_mass"])
+                    history = np.asarray(d["history_row_mass"])
                     touched = jepa_rows > 0
-                    share = jepa_rows / (em_rows + jepa_rows)
+                    new = em_rows + jepa_rows
+                    share = np.divide(jepa_rows, new, out=np.zeros_like(new), where=new > 0)
                     record.update(rows_total=int(share.size), rows_jepa_touched=int(touched.sum()),
                                   jepa_share_median_touched=float(np.median(share[touched])) if touched.any() else None,
-                                  jepa_share_min_touched=float(share[touched].min()) if touched.any() else None,
                                   rows_jepa_dominant=int((share > .5).sum()),
-                                  em_mass_on_untouched_rows=float(em_rows[~touched].sum()))
+                                  em_mass_on_untouched_rows=float(em_rows[~touched].sum()),
+                                  new_to_history_mass=float(new.sum() / history.sum()))
                     for (a, i), e in np.ndenumerate(em_rows):
                         rows_out.append(dict(arm=arm, rho=rho, level=level, seed=seed, step=step, action=a, source=i,
                                              em_mass=float(e), jepa_mass=float(jepa_rows[a, i])))
@@ -124,7 +153,12 @@ def summarise(curves):
     rows = []
     for (arm, level, seed), part in curves.groupby(["arm", "level", "seed"]):
         part = part.sort_values("step"); final = part.iloc[-1]
-        value = dict(arm=arm, level=level, seed=seed, final_step=int(final.step), train_seconds=final.train_seconds)
+        value = dict(arm=arm, level=level, seed=seed, final_step=int(final.step), train_seconds=final.train_seconds,
+                     eval_seconds_matched=part.eval_seconds_matched.sum(min_count=1),
+                     eval_seconds_filter=part.eval_seconds_filter.sum(min_count=1))
+        late = part[part.step >= final.step / 2]
+        value["late_mean_structural_change"] = float(late.structural_change.mean())
+        value["late_max_structural_change"] = float(late.structural_change.max())
         for metric in METRICS:
             if metric in part and part[metric].notna().all():
                 value["final_" + metric] = final[metric]
@@ -136,10 +170,10 @@ def summarise(curves):
                     "min_window_student_prediction", "min_window_teacher_target"):
             if col in part and part[col].notna().any():
                 value["overall_" + col] = float(part[col].min())
-        for col in ("effective_mix", "em_term", "jepa_term", "weighted_em", "weighted_jepa", "predictive_kl",
-                    "posterior_kl", "replay_nll", "rows_jepa_touched", "rows_total", "rows_jepa_dominant",
-                    "jepa_share_median_touched", "jepa_share_min_touched", "em_mass_on_untouched_rows",
-                    "iteration_max_increase"):
+        for col in ("effective_mix", "objective", "prior_term", "data_nll", "jepa_term", "weighted_data_nll",
+                    "weighted_jepa", "predictive_kl", "posterior_kl", "replay_nll", "rows_jepa_touched", "rows_total",
+                    "rows_jepa_dominant", "jepa_share_median_touched", "em_mass_on_untouched_rows",
+                    "new_to_history_mass", "iteration_max_increase"):
             if col in part and pd.notna(final.get(col)):
                 value["final_" + col] = final[col]
         if "iteration_max_increase" in part and part.iteration_max_increase.notna().any():
@@ -214,22 +248,28 @@ def figures(curves, output):
                               "min_student_evidence": "min student p(x_t | x_<t) since last checkpoint",
                               "min_window_student_prediction": "min window prediction p_u(j; T)"},
           log=("min_T", "min_teacher_T", "min_student_evidence", "min_window_student_prediction"))
-    panel("objective_terms", {"em_term": "normalised EM term -<B,log T>/<B,1>",
-                              "jepa_term": "JEPA predictive loss L",
-                              "weighted_em": "(1 - rho) x EM term", "weighted_jepa": "rho x JEPA term"},
-          log=("weighted_em",))
-    panel("count_contributions", {"jepa_share_median_touched": "median JEPA share, JEPA-touched rows",
-                                  "rows_jepa_dominant": "rows with JEPA share > 0.5",
-                                  "em_mass_on_untouched_rows": "EM mass on rows without JEPA counts"},
-          log=("em_mass_on_untouched_rows",))
+    panel("teacher_matching", {"predictive_kl": "teacher-matching loss L (predictive KL)",
+                               "replay_nll": "observation-likelihood component -log Z",
+                               "posterior_kl": "latent component KL(q || p/Z)",
+                               "data_nll": "short arrival NLL -log p(x_t | x_<t)"})
+    panel("structure_and_metrics", {"structural_change": "mean row TV between checkpoints",
+                                    "action_edge_f1_auc": "action-conditioned edge F1 AUC",
+                                    "latent_precision": "latent purity (precision)",
+                                    "latent_recall": "latent concentration (recall)"},
+          log=("structural_change",))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sweep", type=Path, required=True)
+    parser.add_argument("--walks", type=int, default=CANONICAL_BUDGET[0])
+    parser.add_argument("--walk-length", type=int, default=CANONICAL_BUDGET[1])
     args = parser.parse_args()
-    sweep = args.sweep.resolve(); output = sweep / "report"; output.mkdir(exist_ok=True)
-    curves, row_masses, failures = load(sweep)
+    budget = (args.walks, args.walk_length)
+    sweep = args.sweep.resolve()
+    output = sweep / ("report" if budget == CANONICAL_BUDGET else f"report_walks{budget[0]}x{budget[1]}")
+    output.mkdir(exist_ok=True)
+    curves, row_masses, failures = load(sweep, output_name(*budget))
     curves.to_csv(output / "curves.csv", index=False)
     row_masses.to_csv(output / "row_contributions.csv", index=False)
     failures.to_csv(output / "failures.csv", index=False)
@@ -239,10 +279,15 @@ def main():
     figures(curves, output)
     scope = ", ".join(f"level {l}: seeds {sorted(curves[curves.level == l].seed.unique().tolist())}"
                       for l in sorted(curves.level.unique()))
-    lines = [f"# JEPA-dominated optimisation sweep: {sweep.name}", "",
+    reduced = budget != CANONICAL_BUDGET
+    lines = [f"# Accumulated predictive JEPA-CSCG vs EM: {sweep.name}", "",
              f"Scope: {scope}; final step {int(curves.step.max()):,}. Means ± population SD over seeds.",
-             "Canonical metrics use the training-matched decoder (evaluation-v5 walks, 100 × 10,000 steps).",
-             "The learning algorithm is unchanged; all margins and contributions are recorded, never fed back.", "",
+             f"Canonical metrics use the training-matched decoder; evaluation budget {budget[0]} walks × "
+             f"{budget[1]:,} steps = {budget[0] * budget[1]:,} steps per checkpoint (evaluation-v5 seed 0,",
+             "rand_prob 0.1), identical walks for every arm and checkpoint.",
+             *(["", "**Reduced evaluation budget** (canonical: 100 × 10,000). For rapid methodological comparison",
+                "between these arms only; not comparable with full-budget results."] if reduced else []),
+             "", "All margins and contributions are recorded, never fed back into learning.", "",
              "## Support failures", ""]
     if failures.empty:
         lines.append("None: no student or teacher filter, and no replay target, met zero predictive support.")
@@ -255,7 +300,8 @@ def main():
                               ("Non-self TV sim.", "final_action_no_self_loop_tv_similarity"),
                               ("Edge F1 AUC", "final_action_edge_f1_auc"),
                               ("Non-self edge F1", "final_action_no_self_loop_edge_f1_auc"),
-                              ("Latent precision", "final_latent_precision"), ("Latent recall", "final_latent_recall"),
+                              ("Purity (precision)", "final_latent_precision"),
+                              ("Concentration (recall)", "final_latent_recall"),
                               ("NLL (bits)", "final_eval_nll_bps"), ("Coverage", "final_state_coverage"),
                               ("Unmatched mass", "final_unmatched_mass")], arms)
     lines += ["", "## Learning trajectory and convergence", "",
@@ -268,8 +314,23 @@ def main():
                               ("t90 non-self TV", "t90_action_no_self_loop_tv_similarity"),
                               ("Late SD TV sim.", "late_sd_action_tv_similarity"),
                               ("Late SD non-self TV", "late_sd_action_no_self_loop_tv_similarity"),
-                              ("Integrated NLL", "auc_eval_nll_bps"), ("t90 NLL", "t90_eval_nll_bps"),
-                              ("Train seconds", "train_seconds")], arms)
+                              ("Integrated NLL", "auc_eval_nll_bps"), ("t90 NLL", "t90_eval_nll_bps")], arms)
+    lines += ["", "## Late-stage variability and structural oscillation (second half of training)", "",
+              "Late SD = population SD over checkpoints with step >= final/2. Structural change = mean over rows of",
+              "TV(T_k[a,i,:], T_{k-1}[a,i,:]) between consecutive checkpoint tensors.", ""]
+    lines += table(per_seed, [("Late SD TV sim.", "late_sd_action_tv_similarity"),
+                              ("Late SD non-self TV", "late_sd_action_no_self_loop_tv_similarity"),
+                              ("Late SD edge F1", "late_sd_action_edge_f1_auc"),
+                              ("Late SD purity", "late_sd_latent_precision"),
+                              ("Late SD NLL", "late_sd_eval_nll_bps"),
+                              ("Late mean struct. change", "late_mean_structural_change"),
+                              ("Late max struct. change", "late_max_structural_change")], arms,
+                   sci={"late_mean_structural_change", "late_max_structural_change"})
+    lines += ["", "## Runtime (seconds, measured separately)", "",
+              "Train = learner wall time over the full stream, excluding evaluation. Evaluation = sum over all",
+              "checkpoints of the training-matched decoder pass, and of the lag-0 filter check.", ""]
+    lines += table(per_seed, [("Train", "train_seconds"), ("Eval, matched decoder", "eval_seconds_matched"),
+                              ("Eval, filter check", "eval_seconds_filter")], arms)
     lines += ["", "## Minimum probabilities and support margins (minimum over all checkpoints)", "",
               "Student/teacher evidence: smallest p(x_t | x_<t) of the carried filter at any training arrival.",
               "Window prediction: smallest p_u(j; T) over every window transition and destination clone at",
@@ -282,26 +343,28 @@ def main():
                    sci={"overall_min_T", "overall_min_teacher_T", "overall_min_student_evidence",
                         "overall_min_teacher_evidence", "overall_min_window_student_prediction",
                         "overall_min_window_teacher_target"})
-    lines += ["", "## EM and JEPA objective contributions (final checkpoint, last local iteration)", "",
-              "EM term = -<B,log T>/<B,1> (normalised); JEPA term = predictive loss L. The objective is",
-              "(1 - rho) EM + rho L; legacy uses its effective rho_t = w/(<B,1> + w). Worst increase = largest",
-              "objective_after - objective_before over every recorded local iteration (MM descent check).", ""]
-    lines += table(per_seed, [("rho (effective)", "final_effective_mix"), ("EM term", "final_em_term"),
-                              ("JEPA term", "final_jepa_term"), ("(1-rho) EM", "final_weighted_em"),
-                              ("rho L", "final_weighted_jepa"), ("latent KL", "final_posterior_kl"),
-                              ("replay NLL", "final_replay_nll"), ("worst increase", "worst_iteration_increase")],
-                   arms, sci={"final_weighted_em", "worst_iteration_increase"})
-    lines += ["", "## Effective count contributions per transition row (final checkpoint)", "",
-              "Per row (a, i): EM mass (1 - rho) sum_j B_aij / <B,1> and JEPA mass rho sum_j D_aij; JEPA share =",
-              "JEPA / (EM + JEPA). Rows outside the window's source support receive EM counts only. Full per-row",
-              "values at every checkpoint: row_contributions.csv.", ""]
-    lines += table(per_seed, [("rows", "final_rows_total"), ("JEPA-touched rows", "final_rows_jepa_touched"),
-                              ("JEPA-dominant rows", "final_rows_jepa_dominant"),
+    lines += ["", "## Teacher matching and the per-arrival objective (final checkpoint, last local iteration)", "",
+              "Teacher-matching loss L = mean_u KL(q_{u+1} || p_u(T)) over the current window = latent KL(q || p/Z)",
+              "+ observation-likelihood component -log Z (replay NLL). Per-arrival objective F = -<prior + kappa,",
+              "log T> + (1 - rho) NLL_t + rho L (lambda = 1). Worst increase = largest F_after - F_before over every",
+              "recorded local iteration (MM descent check; <= 0 expected).", ""]
+    lines += table(per_seed, [("L (pred. KL)", "final_predictive_kl"), ("obs. component", "final_replay_nll"),
+                              ("latent KL", "final_posterior_kl"), ("NLL_t", "final_data_nll"),
+                              ("(1-rho) NLL_t", "final_weighted_data_nll"), ("rho L", "final_weighted_jepa"),
+                              ("F", "final_objective"), ("worst increase", "worst_iteration_increase")],
+                   arms, sci={"worst_iteration_increase"})
+    lines += ["", "## New evidence per transition row (final checkpoint)", "",
+              "Per row (a, i) this arrival adds data mass (1 - rho) sum_j xi_aij and teacher mass rho sum_j D_aij",
+              "to the running statistics; teacher share = teacher / (data + teacher). New-to-history = mass added",
+              "by the arrival / mass of the pre-arrival statistics plus pseudocounts. Full per-row values at",
+              "every checkpoint: row_contributions.csv.", ""]
+    lines += table(per_seed, [("rows", "final_rows_total"), ("teacher-touched rows", "final_rows_jepa_touched"),
+                              ("teacher-dominant rows", "final_rows_jepa_dominant"),
                               ("median share (touched)", "final_jepa_share_median_touched"),
-                              ("min share (touched)", "final_jepa_share_min_touched"),
-                              ("EM mass, untouched rows", "final_em_mass_on_untouched_rows")], arms,
-                   sci={"final_em_mass_on_untouched_rows"})
-    lines += ["", "Figures: learning_curves.png, support_margins.png, objective_terms.png, count_contributions.png",
+                              ("data mass, untouched rows", "final_em_mass_on_untouched_rows"),
+                              ("new / history mass", "final_new_to_history_mass")], arms,
+                   sci={"final_em_mass_on_untouched_rows", "final_new_to_history_mass"})
+    lines += ["", "Figures: learning_curves.png, support_margins.png, teacher_matching.png, structure_and_metrics.png",
               "(seed range shaded). Tables: curves.csv, per_seed_summary.csv, row_contributions.csv, failures.csv."]
     (output / "results.md").write_text("\n".join(lines) + "\n")
     print(f"Wrote {output / 'results.md'}")
