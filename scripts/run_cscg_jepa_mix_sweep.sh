@@ -34,7 +34,7 @@ EVAL_WALKS=${EVAL_WALKS:-100}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-10000}
 OUT=${OUT:-results/diagnostics/cscg_jepa_accumulated_v1}
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation ground_truth
-        --student-inference smooth --student-context "$STUDENT_CONTEXT" --local-updates "$LOCAL_UPDATES" --forgetting "$FORGETTING"--pseudocount 0.002
+        --student-inference smooth --student-context "$STUDENT_CONTEXT" --local-updates "$LOCAL_UPDATES" --forgetting "$FORGETTING" --pseudocount 0.002
         --window "$TEACHER_WINDOW" --teacher-window "$TEACHER_WINDOW" --half-life 40 --rand-prob "$RAND_PROB" --workers "$WORKERS")
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 
