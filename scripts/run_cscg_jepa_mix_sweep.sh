@@ -22,11 +22,12 @@ SEEDS=${SEEDS:-"0 1 2"}
 STEPS=${STEPS:-20000}
 WORKERS=${WORKERS:-2}
 MIXES=${MIXES:-"0.5 0.99 1"}
+LOCAL_UPDATES=${LOCAL_UPDATES:-5}
 EVAL_WALKS=${EVAL_WALKS:-100}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-10000}
 OUT=${OUT:-results/diagnostics/cscg_jepa_accumulated_v1}
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation ground_truth
-        --student-inference smooth --local-updates 5 --forgetting 1.0 --pseudocount 0.002
+        --student-inference smooth --local-updates "$LOCAL_UPDATES" --forgetting 1.0 --pseudocount 0.002
         --window 40 --teacher-window 40 --half-life 40 --workers "$WORKERS")
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 

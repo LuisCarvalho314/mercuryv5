@@ -481,7 +481,7 @@ def main():
     p.add_argument("--window", type=int, default=40)
     p.add_argument("--teacher-window", type=int, help="Teacher smoothing context (default: --window)")
     p.add_argument("--half-life", type=float, default=40.)
-    p.add_argument("--local-updates", type=int, choices=[2, 5], default=2)
+    p.add_argument("--local-updates", type=int, default=2, help="Local MM iterations per arrival (integer >= 2)")
     p.add_argument("--coupled-auxiliary", action="store_true", help="Include the auxiliary objective in every E/M iteration")
     p.add_argument("--student-inference", choices=STUDENT_INFERENCE, default="filter",
                    help="Replay source belief: carried filter, or smoothed over the student's x_{u:u+1}")
@@ -513,7 +513,7 @@ def main():
                               coupled_auxiliary=args.coupled_auxiliary,
                               student_inference=args.student_inference, teacher_window=args.teacher_window)
     default_output = ("cscg_distillation_coupled5_v1" if args.coupled_auxiliary else
-                      "cscg_distillation_v1" if args.local_updates == 2 else "cscg_distillation_updates5_v1")
+                      "cscg_distillation_v1" if args.local_updates == 2 else f"cscg_distillation_updates{args.local_updates}_v1")
     if args.clone_allocation == "ground_truth":
         default_output = default_output.replace("_v1", "_ground_truth_v1")
     if args.student_inference == "smooth":
