@@ -207,7 +207,9 @@ def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CAN
     matched = decoder_lag(method, window)
     for k in selected:
         T = np.ascontiguousarray(Ts[k])
-        for decoder, lag in (("training_matched", matched), ("filter", 0)):
+        # common_lag1: one decoder configuration for every arm (carried filter + lag-one
+        # smoothing), separating the learned tensor from each arm's inference context.
+        for decoder, lag in (("training_matched", matched), ("filter", 0), ("common_lag1", 1)):
             target = folder / output_name(*budget) / decoder / f"step={int(steps[k]):05d}.json"
             if target.exists():
                 record = json.loads(target.read_text())

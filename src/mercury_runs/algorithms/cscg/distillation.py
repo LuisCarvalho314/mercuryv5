@@ -220,6 +220,12 @@ class ExperimentConfig:
     # "smooth": P(z_u | x_{<=u}, x_{u+1}), forward-backward over the student's
     # short window x_{u:u+1} from the carried boundary f_u. Both are detached.
     student_inference: str = "filter"
+    # Smooth mode only: historical context H_S of the student's forward-backward pass.
+    # b_u is the node-u marginal of smooth_window over x_{u-H_S+1:u+1} (smoothing lag one),
+    # started from the cached filter f_{u-H_S+1} and recomputed under the current student
+    # tensor -- the same inference the teacher runs over its longer window. H_S = 1 is the
+    # historical one-transition smoothing from f_u.
+    student_context: int = 1
     # Teacher smoothing context. None = `window` (historical behaviour). A longer
     # teacher window smooths the teacher over x_{t-W_T+1:t}, from its cached
     # boundary belief at t-W_T+1, but only the targets for the student's replay
@@ -257,6 +263,11 @@ class ExperimentConfig:
             raise ValueError("local_updates must be an integer of at least two")
         if self.student_inference not in STUDENT_INFERENCE:
             raise ValueError(f"student_inference must be one of {STUDENT_INFERENCE}")
+        if (isinstance(self.student_context, bool) or not isinstance(self.student_context, int)
+                or self.student_context < 1):
+            raise ValueError("student_context must be a positive integer")
+        if self.student_context > 1 and self.student_inference != "smooth":
+            raise ValueError("student_context > 1 requires student_inference='smooth'")
         if self.teacher_window is not None and (isinstance(self.teacher_window, bool) or not isinstance(self.teacher_window, int)
                                                 or self.teacher_window < self.window):
             raise ValueError("teacher_window must be an integer no smaller than window")
@@ -367,11 +378,15 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             if em_active:
                 fast = pair_counts(T, previous, incoming, groups[int(x)])
             if smoothed_sources:
-                # Smoothing the window's last node equals filtering, so smooth the
-                # SOURCE node t-1 with the newest observation x_t (never beyond t).
-                q_student, _ = smooth_window(T, groups, observations[t - 1:t + 1], actions[t - 1:t], previous)
-                cached_source[t - 1] = q_student[0]
-                work["smoothing_block_entries"] += 3 * active * len(groups[int(x)])
+                # Source node u = t-1, smoothed with lag one (newest observation x_t,
+                # never beyond t) over the historical context x_{u-H_S+1:t}, from the
+                # cached filter at the window start, under the current tensor T.
+                # H_S = 1: window x_{t-1:t} from f_{t-1}, the historical computation.
+                a0 = max(episode_start, t - config.student_context)
+                q_student, _ = smooth_window(T, groups, observations[a0:t + 1], actions[a0:t], cached_student[a0])
+                cached_source[t - 1] = q_student[-2]
+                work["smoothing_block_entries"] += 3 * sum(
+                    len(groups[int(observations[u])]) * len(groups[int(observations[u + 1])]) for u in range(a0, t))
             s = max(episode_start, t - config.window + 1)
             xs, aa = observations[s:t + 1], actions[s:t]
             window_entries = sum(len(groups[int(xs[u])]) * len(groups[int(xs[u + 1])])

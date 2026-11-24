@@ -434,3 +434,94 @@ def test_diagnostics_decompose_the_arrival_objective(rho):
         assert meta["min_T"] == pytest.approx(result["snapshots"][step].min())
         assert (meta["min_student_evidence"] is None) == (step <= 1)
     assert metadata[len(x)]["min_teacher_T"] == pytest.approx(result["teacher_T"].min())
+
+
+# --- student context: historical window of the same forward-backward pass --------
+
+def test_student_context_is_validated():
+    for bad in [0, -1, 1.5, True]:
+        with pytest.raises(ValueError, match="student_context"):
+            ExperimentConfig(student_context=bad, student_inference="smooth")
+    with pytest.raises(ValueError, match="smooth"):
+        ExperimentConfig(student_context=5, student_inference="filter")
+
+
+def test_student_context_one_is_the_historical_computation():
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    for rho in [.5, 1.]:
+        base = train_experiment(T, clones, x, a, "predictive", mixed(rho, student_inference="smooth"), range(len(x) + 1))
+        one = train_experiment(T, clones, x, a, "predictive",
+                               mixed(rho, student_inference="smooth", student_context=1), range(len(x) + 1))
+        for step in base["snapshots"]:
+            np.testing.assert_array_equal(one["snapshots"][step], base["snapshots"][step])
+        assert one["work"] == base["work"]
+
+
+@pytest.mark.parametrize("H", [2, 5])
+def test_student_sources_are_recomputed_over_the_historical_window(monkeypatch, H):
+    """b_u = node-u marginal of smooth_window(T_{u+1}, x_{u-H+1:u+1}, f_{u-H+1}): the window
+    is re-smoothed under the tensor in force at arrival u+1, from the carried boundary filter."""
+    T, clones = tiny_problem(); x, a = ambiguous_stream(); groups = clone_groups(clones)
+    reset = 6
+    seen, original = {}, module.replay_terms
+    def capture(tensor, beliefs, actions, ids, targets):
+        seen["beliefs"] = [b.copy() for b in beliefs]
+        return original(tensor, beliefs, actions, ids, targets)
+    monkeypatch.setattr(module, "replay_terms", capture)
+    config = mixed(1., student_inference="smooth", student_context=H, window=4)
+    result = train_experiment(T, clones, x, a, "predictive", config, range(len(x) + 1), episode_starts=[reset])
+    snapshots = result["snapshots"]   # snapshots[k] = tensor in force at arrival k
+    f, filters = CarriedFilter(clones), []
+    for k, z in enumerate(x):
+        if k == reset:
+            f.reset()
+        filters.append(f.step(snapshots[k], z, None if f.belief is None else a[k - 1])[1])
+    t = len(x) - 1   # the last arrival's frozen window sources u = t-3 .. t-1
+    for b, u in zip(seen["beliefs"], range(t - 3, t)):
+        start = max(reset, u - H + 1)
+        expected = smooth_window(snapshots[u + 1], groups, x[start:u + 2], a[start:u + 1], filters[start])[0][-2]
+        np.testing.assert_allclose(b, expected, rtol=0, atol=1e-14)
+
+
+@pytest.mark.parametrize("rho", [.5, 1.])
+def test_student_context_never_reads_beyond_the_newest_observation(rho):
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    config = mixed(rho, local_updates=3, student_inference="smooth", student_context=5)
+    full = train_experiment(T, clones, x, a, "predictive", config, range(len(x) + 1))
+    for k in range(2, len(x)):
+        changed_x, changed_a = x.copy(), a.copy()
+        changed_x[k:] = 1 - changed_x[k:]; changed_a[k - 1:] = 1 - changed_a[k - 1:]
+        other = train_experiment(T, clones, changed_x, changed_a, "predictive", config, range(len(x) + 1))
+        for step in range(k + 1):
+            np.testing.assert_array_equal(other["snapshots"][step], full["snapshots"][step])
+
+
+def test_student_and_teacher_share_one_forward_backward_routine(monkeypatch):
+    """Every inference call is smooth_window: one for the student source, one for the teacher targets."""
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    calls, original = [], module.smooth_window
+    def capture(tensor, groups, observations, actions, boundary):
+        calls.append(len(observations))
+        return original(tensor, groups, observations, actions, boundary)
+    monkeypatch.setattr(module, "smooth_window", capture)
+    config = mixed(1., student_inference="smooth", student_context=5, window=4, teacher_window=6)
+    train_experiment(T, clones, x, a, "predictive", config, [])
+    student = [min(t, 5) + 1 for t in range(1, len(x))]
+    teacher = [min(t, 5) + 1 for t in range(1, len(x))]
+    assert calls == [n for pair in zip(student, teacher) for n in pair]
+
+
+def test_fixed_tensor_makes_the_historical_window_exact():
+    """Under one fixed T, the carried filter is the exact forward message, so smoothing
+    x_{u-H+1:u+1} from f_{u-H+1} gives the same b_u = P(z_u | x_{0:u+1}) for every H.
+    Hence context only acts through parameter drift, and at evaluation (frozen T) the
+    H-context student decoder equals the lag-one decoder exactly."""
+    T, clones = tiny_problem(); x, a = ambiguous_stream(); groups = clone_groups(clones)
+    f, filters = CarriedFilter(clones), []
+    for k, z in enumerate(x):
+        filters.append(f.step(T, z, None if k == 0 else a[k - 1])[1])
+    for u in range(len(x) - 1):
+        one = smooth_window(T, groups, x[u:u + 2], a[u:u + 1], filters[u])[0][0]
+        for H in range(2, u + 2):
+            longer = smooth_window(T, groups, x[u - H + 1:u + 2], a[u - H + 1:u + 1], filters[u - H + 1])[0][-2]
+            np.testing.assert_allclose(longer, one, rtol=0, atol=1e-13)

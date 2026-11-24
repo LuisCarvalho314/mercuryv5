@@ -58,7 +58,10 @@ def load(sweep, evaluation):
         if not matched.empty:
             if "evaluation_seconds" in matched:
                 eval_seconds = matched.groupby(["level", "seed", "method", "decoder"]).evaluation_seconds.sum()
+            common = matched[matched.decoder == "common_lag1"]
             matched = matched[matched.decoder == "training_matched"]
+        else:
+            common = matched
         for failure in directory.glob("level=*/seed=*/*/failure.json"):
             f = json.loads(failure.read_text())
             arm, rho = arm_of(directory, f["method"])
@@ -118,6 +121,10 @@ def load(sweep, evaluation):
                               & (matched.step == step)] if not matched.empty else matched
                 if len(hit) == 1:
                     record.update({m: float(hit.iloc[0][m]) for m in METRICS})
+                same = common[(common.level == level) & (common.seed == seed) & (common.method == method)
+                              & (common.step == step)] if not common.empty else common
+                if len(same) == 1:
+                    record.update({"common_" + m: float(same.iloc[0][m]) for m in METRICS})
                 curves.append(record)
     return pd.DataFrame(curves), pd.DataFrame(rows_out), pd.DataFrame(failures)
 
@@ -166,6 +173,8 @@ def summarise(curves):
                 # Late-phase variability: SD over the second half of the checkpoints (0 = settled).
                 late = part[part.step >= final.step / 2][metric]
                 value["late_sd_" + metric] = float(late.std(ddof=0))
+            if "common_" + metric in part and pd.notna(final.get("common_" + metric)):
+                value["final_common_" + metric] = final["common_" + metric]
         for col in ("min_T", "min_teacher_T", "min_student_evidence", "min_teacher_evidence",
                     "min_window_student_prediction", "min_window_teacher_target"):
             if col in part and part[col].notna().any():
@@ -308,6 +317,19 @@ def main():
                               ("Concentration (recall)", "final_latent_recall"),
                               ("NLL (bits)", "final_eval_nll_bps"), ("Coverage", "final_state_coverage"),
                               ("Unmatched mass", "final_unmatched_mass")], arms)
+    if "final_common_action_tv_similarity" in per_seed:
+        lines += ["", "## Final canonical metrics (common decoder: carried filter + lag-one smoothing, every arm)", "",
+                  "One decoder configuration for all arms, so differences reflect the learned transition tensor rather",
+                  "than each arm's inference context. Identical to the training-matched decoder except for long EM",
+                  "(training-matched lag W - 1).", ""]
+        lines += table(per_seed, [("Action TV sim.", "final_common_action_tv_similarity"),
+                                  ("Non-self TV sim.", "final_common_action_no_self_loop_tv_similarity"),
+                                  ("Edge F1 AUC", "final_common_action_edge_f1_auc"),
+                                  ("Non-self edge F1", "final_common_action_no_self_loop_edge_f1_auc"),
+                                  ("Purity (precision)", "final_common_latent_precision"),
+                                  ("Concentration (recall)", "final_common_latent_recall"),
+                                  ("NLL (bits)", "final_common_eval_nll_bps"), ("Coverage", "final_common_state_coverage"),
+                                  ("Unmatched mass", "final_common_unmatched_mass")], arms)
     lines += ["", "## Learning trajectory and convergence", "",
               "Integrated mean = area under the checkpoint curve / final step. t90 = first checkpoint that",
               "has covered 90% of the change from step 0 to the final value (lower = faster); it is only",

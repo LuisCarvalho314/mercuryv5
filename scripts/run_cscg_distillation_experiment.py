@@ -484,7 +484,9 @@ def main():
     p.add_argument("--local-updates", type=int, default=2, help="Local MM iterations per arrival (integer >= 2)")
     p.add_argument("--coupled-auxiliary", action="store_true", help="Include the auxiliary objective in every E/M iteration")
     p.add_argument("--student-inference", choices=STUDENT_INFERENCE, default="filter",
-                   help="Replay source belief: carried filter, or smoothed over the student's x_{u:u+1}")
+                   help="Replay source belief: carried filter, or lag-one forward-backward smoothing")
+    p.add_argument("--student-context", type=int, default=1,
+                   help="Smooth mode: historical context H_S, forward-backward over x_{u-H_S+1:u+1}")
     p.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS),
                    help="Subset of arms to train (default: all five)")
     p.add_argument("--rand-prob", type=float, default=.3)
@@ -511,7 +513,8 @@ def main():
                               jepa_mix=args.jepa_mix,
                               teacher_half_life=args.half_life, local_updates=args.local_updates,
                               coupled_auxiliary=args.coupled_auxiliary,
-                              student_inference=args.student_inference, teacher_window=args.teacher_window)
+                              student_inference=args.student_inference, student_context=args.student_context,
+                              teacher_window=args.teacher_window)
     default_output = ("cscg_distillation_coupled5_v1" if args.coupled_auxiliary else
                       "cscg_distillation_v1" if args.local_updates == 2 else f"cscg_distillation_updates{args.local_updates}_v1")
     if args.clone_allocation == "ground_truth":

@@ -23,6 +23,7 @@ STEPS=${STEPS:-20000}
 WORKERS=${WORKERS:-2}
 MIXES=${MIXES:-"0.5 0.99 1"}
 LOCAL_UPDATES=${LOCAL_UPDATES:-5}
+STUDENT_CONTEXT=${STUDENT_CONTEXT:-1}  # student forward-backward history (lag one)
 TEACHER_WINDOW=${TEACHER_WINDOW:-40}   # teacher context; the replay window (and long EM context) is locked to it
 RAND_PROB=${RAND_PROB:-0.3}            # training stream
 EVAL_RAND_PROB=${EVAL_RAND_PROB:-0.1}  # held-out walks (canonical 0.1)
@@ -30,7 +31,7 @@ EVAL_WALKS=${EVAL_WALKS:-100}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-10000}
 OUT=${OUT:-results/diagnostics/cscg_jepa_accumulated_v1}
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation ground_truth
-        --student-inference smooth --local-updates "$LOCAL_UPDATES" --forgetting 1.0 --pseudocount 0.002
+        --student-inference smooth --student-context "$STUDENT_CONTEXT" --local-updates "$LOCAL_UPDATES" --forgetting 1.0 --pseudocount 0.002
         --window "$TEACHER_WINDOW" --teacher-window "$TEACHER_WINDOW" --half-life 40 --rand-prob "$RAND_PROB" --workers "$WORKERS")
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 
