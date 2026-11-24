@@ -273,9 +273,11 @@ def test_coupled_iterations_match_explicit_latest_parameter_and_fixed_history_re
         S = candidate
         teacher = tau * teacher + (1 - tau) * T
     result = train_experiment(initial, clones, x, aa, method, config, [1, 2, 3])
-    np.testing.assert_array_equal(result["final_T"], T)
-    np.testing.assert_array_equal(result["counts"], S)
-    np.testing.assert_array_equal(result["teacher_T"], teacher)
+    # The implementation forms the equivalent rowNorm((1-rho) B/<B,1> + rho D);
+    # it equals rowNorm(B + beta D) up to floating-point rounding only.
+    np.testing.assert_allclose(result["final_T"], T, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(result["counts"], S, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(result["teacher_T"], teacher, rtol=0, atol=1e-14)
     assert S.sum() == pytest.approx(2.)
     for arrival in result["diagnostics"]:
         assert len(arrival["local_iterations"]) == 5

@@ -153,6 +153,9 @@ def report(output, rows):
 
     df = pd.DataFrame(rows)
     df.to_csv(output / "learning_curves.csv", index=False)
+    manifest = json.loads((output / "experiment.json").read_text())
+    jepa_mix = manifest["experiment"].get("jepa_mix")
+    labels = dict(LABELS, **({} if jepa_mix is None else {"predictive": f"Predictive JEPA, jepa_mix={jepa_mix:g}"}))
     metrics = ["action_tv", "nonself_tv", "nll_bits", "purity"]
     levels = sorted(df.level.unique())
     fig, axes = plt.subplots(len(levels), len(metrics), figsize=(17, 4 * len(levels)), squeeze=False)
@@ -164,7 +167,7 @@ def report(output, rows):
                 agg = subset.groupby("step")[metric].agg(["mean", "std"])
                 if agg.empty:
                     continue
-                line, = ax.plot(agg.index, agg["mean"], label=LABELS[method])
+                line, = ax.plot(agg.index, agg["mean"], label=labels[method])
                 sd = agg["std"].fillna(0)
                 ax.fill_between(agg.index, agg["mean"] - sd, agg["mean"] + sd, color=line.get_color(), alpha=.13)
             ax.set(title=f"Level {level}: {metric}", xlabel="Observations")
@@ -182,7 +185,7 @@ def report(output, rows):
             for method in METHODS:
                 part = df[(df.level == level) & (df.method == method)]
                 aggregate = part.groupby("step")[[metric, "work_entries"]].mean()
-                axes[i, j].plot(aggregate.work_entries, aggregate[metric], label=LABELS[method])
+                axes[i, j].plot(aggregate.work_entries, aggregate[metric], label=labels[method])
             axes[i, j].set(title=f"Level {level}: {metric}", xlabel="Counted tensor/block entries", ylim=(0, 1))
             axes[i, j].grid(alpha=.2)
     axes[0, 0].legend(fontsize=8)
@@ -216,7 +219,6 @@ def report(output, rows):
                                   action_tv=float(np.interp(budget, part.work_entries, part.action_tv)),
                                   nonself_tv=float(np.interp(budget, part.work_entries, part.nonself_tv))))
     pd.DataFrame(work_rows).to_csv(output / "equal_consumed_work.csv", index=False)
-    manifest = json.loads((output / "experiment.json").read_text())
     updates = manifest["local_parameter_updates"]
     coupled = manifest["experiment"].get("coupled_auxiliary", False)
     steps = int(df.step.max())
@@ -224,7 +226,9 @@ def report(output, rows):
              "Pilot evidence for EGM brainstorming; no confirmatory statistical claim.", "",
              f"All five arms receive identical {steps:,}-observation streams, clone allocations, initial tensors,",
              f"forgetting factors and {updates} parameter-update opportunities per transition. No teacher is fitted by EM.",
-             (f"All arms take {updates} coupled E/M iterations; every KL/NLL M-step includes its auxiliary objective."
+             (f"Every arm takes {updates} local MM iterations; each predictive iteration minimises "
+              f"(1 - {jepa_mix:g}) EM/sum(B) + {jepa_mix:g} L_JEPA (no EM warm-up)." if jepa_mix is not None else
+              f"All arms take {updates} coupled E/M iterations; every KL/NLL M-step includes its auxiliary objective."
               if coupled else f"Baselines take {updates} EM passes; KL/NLL arms take {updates - 1} EM passes and one penalty update."),
              "Auxiliary M-steps use EM-like majorization or an analytical-gradient generalized M-step, not an exact marginal argmin.",
              "Running statistics are committed once per arrival; teacher targets stay fixed and EMA runs once afterwards.",
@@ -235,11 +239,11 @@ def report(output, rows):
              "| Level | Method | Final action TV | Final nonself TV | Mean action TV over observations | Training seconds |",
              "| --- | --- | ---: | ---: | ---: | ---: |"]
     for (level, method), r in summary.iterrows():
-        lines.append(f"| {level} | {LABELS[method]} | {r.final_action_tv:.4f} | {r.final_nonself_tv:.4f} | {r.auc_action_tv:.4f} | {r.train_seconds:.2f} |")
+        lines.append(f"| {level} | {labels[method]} | {r.final_action_tv:.4f} | {r.final_nonself_tv:.4f} | {r.auc_action_tv:.4f} | {r.train_seconds:.2f} |")
     lines += ["", "| Level | Method | Held-out NLL (bits) | Purity | Edge F1 |",
               "| --- | --- | ---: | ---: | ---: |"]
     for (level, method), r in summary.iterrows():
-        lines.append(f"| {level} | {LABELS[method]} | {r.final_nll_bits:.4f} | {r.final_purity:.4f} | {r.final_edge_f1:.4f} |")
+        lines.append(f"| {level} | {labels[method]} | {r.final_nll_bits:.4f} | {r.final_purity:.4f} | {r.final_edge_f1:.4f} |")
     lines += ["", "## Alignment and coverage diagnostics", "",
               "Canonical projection sends mass targeting unassigned clones to the unmatched sink.",
               "A decrease in TV can therefore reflect improved clone assignment and coverage as well as changed transitions.",
@@ -248,7 +252,7 @@ def report(output, rows):
               "| --- | --- | ---: | ---: | ---: |"]
     for (level, method), part in df[df.step == df.step.max()].groupby(["level", "method"]):
         r = part.mean(numeric_only=True)
-        lines.append(f"| {level} | {LABELS[method]} | {r.clone_utilisation:.4f} | {r.unmatched_mass:.4f} | {r.state_coverage:.4f} |")
+        lines.append(f"| {level} | {labels[method]} | {r.clone_utilisation:.4f} | {r.unmatched_mass:.4f} | {r.state_coverage:.4f} |")
     lines += ["", "Lower TV and integrated mean TV are better. Held-out NLL includes the first observation of each walk.",
               "See paired_differences.json for seed-wise distilled-minus-control differences; negative favours distillation.",
               "The work-axis comparison uses counted entries as a proxy, not FLOPs. Equal-consumed-work interpolation",
@@ -437,7 +441,7 @@ def run_case(output, level, seed, method, config, checkpoints, data, n_clones, i
                                     level, method, step, folder / "evaluations" / f"step={step:04d}.json")
         meta = metadata[step]
         work = sum(meta[k] for k in ["filter_block_entries", "smoothing_block_entries", "replay_block_entries", "tensor_entries"])
-        method_rows.append(dict(level=level, seed=seed, method=method, step=step,
+        method_rows.append(dict(level=level, seed=seed, method=method, jepa_mix=config.jepa_mix, step=step,
                                 work_entries=work, **meta, **metrics))
     write_json(complete, method_rows)
     print(f"done {method}: TV={method_rows[-1]['action_tv']:.4f} nonself={method_rows[-1]['nonself_tv']:.4f}; train={result['train_seconds']:.2f}s", flush=True)
@@ -460,7 +464,10 @@ def main():
     p.add_argument("--clone-allocation", choices=["uniform", "ground_truth"], default="uniform")
     p.add_argument("--forgetting", type=float, default=1.0)
     p.add_argument("--pseudocount", type=float, default=.002)
-    p.add_argument("--weight", type=float, default=1.0)
+    p.add_argument("--weight", type=float, help="Legacy penalty scale eta (default 1.0); excludes --jepa-mix")
+    p.add_argument("--jepa-mix", type=float,
+                   help="Explicit objective (1-rho) EM/sum(B) + rho L_JEPA in [0, 1] at every local iteration; "
+                        "requires --methods predictive")
     p.add_argument("--window", type=int, default=40)
     p.add_argument("--teacher-window", type=int, help="Teacher smoothing context (default: --window)")
     p.add_argument("--half-life", type=float, default=40.)
@@ -483,8 +490,15 @@ def main():
         p.error("workers must be positive")
     if args.coupled_auxiliary and args.local_updates != 5:
         p.error("the coupled experiment requires --local-updates 5")
-    config = ExperimentConfig(window=args.window, forgetting=args.forgetting,
-                              pseudocount=args.pseudocount, penalty_weight=args.weight,
+    if args.jepa_mix is not None:
+        if args.methods != ["predictive"]:
+            p.error("--jepa-mix defines the predictive objective; run it with --methods predictive")
+        if args.weight is not None or args.coupled_auxiliary:
+            p.error("--jepa-mix excludes the legacy --weight and --coupled-auxiliary options")
+    config = ExperimentConfig(window=args.window, forgetting=args.forgetting, pseudocount=args.pseudocount,
+                              penalty_weight=(None if args.jepa_mix is not None else
+                                              1.0 if args.weight is None else args.weight),
+                              jepa_mix=args.jepa_mix,
                               teacher_half_life=args.half_life, local_updates=args.local_updates,
                               coupled_auxiliary=args.coupled_auxiliary,
                               student_inference=args.student_inference, teacher_window=args.teacher_window)
@@ -494,6 +508,8 @@ def main():
         default_output = default_output.replace("_v1", "_ground_truth_v1")
     if args.student_inference == "smooth":
         default_output = default_output.replace("_v1", "_smooth_student_v1")
+    if args.jepa_mix is not None:
+        default_output = default_output.replace("cscg_distillation", f"cscg_distillation_jepa_mix{args.jepa_mix:g}", 1)
     output = (args.output or ROOT / "results/diagnostics" / default_output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if args.report_only:
@@ -517,7 +533,9 @@ def main():
                     clone_allocation=args.clone_allocation, checkpoints=checkpoints,
                     rand_prob=args.rand_prob, evaluation_walks=args.walks, walk_length=args.walk_length,
                     evaluation_seed=10000, methods=[m for m in METHODS if m in args.methods], local_parameter_updates=args.local_updates,
-                    penalty="current frozen window, coefficient eta * original running count mass",
+                    penalty=("current frozen window, coefficient eta * original running count mass" if config.jepa_mix is None
+                             else f"current frozen window, objective (1 - {config.jepa_mix:g}) EM / sum(B) + {config.jepa_mix:g} L_JEPA "
+                                  "at every local iteration"),
                     inference="causal carried filter; historical boundary beliefs; destination-normalized T",
                     vocabulary="observation/action vocabulary scanned from the shared training stream",
                     schema_version=1)
