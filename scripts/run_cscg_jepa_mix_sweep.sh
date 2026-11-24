@@ -27,6 +27,8 @@ STUDENT_CONTEXT=${STUDENT_CONTEXT:-1}  # student forward-backward history (lag o
 TEACHER_WINDOW=${TEACHER_WINDOW:-40}   # teacher context; the replay window (and long EM context) is locked to it
 RAND_PROB=${RAND_PROB:-0.3}            # training stream
 EVAL_RAND_PROB=${EVAL_RAND_PROB:-0.1}  # held-out walks (canonical 0.1)
+EVAL_VITERBI_ITERS=${EVAL_VITERBI_ITERS:-0}        # >0 adds the offline-Viterbi decoder
+EVAL_VITERBI_PSEUDOCOUNT=${EVAL_VITERBI_PSEUDOCOUNT:-0}
 EVAL_WALKS=${EVAL_WALKS:-100}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-10000}
 OUT=${OUT:-results/diagnostics/cscg_jepa_accumulated_v1}
@@ -54,7 +56,9 @@ for dir in "$OUT"/*/; do
   [[ "$(basename "$dir")" == report* ]] && continue
   ls "$dir"level=*/seed=*/*/rows.json > /dev/null 2>&1 || { echo "skip evaluation of $dir (no completed case)"; continue; }
   "${PY[@]}" scripts/analysis/cscg_distillation_matched_eval.py evaluate --run "$dir" --steps all --workers "$WORKERS" \
-    --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --rand-prob "$EVAL_RAND_PROB" > "${dir%/}.eval.log" 2>&1
+    --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --rand-prob "$EVAL_RAND_PROB" \
+    --offline-viterbi-iterations "$EVAL_VITERBI_ITERS" --viterbi-pseudocount "$EVAL_VITERBI_PSEUDOCOUNT" \
+    > "${dir%/}.eval.log" 2>&1
   echo "$(basename "$dir") eval exit=$?" | tee -a "$OUT/status.txt"
 done
 "${PY[@]}" scripts/analysis/cscg_jepa_mix_sweep_report.py --sweep "$OUT" \

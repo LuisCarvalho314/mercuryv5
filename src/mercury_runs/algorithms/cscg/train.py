@@ -198,9 +198,10 @@ def viterbi_refined_eval_model_npz(
     act_idx: np.ndarray,
     n_clones: np.ndarray,
     n_iter: int,
+    pseudocount: float = 0.0,
 ) -> dict[str, np.ndarray]:
     eval_model = copy.deepcopy(model)
-    eval_model.pseudocount = 0.0
+    eval_model.pseudocount = float(pseudocount)
     cscg_actions = align_post_step_actions_to_cscg(act_idx)
     eval_model.learn_viterbi_T(
         np.asarray(obs_idx, dtype=np.int64),

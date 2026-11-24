@@ -192,9 +192,44 @@ def level_context(level, cache_root, path=None, budget=CANONICAL_BUDGET):
     return _CONTEXT[level, budget]
 
 
-def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CANONICAL_BUDGET, teacher_window=None):
+def viterbi_name(n_iter, pseudocount):
+    return f"viterbi{int(n_iter)}_pc{pseudocount:g}"
+
+
+def viterbi_decode(T, n_clones, step, walks, viterbi):
+    """Existing CSCG offline Viterbi: refine the snapshot with learn_viterbi_T (n_iter, the given
+    pseudocount) on the training observations up to this checkpoint, then MAP-decode each walk
+    with CHMM.decode. Returns the refined tensor, decoded states and causal NLL (CHMM.bps)."""
+    from mercury_runs.algorithms.cscg.prepare import align_post_step_actions_to_cscg, import_cscg_module
+    from mercury_runs.algorithms.cscg.train import viterbi_refined_eval_model_npz
+    n_iter, pseudocount, train_x, train_actions = viterbi
+    chmm = import_cscg_module(ROOT)
+    clones = np.asarray(n_clones, dtype=np.int64)
+    def model_for(x, actions, tensor):
+        model = chmm.CHMM(n_clones=clones, x=x, a=align_post_step_actions_to_cscg(actions),
+                          pseudocount=pseudocount, dtype=np.float32, seed=0)
+        model.C = np.zeros(tensor.shape, dtype=np.float32)   # every action, even if absent from x
+        model.T = np.asarray(tensor, dtype=np.float32).copy()
+        return model
+    if step >= 2:
+        refined = viterbi_refined_eval_model_npz(
+            model_for(train_x[:step], train_actions[:step], T), obs_idx=train_x[:step],
+            act_idx=train_actions[:step], n_clones=clones, n_iter=n_iter, pseudocount=pseudocount)["T"]
+    else:   # no training transitions yet: the pseudocount alone, as CHMM.update_T applies it
+        refined = (T + pseudocount) / (T + pseudocount).sum(-1, keepdims=True)
+    decoded, nlls = [], []
+    for x, a, _, _ in walks:
+        model = model_for(x, a, refined)
+        decoded.append(np.asarray(model.decode(x, align_post_step_actions_to_cscg(a))[1], dtype=np.int64))
+        nlls.append(np.asarray(model.bps(x, align_post_step_actions_to_cscg(a)), dtype=np.float64))
+    return np.asarray(refined, dtype=np.float64), decoded, nlls
+
+
+def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CANONICAL_BUDGET, teacher_window=None,
+                 viterbi=None):
     """Student snapshots, plus EMA-teacher snapshots when the run saved them (method "teacher",
-    records under teacher_<decoder>/; training-matched lag W_T - 1, as for long EM)."""
+    records under teacher_<decoder>/; training-matched lag W_T - 1, as for long EM).
+    viterbi = (n_iter, pseudocount, train_x, train_actions) adds the offline-Viterbi decoder."""
     rows = json.loads((folder / "rows.json").read_text())
     level, seed, student = rows[0]["level"], rows[0]["seed"], rows[0]["method"]
     walks, gt, source = level_context(level, cache_root, cache_paths[level], budget)
@@ -218,29 +253,43 @@ def evaluate_run(folder, window, steps_mode, cache_root, cache_paths, budget=CAN
         T = np.ascontiguousarray(Ts[k])
         # common_lag1: one decoder configuration for every arm (carried filter + lag-one
         # smoothing), separating the learned tensor from each arm's inference context.
-        for decoder, lag in (("training_matched", matched), ("filter", 0), ("common_lag1", 1)):
+        decoders = [("training_matched", matched), ("filter", 0), ("common_lag1", 1)]
+        if viterbi is not None:
+            decoders.append((viterbi_name(*viterbi[:2]), -1))   # lag -1: MAP path, not a fixed lag
+        for decoder, lag in decoders:
             target = folder / output_name(*budget) / f"{prefix}{decoder}" / f"step={int(steps[k]):05d}.json"
             if target.exists():
                 record = json.loads(target.read_text())
             else:
                 started = time.perf_counter()
-                decoded, nlls = [], []
-                for x, a, _, _ in indexed:
-                    states, nll = fixed_lag_decode(T, starts, sizes, x, a, lag)
-                    decoded.append(states); nlls.append(nll)
+                evaluated = T
+                if lag < 0:
+                    evaluated, decoded, nlls = viterbi_decode(T, n_clones, int(steps[k]), indexed, viterbi)
+                else:
+                    decoded, nlls = [], []
+                    for x, a, _, _ in indexed:
+                        states, nll = fixed_lag_decode(T, starts, sizes, x, a, lag)
+                        decoded.append(states); nlls.append(nll)
                 total = float(np.concatenate(nlls).sum()); count = int(sum(len(v) for v in nlls))
-                protocol = protocol_for(level, lag, *budget)
+                protocol = protocol_for(level, max(lag, 0), *budget)
+                inference = dict(decoder=protocol.decoder, lag=int(lag), decoder_role=decoder,
+                                 carried_belief=True, parameter_updates=False, walk_cache=source,
+                                 transition_checksum=hashlib.sha256(T.tobytes()).hexdigest()[:16])
+                if lag < 0:
+                    # Metrics, NLL and checksum refer to the Viterbi-refined tensor actually decoded.
+                    inference.update(decoder="cscg_offline_viterbi_map", carried_belief=False,
+                                     parameter_updates=True, offline_viterbi_iterations=int(viterbi[0]),
+                                     viterbi_pseudocount=float(viterbi[1]),
+                                     refinement_data="training stream x_{0:step}",
+                                     transition_checksum=hashlib.sha256(evaluated.tobytes()).hexdigest()[:16])
                 record = _evaluate_metrics(
                     protocol=protocol, level=level, method=method, step=int(steps[k]), observed_samples=int(steps[k]),
                     walk_cache_id=protocol.walk_cache_key(), gt=gt,
                     decoded=dict(decoded_walks=decoded, gt_exact_walks=[w[2] for w in indexed],
                                  gt_action_walks=[w[3] for w in indexed]),
-                    transition=T, n_learned=int(n_clones.sum()),
-                    inference=dict(decoder=protocol.decoder, lag=int(lag), decoder_role=decoder,
-                                   carried_belief=True, parameter_updates=False, walk_cache=source,
-                                   transition_checksum=hashlib.sha256(T.tobytes()).hexdigest()[:16]),
+                    transition=evaluated, n_learned=int(n_clones.sum()), inference=inference,
                     model_fit=dict(bits_per_symbol=total / count, scored_symbols=count, initial_observation_included=True,
-                                   negative_log2_likelihood_sum=total, parameter_updates=False))
+                                   negative_log2_likelihood_sum=total, parameter_updates=lag < 0))
                 record["protocol_id"] = protocol.protocol_id()
                 record["evaluation_seconds"] = time.perf_counter() - started
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -265,9 +314,20 @@ def evaluate(args):
     for level in sorted({json.loads((f / "rows.json").read_text())[0]["level"] for f in folders}):
         level_context(level, cache_root, budget=budget)   # locate or generate caches once, before the workers start
     cache_paths = {level: context[2] for (level, b), context in _CONTEXT.items() if b == budget}
+    viterbi = {}
+    if args.offline_viterbi_iterations > 0:
+        # The run's own training stream (same loader and vocabulary as training), for the
+        # offline Viterbi refinement; actions are post-step, as stored in the dataset.
+        from scripts.run_cscg_distillation_experiment import load_training
+        for f in folders:
+            first = json.loads((f / "rows.json").read_text())[0]
+            data = load_training(first["level"], first["seed"], manifest["rand_prob"], manifest["observations"])
+            viterbi[f] = (args.offline_viterbi_iterations, args.viterbi_pseudocount,
+                          np.asarray(data["x"], dtype=np.int64), np.r_[0, data["actions"]].astype(np.int64))
     rows = []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(evaluate_run, f, window, args.steps, cache_root, cache_paths, budget, teacher_window): f
+        futures = {pool.submit(evaluate_run, f, window, args.steps, cache_root, cache_paths, budget, teacher_window,
+                               viterbi.get(f)): f
                    for f in folders}
         for done, future in enumerate(as_completed(futures), start=1):
             rows.extend(future.result())
@@ -280,6 +340,11 @@ def evaluate(args):
                                rand_prob=budget[2], canonical=budget == CANONICAL_BUDGET),
         lags={**{m: decoder_lag(m, window) for m in manifest["methods"]},
               "teacher": decoder_lag("teacher", teacher_window)},
+        offline_viterbi=(None if args.offline_viterbi_iterations <= 0 else dict(
+            decoder=viterbi_name(args.offline_viterbi_iterations, args.viterbi_pseudocount),
+            iterations=args.offline_viterbi_iterations, pseudocount=args.viterbi_pseudocount,
+            refinement="cscg.train.viterbi_refined_eval_model_npz on the training stream x_{0:step}",
+            decode="CHMM.decode (max-product + backtrace)", nll="CHMM.bps under the refined tensor")),
         walk_caches={str(level): path for level, path in sorted(cache_paths.items())}), indent=2) + "\n")
     print(f"Wrote {output / f'canonical_metrics_{args.steps}.csv'}")
 
@@ -381,6 +446,11 @@ def main():
     e.add_argument("--walk-length", type=int, default=CANONICAL_BUDGET[1], help="Steps per walk (canonical 10,000)")
     e.add_argument("--rand-prob", type=float, default=CANONICAL_BUDGET[2],
                    help="Random-action probability of the held-out walks (canonical 0.1)")
+    e.add_argument("--offline-viterbi-iterations", type=int, default=0,
+                   help="Add the offline-Viterbi decoder: learn_viterbi_T for this many iterations "
+                        "(early stop as in CSCG) on x_{0:step}, then CHMM.decode; 0 = off")
+    e.add_argument("--viterbi-pseudocount", type=float, default=0.0,
+                   help="Pseudocount of the offline-Viterbi refinement (CSCG eval default 0)")
     e.add_argument("--walk-cache-root", type=Path, default=ROOT / "results/diagnostics/evaluation_v5_online_matched_walks",
                    help="Where canonical walks are generated when no existing evaluation-v5 cache matches")
     r = sub.add_parser("report")
