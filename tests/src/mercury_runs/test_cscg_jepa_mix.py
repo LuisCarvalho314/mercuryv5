@@ -476,3 +476,26 @@ def test_legacy_configurations_reproduce_the_pre_change_golden_trajectories():
             np.testing.assert_allclose(trajectory, gold[name + "|T"], rtol=0, atol=tolerance, err_msg=name)
             np.testing.assert_allclose(result["teacher_T"], gold[name + "|teacher"], rtol=0, atol=tolerance, err_msg=name)
             np.testing.assert_allclose(result["counts"], gold[name + "|counts"], rtol=0, atol=tolerance, err_msg=name)
+
+
+# --- recording-only diagnostics ------------------------------------------------
+
+@pytest.mark.parametrize("rho", [.5, .9999, 1.])
+def test_diagnostics_separate_em_and_jepa_contributions_without_changing_learning(rho):
+    T, clones = tiny_problem(); x, a = stream_for(rho)
+    metadata = {}
+    result = train_experiment(T, clones, x, a, "predictive", mixed(rho, student_inference="smooth"), range(len(x) + 1),
+                              callback=lambda step, tensor, meta: metadata.update({step: meta}))
+    for arrival in result["diagnostics"]:
+        assert np.sum(arrival["em_row_mass"]) == pytest.approx(1 - rho, abs=1e-12)
+        assert np.sum(arrival["jepa_row_mass"]) == pytest.approx(rho, abs=1e-12)
+        assert np.shape(arrival["jepa_row_mass"]) == T.shape[:2]
+        assert arrival["min_window_student_prediction"] > 0 and arrival["min_window_teacher_target"] > 0
+        for it in arrival["local_iterations"]:
+            em = 0. if it["em_term_after"] is None else it["em_term_after"]
+            assert (1 - rho) * em + rho * it["jepa_term_after"] == pytest.approx(it["objective_after"], abs=1e-12)
+            assert (it["em_term_after"] is None) == (rho == 1)
+    for step, meta in metadata.items():
+        assert meta["min_T"] == pytest.approx(result["snapshots"][step].min())
+        assert (meta["min_student_evidence"] is None) == (step <= 1)
+    assert metadata[len(x)]["min_teacher_T"] == pytest.approx(result["teacher_T"].min())

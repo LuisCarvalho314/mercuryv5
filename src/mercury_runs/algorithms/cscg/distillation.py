@@ -336,10 +336,18 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                 refinements=0, loss_evaluations=0, transitions=0,
                 em_passes=0, penalty_updates=0, statistics_commits=0, teacher_updates=0)
     elapsed = 0.0
+    # Recording only (never read by the learner): support margins since the last checkpoint.
+    def support_record():
+        return dict(min_T=float(T.min()), min_teacher_T=float(teacher.min()) if teacher_active else None,
+                    min_student_evidence=support["student"], min_teacher_evidence=support["teacher"])
+    support = dict(student=None, teacher=None)
+    def track(key, nll):
+        value = float(np.exp(-nll))
+        support[key] = value if support[key] is None else min(support[key], value)
     if 0 in checkpoints:
         snapshots[0] = T.copy()
         if callback:
-            callback(0, T.copy(), dict(train_seconds=0., **work))
+            callback(0, T.copy(), dict(train_seconds=0., **work, **support_record()))
     episode_start = 0
     for t, x in enumerate(observations):
         started = time.perf_counter()
@@ -352,9 +360,16 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             _, belief, causal_nll = student_filter.step(T, int(x), incoming)
         except ZeroPredictiveSupportError as error:
             raise ZeroPredictiveSupportError(f"arrival {t}: student filter: {error}") from error
+        if previous is not None:
+            track("student", causal_nll)
         cached_student.append(belief)
         if teacher_active:
-            _, h, _ = teacher_filter.step(teacher, int(x), incoming)
+            try:
+                _, h, teacher_nll = teacher_filter.step(teacher, int(x), incoming)
+            except ZeroPredictiveSupportError as error:
+                raise ZeroPredictiveSupportError(f"arrival {t}: teacher filter: {error}") from error
+            if previous is not None:
+                track("teacher", teacher_nll)
             cached_teacher.append(h)
         else:
             cached_teacher.append(belief)
@@ -429,10 +444,20 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                             return -float(np.sum(B * np.log(tensor))) + weight * auxiliary
                         em = 0. if B is None else -float(np.sum(B * np.log(tensor))) / float(B.sum())
                         return (1 - mix) * em + mix * auxiliary
+                    def em_term(tensor):
+                        # Normalised EM term -<B^(k), log T> / <B^(k), 1> (None without EM).
+                        return None if B is None else -float(np.sum(B * np.log(tensor))) / float(B.sum())
                     if (t + 1) in checkpoints:
                         objective_before = objective(T, before[objective_index])
+                        em_before = em_term(T)
                     if method in {"predictive", "nll_control"}:
                         counts = before[3] if method == "predictive" else before[4]
+                        if (t + 1) in checkpoints and final_iteration:
+                            # Effective per-row contributions to M^(k) = (1-rho) B/<B,1> + rho D.
+                            row_masses = dict(
+                                em_row_mass=(np.zeros(T.shape[:2]) if B is None
+                                             else (1 - mix) * B.sum(-1) / float(B.sum())).tolist(),
+                                jepa_row_mass=(mix * counts.sum(-1)).tolist())
                         T = mm_update(T, mixed_counts(B, counts, mix))
                         trials = 0
                     else:
@@ -446,6 +471,9 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                             iteration=local_iteration + 1, jepa_mix=mix,
                             objective_before=objective_before,
                             objective_after=objective(T, after[objective_index]),
+                            em_term_before=em_before, em_term_after=em_term(T),
+                            jepa_term_before=float(before[objective_index]),
+                            jepa_term_after=float(after[objective_index]),
                             **({} if B is None else dict(running_count_mass=float(candidate_counts.sum())))))
                 else:
                     T = mm_update(T, B)
@@ -462,6 +490,11 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                                             -np.sum(z[z > 0] * np.log(z[z > 0])) for z in targets])),
                                         teacher_student_tv=float(np.abs(teacher-T).sum(-1).mean()/2),
                                         local_iterations=local_diagnostics,
+                                        **(row_masses if method in {"predictive", "nll_control"} else {}),
+                                        min_window_student_prediction=float(min(
+                                            (b[b > 0] @ T[int(act)][np.ix_(np.flatnonzero(b), j)]).min()
+                                            for b, act, j in zip(beliefs, aa, ids))),
+                                        min_window_teacher_target=float(min(z[j].min() for z, j in zip(targets, ids))),
                                         **({"source_smoothing_tv": float(np.mean([
                                             np.abs(cached_source[u] - cached_student[u]).sum() / 2
                                             for u in range(s, t)]))} if smoothed_sources else {})))
@@ -474,6 +507,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
         if (t + 1) in checkpoints:
             snapshots[t + 1] = T.copy()
             if callback:
-                callback(t + 1, T.copy(), dict(train_seconds=elapsed, **work))
+                callback(t + 1, T.copy(), dict(train_seconds=elapsed, **work, **support_record()))
+            support = dict(student=None, teacher=None)
     return dict(snapshots=snapshots, diagnostics=diagnostics, counts=S,
                 final_T=T, teacher_T=teacher, train_seconds=elapsed, work=work)

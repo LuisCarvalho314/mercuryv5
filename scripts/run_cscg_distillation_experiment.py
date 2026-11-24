@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 
 from mercury_runs.algorithms.cscg.distillation import (
-    METHODS, STUDENT_INFERENCE, CarriedFilter, ExperimentConfig, row_normalize, train_experiment,
+    METHODS, STUDENT_INFERENCE, CarriedFilter, ExperimentConfig, ZeroPredictiveSupportError, row_normalize,
+    train_experiment,
 )
 from mercury_runs.algorithms.cscg.prepare import action_to_indices, map_to_indices, to_indices
 from mercury_runs.application.evaluation_protocol import default_canonical_v4_protocol
@@ -427,9 +428,18 @@ def run_case(output, level, seed, method, config, checkpoints, data, n_clones, i
         return json.loads(complete.read_text())
     print(f"train level={level} seed={seed} {method}", flush=True)
     metadata = {}
-    result = train_experiment(
-        initial, n_clones, data["x"], data["actions"], method, config, checkpoints,
-        callback=lambda step, T, meta: metadata.update({step: meta}))
+    try:
+        result = train_experiment(
+            initial, n_clones, data["x"], data["actions"], method, config, checkpoints,
+            callback=lambda step, T, meta: metadata.update({step: meta}))
+    except ZeroPredictiveSupportError as error:
+        # A support failure is a result, not a crash: record it and keep the other cases running.
+        write_json(folder / "failure.json", dict(level=level, seed=seed, method=method, jepa_mix=config.jepa_mix,
+                                                 stage="training", error=str(error),
+                                                 last_checkpoint=max(metadata, default=None),
+                                                 checkpoint_metadata=metadata, provenance=provenance))
+        print(f"FAILED level={level} seed={seed} {method}: {error}", flush=True)
+        return []
     np.savez_compressed(folder / "snapshots.npz", steps=np.array(checkpoints),
                         T=np.stack([result["snapshots"][s] for s in checkpoints]), n_clones=n_clones,
                         obs_uniques=data["vocabulary"], action_uniques=data["action_vocabulary"])
@@ -578,6 +588,9 @@ def main():
             futures = [executor.submit(run_case, *task) for task in tasks]
             for future in as_completed(futures):
                 rows.extend(future.result())
+    if not rows:
+        print(f"No completed cases; see failure.json files under {output}", flush=True)
+        return
     report(output, rows)
     if args.compare_to:
         compare_local_updates(output, args.compare_to.resolve())
