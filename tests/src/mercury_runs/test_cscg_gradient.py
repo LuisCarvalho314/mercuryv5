@@ -13,7 +13,8 @@ torch = pytest.importorskip("torch")
 
 from src.mercury_runs.algorithms.cscg import torch_gradient as tg  # noqa: E402
 from src.mercury_runs.algorithms.cscg.distillation import (  # noqa: E402
-    CarriedFilter, ExperimentConfig, clone_groups, row_normalize, smooth_window, train_experiment, window_nll,
+    CarriedFilter, ExperimentConfig, clone_groups, data_nll, expected_counts, pair_counts, replay_terms,
+    row_normalize, smooth_window, train_experiment, window_nll,
 )
 
 
@@ -79,7 +80,7 @@ def test_gradcscg_objective_and_counts_match_numpy(seed):
     T, clones, groups, x, a, h, history, mass = arrival(seed)
     arm = tg.GradCSCG(T, clones, learning_rate=1e-2)
     np.testing.assert_allclose(torch.softmax(arm.W, -1).detach().numpy(), T, atol=1e-15)   # same initial T
-    value, nll, X = arm.evaluate(history, 1., mass, x, a, h)
+    value, nll, X = arm.evaluate(history, 1., mass, arm.window_term(x, a, h))
     np.testing.assert_allclose(value, numpy_objective(T, groups, x, a, h, history, mass), rtol=1e-12)
     np.testing.assert_allclose(nll, window_nll(T, groups, x, a, h), rtol=1e-12)
     # E-step counts from the log-space gradient equal the NumPy forward-backward counts.
@@ -89,7 +90,7 @@ def test_gradcscg_objective_and_counts_match_numpy(seed):
 def test_gradcscg_logit_gradient_matches_central_differences():
     T, clones, groups, x, a, h, history, mass = arrival(5)
     arm = tg.GradCSCG(T, clones, learning_rate=1e-2)
-    arm.evaluate(history, 1., mass, x, a, h)
+    arm.evaluate(history, 1., mass, arm.window_term(x, a, h))
     gradient = arm.W.grad.numpy().copy()
     W = np.log(T)
     def G(logits):
@@ -107,7 +108,7 @@ def test_gradcscg_step_is_standard_keras_default_adam_on_logits():
     T, clones, groups, x, a, h = problem(10)
     history = np.full(T.shape, .002)
     arm = tg.GradCSCG(T, clones, learning_rate=1e-2)
-    arm.evaluate(history, 1., history.sum() + 1, x, a, h)
+    arm.evaluate(history, 1., history.sum() + 1, arm.window_term(x, a, h))
     g = arm.W.grad.numpy().copy()
     new = arm.step()
     W1 = np.log(T) - 1e-2 * (.1 * g / .1) / (np.sqrt(.001 * g ** 2 / .001) + 1e-7)
@@ -159,6 +160,42 @@ def test_gradient_optimizer_is_restricted_to_long_and_validated():
     with pytest.raises(ValueError, match="long"):
         train_experiment(T, clones, x, a, "short", ExperimentConfig(optimizer="gradcscg"), [0])
     for bad in [dict(optimizer="projected_gradient"), dict(optimizer="gradcscg", gradient_learning_rate=0),
-                dict(optimizer="gradcscg", jepa_mix=.5), dict(optimizer="gradcscg", adam_beta1=1.)]:
+                dict(optimizer="gradcscg", jepa_mix=0.), dict(optimizer="gradcscg", adam_beta1=1.)]:
         with pytest.raises(ValueError):
             ExperimentConfig(**bad)
+
+
+@pytest.mark.parametrize("rho", [.5, 1.])
+def test_gradcscg_jepa_term_and_counts_match_numpy_jepa_mix(rho):
+    """Torch JEPA data term = (1 - rho) data_nll + rho replay predictive KL; counts = (1 - rho) xi + rho D."""
+    T, clones, groups, x, a, h, history, mass = arrival(11)
+    _, f, _ = CarriedFilter(clones).batch(T, x, np.r_[0, a])
+    teacher = row_normalize(T + np.random.default_rng(2).uniform(0, .5, T.shape))
+    targets = smooth_window(teacher, groups, x, a, f[0])[0][1:]
+    beliefs, ids = f[:-1], [groups[int(z)] for z in x[1:]]
+    previous, incoming, newest = f[-2], int(a[-1]), int(x[-1])
+    arm = tg.GradCSCG(T, clones, learning_rate=1e-2)
+    value, data, C = arm.evaluate(history, .7, mass, arm.jepa_term(rho, previous, incoming, newest, beliefs, a, targets))
+    predictive, _, _, D, _ = replay_terms(T, beliefs, a, ids, targets)
+    nll = data_nll(T, previous, incoming, groups[newest])
+    np.testing.assert_allclose(data, (1 - rho) * nll + rho * predictive, rtol=1e-11)
+    np.testing.assert_allclose(value, (-np.sum(history * np.log(T)) + .7 * data) / mass, rtol=1e-12)
+    xi = None if rho == 1 else pair_counts(T, previous, incoming, groups[newest])
+    np.testing.assert_allclose(C, expected_counts(xi, D, rho), atol=1e-11)
+
+
+def test_training_gradcscg_jepa_arm_runs_with_teacher_and_shared_controls():
+    T, clones, x, a = stream()
+    common = dict(window=6, teacher_window=6, forgetting=1.0, local_updates=5, jepa_mix=.5,
+                  student_inference="smooth")
+    em = train_experiment(T, clones, x, a, "predictive", ExperimentConfig(**common), [0, 30, 60])
+    grad = train_experiment(T, clones, x, a, "predictive",
+                            ExperimentConfig(**common, optimizer="gradcscg", gradient_learning_rate=1e-2), [0, 30, 60])
+    work = grad["work"]
+    assert work["gradient_steps"] == work["penalty_updates"] == 5 * work["transitions"]
+    assert work["teacher_updates"] == em["work"]["teacher_updates"] == work["transitions"]
+    assert grad["counts"].sum() == pytest.approx(work["transitions"], rel=1e-9)
+    np.testing.assert_array_equal(grad["snapshots"][0], em["snapshots"][0])
+    assert not np.allclose(grad["final_T"], em["final_T"])   # only the optimiser differs
+    np.testing.assert_allclose(grad["teacher_T"].sum(-1), 1, atol=1e-12)
+    assert [d["step"] for d in grad["diagnostics"]] == [30, 60]

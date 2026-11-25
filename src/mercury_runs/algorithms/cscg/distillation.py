@@ -265,11 +265,11 @@ class ExperimentConfig:
     # 0 = short EM, 1 = teacher-derived evidence only (statistics, forgetting and
     # pseudocount retained). None = legacy penalty parameterisation via penalty_weight.
     jepa_mix: float | None = None
-    # Optimiser of the per-arrival objective. "em": T <- rowNorm(B) at every local iteration.
-    # "gradcscg" (method "long" only): the same objective, normalised by its constant count mass,
-    # minimised by reference gradCSCG -- logits, row-softmax, log-space forward, autodiff and
-    # standard Adam (adam_* coefficients, learning rate gradient_learning_rate);
-    # cscg/torch_gradient.py, docs/gradient_cscg_formulation.md.
+    # Optimiser of the per-arrival objective. "em": T <- rowNorm(B) (or its jepa_mix analogue) at
+    # every local iteration. "gradcscg" (method "long", or "predictive" with jepa_mix > 0): the same
+    # objective, normalised by its constant count mass, minimised by reference gradCSCG -- logits,
+    # row-softmax, log-space forward, autodiff and standard Adam (adam_* coefficients, learning
+    # rate gradient_learning_rate); cscg/torch_gradient.py, docs/gradient_cscg_formulation.md.
     optimizer: str = "em"
     gradient_learning_rate: float = 1e-3
     adam_beta1: float = 0.9
@@ -312,8 +312,8 @@ class ExperimentConfig:
             raise ValueError(f"optimizer must be one of {OPTIMIZERS}")
         if not math.isfinite(self.gradient_learning_rate) or self.gradient_learning_rate <= 0:
             raise ValueError("gradient_learning_rate must be positive and finite")
-        if self.optimizer != "em" and self.jepa_mix is not None:
-            raise ValueError("gradcscg optimises the EM objective; it excludes jepa_mix")
+        if self.optimizer != "em" and self.jepa_mix == 0:
+            raise ValueError("gradcscg with jepa_mix requires jepa_mix > 0 (jepa_mix = 0 is short EM)")
         if not (0 <= self.adam_beta1 < 1 and 0 <= self.adam_beta2 < 1 and self.adam_epsilon > 0):
             raise ValueError("Adam requires beta1, beta2 in [0, 1) and positive epsilon")
 
@@ -351,8 +351,9 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     if mixed and method != "predictive":
         raise ValueError("jepa_mix defines the objective of method 'predictive' only")
     gradcscg = config.optimizer == "gradcscg"
-    if config.optimizer != "em" and method != "long":
-        raise ValueError(f"optimizer '{config.optimizer}' is implemented for method 'long' only")
+    if gradcscg and not (method == "long" or (method == "predictive" and mixed)):
+        raise ValueError("optimizer 'gradcscg' is implemented for method 'long' and for "
+                         "method 'predictive' with jepa_mix")
     extra = method in {"predictive", "posterior", "nll_control"}
     if mixed:
         rho = float(config.jepa_mix)
@@ -480,6 +481,9 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                     except ZeroPredictiveSupportError:
                         return math.inf
                     return (prior_term + increment * nll) / mass
+            if gradcscg and mixed:
+                # Accumulated JEPA data term in torch, from the frozen sources and teacher targets.
+                jepa_data = gradient_arm.jepa_term(rho, previous, incoming, x, beliefs, aa, targets)
             # Each E-step uses the latest T and the same pre-arrival statistics.
             local_diagnostics = []
             for local_iteration in range(config.local_updates):
@@ -487,7 +491,8 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                 if em_active:
                     if method == "long" and gradcscg:
                         # Autodiff through the torch forward pass; X follows from T * grad = -X.
-                        value, nll, X = gradient_arm.evaluate(history, increment, mass, xs, aa, cached_student[s])
+                        value, nll, X = gradient_arm.evaluate(
+                            history, increment, mass, gradient_arm.window_term(xs, aa, cached_student[s]))
                         work["smoothing_block_entries"] += 3 * window_entries
                     elif method == "long":
                         _, X = smooth_window(T, groups, xs, aa, cached_student[s])
@@ -534,7 +539,14 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                                              else increment * (1 - rho) * X.sum(-1)).tolist(),
                                 jepa_row_mass=(increment * rho * before[3].sum(-1)).tolist(),
                                 history_row_mass=(prior_counts + config.pseudocount).sum(-1).tolist())
-                    T = row_normalize(B)
+                    if gradcscg:
+                        # Same objective F; one Adam step on the logits replaces the MM update rowNorm(B).
+                        # The committed counts C are unchanged (equal to the gradient-derived ones).
+                        gradient_arm.evaluate(history, increment, mass, jepa_data)
+                        T = gradient_arm.step()
+                        work["gradient_steps"] += 1
+                    else:
+                        T = row_normalize(B)
                     if record:
                         after = replay_terms(T, beliefs, aa, ids, targets)
                         local_diagnostics.append(dict(
@@ -565,7 +577,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                             iteration=local_iteration + 1, objective_before=objective_before,
                             objective_after=objective(T, after[objective_index]),
                             running_count_mass=float(candidate_counts.sum())))
-                elif gradcscg:
+                elif gradcscg and method == "long":
                     T = gradient_arm.step()
                     work["gradient_steps"] += 1
                     if record_objective:

@@ -493,7 +493,7 @@ def main():
                    help="Smooth mode: historical context H_S, forward-backward over x_{u-H_S+1:u+1}")
     p.add_argument("--optimizer", choices=OPTIMIZERS, default="em",
                    help="Per-arrival optimiser: em, or gradcscg (reference logits + softmax + Adam; "
-                        "requires --methods long)")
+                        "requires --methods long, or --methods predictive with --jepa-mix)")
     p.add_argument("--gradient-learning-rate", type=float, default=1e-3,
                    help="gradcscg Adam learning rate on the mass-normalised arrival objective")
     p.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS),
@@ -516,8 +516,9 @@ def main():
             p.error("--jepa-mix defines the predictive objective; run it with --methods predictive")
         if args.weight is not None or args.coupled_auxiliary:
             p.error("--jepa-mix excludes the legacy --weight and --coupled-auxiliary options")
-    if args.optimizer != "em" and args.methods != ["long"]:
-        p.error(f"--optimizer {args.optimizer} optimises the long-EM objective; run it with --methods long")
+    if args.optimizer != "em" and args.methods != ["long"] and not (
+            args.methods == ["predictive"] and args.jepa_mix is not None):
+        p.error(f"--optimizer {args.optimizer} requires --methods long, or --methods predictive with --jepa-mix")
     config = ExperimentConfig(window=args.window, forgetting=args.forgetting, pseudocount=args.pseudocount,
                               penalty_weight=(None if args.jepa_mix is not None else
                                               1.0 if args.weight is None else args.weight),
