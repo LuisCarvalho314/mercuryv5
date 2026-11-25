@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 from mercury_runs.algorithms.cscg.distillation import (
-    METHODS, STUDENT_INFERENCE, CarriedFilter, ExperimentConfig, ZeroPredictiveSupportError, row_normalize,
-    train_experiment,
+    METHODS, OPTIMIZERS, STUDENT_INFERENCE, CarriedFilter, ExperimentConfig, NumericalInstabilityError,
+    ZeroPredictiveSupportError, row_normalize, train_experiment,
 )
 from mercury_runs.algorithms.cscg.prepare import action_to_indices, map_to_indices, to_indices
 from mercury_runs.application.evaluation_protocol import default_canonical_v4_protocol
@@ -432,10 +432,11 @@ def run_case(output, level, seed, method, config, checkpoints, data, n_clones, i
         result = train_experiment(
             initial, n_clones, data["x"], data["actions"], method, config, checkpoints,
             callback=lambda step, T, meta: metadata.update({step: meta}))
-    except ZeroPredictiveSupportError as error:
-        # A support failure is a result, not a crash: record it and keep the other cases running.
+    except (ZeroPredictiveSupportError, NumericalInstabilityError) as error:
+        # A support or numerical failure is a result, not a crash: record it and keep the other cases running.
         write_json(folder / "failure.json", dict(level=level, seed=seed, method=method, jepa_mix=config.jepa_mix,
-                                                 stage="training", error=str(error),
+                                                 optimizer=config.optimizer, stage="training",
+                                                 error=f"{type(error).__name__}: {error}",
                                                  last_checkpoint=max(metadata, default=None),
                                                  checkpoint_metadata=metadata, provenance=provenance))
         print(f"FAILED level={level} seed={seed} {method}: {error}", flush=True)
@@ -446,6 +447,7 @@ def run_case(output, level, seed, method, config, checkpoints, data, n_clones, i
                         T=np.stack([result["snapshots"][s] for s in checkpoints]), n_clones=n_clones, **teacher,
                         obs_uniques=data["vocabulary"], action_uniques=data["action_vocabulary"])
     write_json(folder / "training.json", dict(provenance=provenance, diagnostics=result["diagnostics"],
+                                              objective_diagnostics=result["objective_diagnostics"],
                                               checkpoint_metadata=metadata))
     method_rows = []
     for step in checkpoints:
@@ -489,6 +491,13 @@ def main():
                    help="Replay source belief: carried filter, or lag-one forward-backward smoothing")
     p.add_argument("--student-context", type=int, default=1,
                    help="Smooth mode: historical context H_S, forward-backward over x_{u-H_S+1:u+1}")
+    p.add_argument("--optimizer", choices=OPTIMIZERS, default="em",
+                   help="Per-arrival optimiser: em, gradcscg (reference logits + softmax + Adam, primary), "
+                        "projected_adam or projected_gradient (secondary); gradient optimisers require --methods long")
+    p.add_argument("--gradient-learning-rate", type=float, default=1.0,
+                   help="Adam learning rate, or initial projected-gradient step, on the mass-normalised arrival objective")
+    p.add_argument("--gradient-backtracks", type=int, default=20,
+                   help="Max Armijo halvings per PGD step (0 = plain fixed step), or per-row feasibility halvings for Adam")
     p.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS),
                    help="Subset of arms to train (default: all five)")
     p.add_argument("--rand-prob", type=float, default=.3)
@@ -509,6 +518,8 @@ def main():
             p.error("--jepa-mix defines the predictive objective; run it with --methods predictive")
         if args.weight is not None or args.coupled_auxiliary:
             p.error("--jepa-mix excludes the legacy --weight and --coupled-auxiliary options")
+    if args.optimizer != "em" and args.methods != ["long"]:
+        p.error(f"--optimizer {args.optimizer} optimises the long-EM objective; run it with --methods long")
     config = ExperimentConfig(window=args.window, forgetting=args.forgetting, pseudocount=args.pseudocount,
                               penalty_weight=(None if args.jepa_mix is not None else
                                               1.0 if args.weight is None else args.weight),
@@ -516,7 +527,9 @@ def main():
                               teacher_half_life=args.half_life, local_updates=args.local_updates,
                               coupled_auxiliary=args.coupled_auxiliary,
                               student_inference=args.student_inference, student_context=args.student_context,
-                              teacher_window=args.teacher_window)
+                              teacher_window=args.teacher_window, optimizer=args.optimizer,
+                              gradient_learning_rate=args.gradient_learning_rate,
+                              gradient_backtracks=args.gradient_backtracks)
     default_output = ("cscg_distillation_coupled5_v1" if args.coupled_auxiliary else
                       "cscg_distillation_v1" if args.local_updates == 2 else f"cscg_distillation_updates{args.local_updates}_v1")
     if args.clone_allocation == "ground_truth":
@@ -525,6 +538,9 @@ def main():
         default_output = default_output.replace("_v1", "_smooth_student_v1")
     if args.jepa_mix is not None:
         default_output = default_output.replace("cscg_distillation", f"cscg_distillation_jepa_mix{args.jepa_mix:g}", 1)
+    if args.optimizer != "em":
+        default_output = default_output.replace(
+            "cscg_distillation", f"cscg_distillation_{args.optimizer}_lr{args.gradient_learning_rate:g}", 1)
     output = (args.output or ROOT / "results/diagnostics" / default_output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if args.report_only:
