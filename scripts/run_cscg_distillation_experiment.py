@@ -492,12 +492,10 @@ def main():
     p.add_argument("--student-context", type=int, default=1,
                    help="Smooth mode: historical context H_S, forward-backward over x_{u-H_S+1:u+1}")
     p.add_argument("--optimizer", choices=OPTIMIZERS, default="em",
-                   help="Per-arrival optimiser: em, gradcscg (reference logits + softmax + Adam, primary), "
-                        "projected_adam or projected_gradient (secondary); gradient optimisers require --methods long")
-    p.add_argument("--gradient-learning-rate", type=float, default=1.0,
-                   help="Adam learning rate, or initial projected-gradient step, on the mass-normalised arrival objective")
-    p.add_argument("--gradient-backtracks", type=int, default=20,
-                   help="Max Armijo halvings per PGD step (0 = plain fixed step), or per-row feasibility halvings for Adam")
+                   help="Per-arrival optimiser: em, or gradcscg (reference logits + softmax + Adam; "
+                        "requires --methods long)")
+    p.add_argument("--gradient-learning-rate", type=float, default=1e-3,
+                   help="gradcscg Adam learning rate on the mass-normalised arrival objective")
     p.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS),
                    help="Subset of arms to train (default: all five)")
     p.add_argument("--rand-prob", type=float, default=.3)
@@ -528,8 +526,7 @@ def main():
                               coupled_auxiliary=args.coupled_auxiliary,
                               student_inference=args.student_inference, student_context=args.student_context,
                               teacher_window=args.teacher_window, optimizer=args.optimizer,
-                              gradient_learning_rate=args.gradient_learning_rate,
-                              gradient_backtracks=args.gradient_backtracks)
+                              gradient_learning_rate=args.gradient_learning_rate)
     default_output = ("cscg_distillation_coupled5_v1" if args.coupled_auxiliary else
                       "cscg_distillation_v1" if args.local_updates == 2 else f"cscg_distillation_updates{args.local_updates}_v1")
     if args.clone_allocation == "ground_truth":

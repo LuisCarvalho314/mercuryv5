@@ -146,66 +146,8 @@ def window_nll(T, groups, observations, actions, boundary):
     return -_window_messages(T, groups, observations, actions, boundary, backward=False)[4] / (len(observations) - 1)
 
 
-def window_nll_gradient(T, groups, observations, actions, boundary):
-    """Mean window NLL, its mean pair counts X and its exact gradient, from one forward-backward pass.
-
-    d(-log Z)/dT_{a,ij} = -sum_{u: a_u = a} alpha_u(i) beta_{u+1}(j) / (alpha_u^T T_a beta_{u+1}),
-    so T * gradient = -X (the E-step counts) and the gradient stays finite where T_{a,ij} = 0.
-    See docs/gradient_cscg_formulation.md, Section 2.
-    """
-    n = len(observations)
-    ids, blocks, alpha, beta, log_evidence = _window_messages(T, groups, observations, actions, boundary)
-    counts, gradient = np.zeros_like(T), np.zeros_like(T)
-    for u in range(n - 1):
-        outer = alpha[u][:, None] * beta[u + 1][None, :]
-        pair = outer * blocks[u]
-        total = pair.sum()
-        index = (int(actions[u]), *np.ix_(ids[u], ids[u + 1]))
-        counts[index] += pair / total / (n - 1)
-        gradient[index] -= outer / total / (n - 1)
-    return -log_evidence / (n - 1), counts, gradient
-
-
 class NumericalInstabilityError(ValueError):
     """A gradient step produced a nonfinite objective or gradient. Raised, never repaired."""
-
-
-def project_rows_to_simplex(V):
-    """Row-wise Euclidean projection onto the probability simplex (sort-based, exact).
-
-    argmin_{p >= 0, 1^T p = 1} ||p - v||^2 = max(v - theta, 0); entries may become exactly zero.
-    """
-    flat = V.reshape(-1, V.shape[-1])
-    ordered = -np.sort(-flat, axis=1)
-    cumulative = np.cumsum(ordered, axis=1) - 1
-    index = np.arange(1, flat.shape[1] + 1)
-    support = np.count_nonzero(ordered - cumulative / index > 0, axis=1)
-    theta = cumulative[np.arange(len(flat)), support - 1] / support
-    return np.maximum(flat - theta[:, None], 0).reshape(V.shape)
-
-
-def projected_gradient_step(T, value, gradient, objective, learning_rate, max_backtracks, sufficient_decrease=1e-4):
-    """One row-wise projected-gradient step T+ = P(T - eta g) on the product of row simplices.
-
-    `value`/`gradient` are the objective and its gradient at T; `objective(T')` returns the
-    objective (+inf where infeasible). The step is objective-agnostic: further analytic terms
-    enter by adding their values and gradients. With max_backtracks > 0, eta is halved until
-    the Armijo condition along the projection arc holds; otherwise the step is kept unchanged
-    (failure recorded). max_backtracks = 0 is the plain fixed-step method (no evaluation).
-    """
-    if not np.isfinite(value) or not np.all(np.isfinite(gradient)):
-        raise NumericalInstabilityError(f"Nonfinite objective or gradient (objective {value})")
-    for backtrack in range(max_backtracks + 1):
-        step = learning_rate * 0.5 ** backtrack
-        trial = project_rows_to_simplex(T - step * gradient)
-        if max_backtracks == 0:
-            return trial, dict(step_size=step, backtracks=0, evaluations=0, accepted=True, value_after=None)
-        after = objective(trial)
-        if after <= value + sufficient_decrease * float(np.sum(gradient * (trial - T))):
-            return trial, dict(step_size=step, backtracks=backtrack, evaluations=backtrack + 1,
-                               accepted=True, value_after=after)
-    return T.copy(), dict(step_size=0., backtracks=max_backtracks, evaluations=max_backtracks + 1,
-                          accepted=False, value_after=value)
 
 
 def replay_terms(T, beliefs, actions, destination_ids, targets):
@@ -323,20 +265,13 @@ class ExperimentConfig:
     # 0 = short EM, 1 = teacher-derived evidence only (statistics, forgetting and
     # pseudocount retained). None = legacy penalty parameterisation via penalty_weight.
     jepa_mix: float | None = None
-    # Optimiser of the per-arrival objective (gradient optimisers: method "long" only).
-    # "em": T <- rowNorm(B) at every local iteration. The gradient optimisers minimise the same
-    # objective, normalised by its constant count mass, over row-stochastic T:
-    #   "gradcscg" (primary): reference gradCSCG -- logits, row-softmax, log-space forward,
-    #     autodiff, standard Adam (adam_* coefficients, learning rate gradient_learning_rate).
-    #   "projected_adam" (secondary): PyTorch Adam on T, row-wise simplex projection after each
-    #     update; an infeasible row's step is halved at most gradient_backtracks times.
-    #     Both in cscg/torch_gradient.py.
-    #   "projected_gradient" (diagnostic): NumPy analytic gradient, initial step
-    #     gradient_learning_rate, at most gradient_backtracks Armijo halvings (0 = plain fixed step).
-    # See docs/gradient_cscg_formulation.md.
+    # Optimiser of the per-arrival objective. "em": T <- rowNorm(B) at every local iteration.
+    # "gradcscg" (method "long" only): the same objective, normalised by its constant count mass,
+    # minimised by reference gradCSCG -- logits, row-softmax, log-space forward, autodiff and
+    # standard Adam (adam_* coefficients, learning rate gradient_learning_rate);
+    # cscg/torch_gradient.py, docs/gradient_cscg_formulation.md.
     optimizer: str = "em"
-    gradient_learning_rate: float = 1.0
-    gradient_backtracks: int = 20
+    gradient_learning_rate: float = 1e-3
     adam_beta1: float = 0.9
     adam_beta2: float = 0.999
     adam_epsilon: float = 1e-7   # Keras Adam default, as used by the reference
@@ -377,17 +312,14 @@ class ExperimentConfig:
             raise ValueError(f"optimizer must be one of {OPTIMIZERS}")
         if not math.isfinite(self.gradient_learning_rate) or self.gradient_learning_rate <= 0:
             raise ValueError("gradient_learning_rate must be positive and finite")
-        if (isinstance(self.gradient_backtracks, bool) or not isinstance(self.gradient_backtracks, int)
-                or self.gradient_backtracks < 0):
-            raise ValueError("gradient_backtracks must be a nonnegative integer")
         if self.optimizer != "em" and self.jepa_mix is not None:
-            raise ValueError("gradient optimisers optimise the EM objective; they exclude jepa_mix")
+            raise ValueError("gradcscg optimises the EM objective; it excludes jepa_mix")
         if not (0 <= self.adam_beta1 < 1 and 0 <= self.adam_beta2 < 1 and self.adam_epsilon > 0):
             raise ValueError("Adam requires beta1, beta2 in [0, 1) and positive epsilon")
 
 
 STUDENT_INFERENCE = ("filter", "smooth")
-OPTIMIZERS = ("em", "gradcscg", "projected_adam", "projected_gradient")
+OPTIMIZERS = ("em", "gradcscg")
 
 
 METHODS = ("short", "long", "predictive", "posterior", "nll_control")
@@ -418,8 +350,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     mixed = config.jepa_mix is not None
     if mixed and method != "predictive":
         raise ValueError("jepa_mix defines the objective of method 'predictive' only")
-    gradient_optimizer = config.optimizer == "projected_gradient"
-    torch_optimizer = config.optimizer in ("gradcscg", "projected_adam")
+    gradcscg = config.optimizer == "gradcscg"
     if config.optimizer != "em" and method != "long":
         raise ValueError(f"optimizer '{config.optimizer}' is implemented for method 'long' only")
     extra = method in {"predictive", "posterior", "nll_control"}
@@ -433,13 +364,10 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
         em_active, jepa_active, teacher_active = True, extra and eta > 0, extra
     T = np.asarray(initial_T, dtype=float).copy()
     teacher = T.copy()
-    if torch_optimizer:
-        from .torch_gradient import GradCSCG, ProjectedAdamCSCG
-        betas = (config.adam_beta1, config.adam_beta2)
-        torch_arm = (GradCSCG(T, n_clones, config.gradient_learning_rate, betas, config.adam_epsilon)
-                     if config.optimizer == "gradcscg" else
-                     ProjectedAdamCSCG(T, n_clones, config.gradient_learning_rate, config.gradient_backtracks,
-                                       betas, config.adam_epsilon))
+    if gradcscg:
+        from .torch_gradient import GradCSCG
+        gradient_arm = GradCSCG(T, n_clones, config.gradient_learning_rate,
+                                (config.adam_beta1, config.adam_beta2), config.adam_epsilon)
     groups = clone_groups(n_clones)
     student_filter, teacher_filter = CarriedFilter(n_clones), CarriedFilter(n_clones)
     # Every arm keeps running sufficient statistics, including rho = 1.
@@ -459,7 +387,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                 replay_block_entries=0, tensor_entries=0, base_msteps=0,
                 refinements=0, loss_evaluations=0, transitions=0,
                 em_passes=0, penalty_updates=0, statistics_commits=0, teacher_updates=0,
-                gradient_steps=0, line_search_evaluations=0, backtracks=0, rejected_steps=0)
+                gradient_steps=0)
     elapsed = 0.0
     # Recording only (never read by the learner): support margins since the last checkpoint.
     def support_record():
@@ -536,7 +464,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             prior_counts = S if config.forgetting == 1 else config.forgetting * S
             increment = 1. if config.forgetting == 1 else 1 - config.forgetting
             record_objective = method == "long" and (t + 1) in checkpoints
-            if gradient_optimizer or torch_optimizer or record_objective:
+            if gradcscg or record_objective:
                 # Long-EM per-arrival objective, normalised by its T-independent count mass:
                 #   G(T) = [-<lambda S + kappa, log T> + gamma * window_nll(T)] / M,
                 # the objective whose majoriser rowNorm(B) minimises exactly (EM).
@@ -557,14 +485,9 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             for local_iteration in range(config.local_updates):
                 X = None
                 if em_active:
-                    if method == "long" and torch_optimizer:
+                    if method == "long" and gradcscg:
                         # Autodiff through the torch forward pass; X follows from T * grad = -X.
-                        value, nll, X = torch_arm.evaluate(history, increment, mass, xs, aa, cached_student[s])
-                        work["smoothing_block_entries"] += 3 * window_entries
-                    elif method == "long" and gradient_optimizer:
-                        # One forward-backward pass gives the E-step counts X (committed as in EM)
-                        # and the exact gradient of the window NLL.
-                        nll, X, nll_gradient = window_nll_gradient(T, groups, xs, aa, cached_student[s])
+                        value, nll, X = gradient_arm.evaluate(history, increment, mass, xs, aa, cached_student[s])
                         work["smoothing_block_entries"] += 3 * window_entries
                     elif method == "long":
                         _, X = smooth_window(T, groups, xs, aa, cached_student[s])
@@ -642,34 +565,12 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                             iteration=local_iteration + 1, objective_before=objective_before,
                             objective_after=objective(T, after[objective_index]),
                             running_count_mass=float(candidate_counts.sum())))
-                elif torch_optimizer:
-                    T, step = torch_arm.step()
+                elif gradcscg:
+                    T = gradient_arm.step()
                     work["gradient_steps"] += 1
-                    work["backtracks"] += step.get("row_halvings", 0)
-                    work["rejected_steps"] += step.get("rejected_rows", 0) > 0
                     if record_objective:
-                        local_diagnostics.append(dict(
-                            iteration=local_iteration + 1, objective_before=value,
-                            objective_after=arrival_objective(T), **step, exact_zeros=int(np.sum(T == 0))))
-                elif gradient_optimizer:
-                    with np.errstate(divide="ignore", invalid="ignore"):
-                        value = (-float(np.sum(history * np.log(T))) + increment * nll) / mass
-                        gradient = (increment * nll_gradient - history / T) / mass
-                    T, step = projected_gradient_step(
-                        T, value, gradient, arrival_objective, config.gradient_learning_rate,
-                        config.gradient_backtracks)
-                    work["gradient_steps"] += 1
-                    work["line_search_evaluations"] += step["evaluations"]
-                    work["backtracks"] += step["backtracks"]
-                    work["rejected_steps"] += not step["accepted"]
-                    work["smoothing_block_entries"] += step["evaluations"] * window_entries
-                    if record_objective:
-                        local_diagnostics.append(dict(
-                            iteration=local_iteration + 1, objective_before=value,
-                            objective_after=(arrival_objective(T) if step["value_after"] is None
-                                             else step["value_after"]),
-                            step_size=step["step_size"], backtracks=step["backtracks"],
-                            accepted=step["accepted"], exact_zeros=int(np.sum(T == 0))))
+                        local_diagnostics.append(dict(iteration=local_iteration + 1, objective_before=value,
+                                                      objective_after=arrival_objective(T)))
                 else:
                     if record_objective:
                         objective_before = arrival_objective(T)
