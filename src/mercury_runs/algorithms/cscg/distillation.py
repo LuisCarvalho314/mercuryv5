@@ -434,7 +434,11 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             work["transitions"] += 1
             active = len(groups[int(observations[t - 1])])
             work["filter_block_entries"] += active * T.shape[-1] * (2 if teacher_active else 1)
-            if em_active:
+            # gradCSCG-JEPA takes its new counts from the gradient; NumPy counts are then formed
+            # only at checkpoints, for the recorded diagnostics.
+            gradient_jepa = gradcscg and mixed
+            numpy_counts = not gradient_jepa or (t + 1) in checkpoints
+            if em_active and numpy_counts:
                 fast = pair_counts(T, previous, incoming, groups[int(x)])
             if smoothed_sources:
                 # Source node u = t-1, smoothed with lag one (newest observation x_t,
@@ -481,7 +485,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                     except ZeroPredictiveSupportError:
                         return math.inf
                     return (prior_term + increment * nll) / mass
-            if gradcscg and mixed:
+            if gradient_jepa:
                 # Accumulated JEPA data term in torch, from the frozen sources and teacher targets.
                 jepa_data = gradient_arm.jepa_term(rho, previous, incoming, x, beliefs, aa, targets)
             # Each E-step uses the latest T and the same pre-arrival statistics.
@@ -497,7 +501,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                     elif method == "long":
                         _, X = smooth_window(T, groups, xs, aa, cached_student[s])
                         work["smoothing_block_entries"] += 3 * window_entries
-                    else:
+                    elif numpy_counts:
                         X = fast if local_iteration == 0 else pair_counts(T, previous, incoming, groups[int(x)])
                 final_iteration = local_iteration + 1 == config.local_updates
                 # jepa_mix: teacher counts at every iteration. Legacy: the coupled
@@ -508,15 +512,21 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                 if (em_active if mixed else (config.coupled_auxiliary or not auxiliary_step)):
                     work["em_passes"] += 1
                 if auxiliary_step:
-                    try:
-                        before = replay_terms(T, beliefs, aa, ids, targets)
-                    except ZeroPredictiveSupportError as error:
-                        raise ZeroPredictiveSupportError(f"arrival {t}, iteration {local_iteration}: {error}") from error
                     work["penalty_updates"] += 1
                     work["replay_block_entries"] += window_entries
+                    if numpy_counts:
+                        try:
+                            before = replay_terms(T, beliefs, aa, ids, targets)
+                        except ZeroPredictiveSupportError as error:
+                            raise ZeroPredictiveSupportError(f"arrival {t}, iteration {local_iteration}: {error}") from error
                 # New evidence of this arrival: data counts xi (EM and legacy arms),
                 # or the accumulated mixture C = (1-rho) xi + rho D (jepa_mix).
-                C = expected_counts(X, before[3] if auxiliary_step else None, rho) if mixed else X
+                if gradient_jepa:
+                    # One forward/backward pass of the true objective at the current logits: its
+                    # gradient drives the Adam step below and gives C = (1-rho) xi + rho D.
+                    _, _, C = gradient_arm.evaluate(history, increment, mass, jepa_data)
+                else:
+                    C = expected_counts(X, before[3] if auxiliary_step else None, rho) if mixed else X
                 candidate_counts = prior_counts + increment * C
                 B = candidate_counts + config.pseudocount
                 if mixed and auxiliary_step:
@@ -541,8 +551,6 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                                 history_row_mass=(prior_counts + config.pseudocount).sum(-1).tolist())
                     if gradcscg:
                         # Same objective F; one Adam step on the logits replaces the MM update rowNorm(B).
-                        # The committed counts C are unchanged (equal to the gradient-derived ones).
-                        gradient_arm.evaluate(history, increment, mass, jepa_data)
                         T = gradient_arm.step()
                         work["gradient_steps"] += 1
                     else:

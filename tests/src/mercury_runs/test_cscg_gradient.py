@@ -199,3 +199,15 @@ def test_training_gradcscg_jepa_arm_runs_with_teacher_and_shared_controls():
     assert not np.allclose(grad["final_T"], em["final_T"])   # only the optimiser differs
     np.testing.assert_allclose(grad["teacher_T"].sum(-1), 1, atol=1e-12)
     assert [d["step"] for d in grad["diagnostics"]] == [30, 60]
+
+
+def test_gradcscg_jepa_training_does_not_depend_on_checkpoint_diagnostics():
+    """Counts come from the gradient; NumPy counts are formed only at checkpoints, for diagnostics."""
+    T, clones, x, a = stream()
+    config = ExperimentConfig(window=6, teacher_window=6, forgetting=1.0, local_updates=5, jepa_mix=.99,
+                              student_inference="smooth", optimizer="gradcscg", gradient_learning_rate=1e-2)
+    sparse = train_experiment(T, clones, x, a, "predictive", config, [0, len(x)])
+    dense = train_experiment(T, clones, x, a, "predictive", config, list(range(len(x) + 1)))
+    for key in ("final_T", "counts", "teacher_T"):
+        np.testing.assert_array_equal(sparse[key], dense[key])
+    assert sparse["work"]["penalty_updates"] == dense["work"]["penalty_updates"] == 5 * sparse["work"]["transitions"]
