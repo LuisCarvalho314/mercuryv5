@@ -211,3 +211,40 @@ def test_gradcscg_jepa_training_does_not_depend_on_checkpoint_diagnostics():
     for key in ("final_T", "counts", "teacher_T"):
         np.testing.assert_array_equal(sparse[key], dense[key])
     assert sparse["work"]["penalty_updates"] == dense["work"]["penalty_updates"] == 5 * sparse["work"]["transitions"]
+
+
+def test_gini_regulariser_value_gradient_and_unchanged_counts():
+    T, clones, groups, x, a, h, history, mass = arrival(12)
+    lam = .1
+    plain = tg.GradCSCG(T, clones, learning_rate=1e-2)
+    reg = tg.GradCSCG(T, clones, learning_rate=1e-2, gini_weight=lam)
+    v0, _, C0 = plain.evaluate(history, 1., mass, plain.window_term(x, a, h))
+    v1, _, C1 = reg.evaluate(history, 1., mass, reg.window_term(x, a, h))
+    gini = np.mean(1 - (T ** 2).sum(-1))                       # mean over the |A| K rows
+    np.testing.assert_allclose(v1, v0 + lam * gini, rtol=1e-12)
+    np.testing.assert_allclose(C1, C0, atol=1e-13)             # counts are the shared objective's
+    gradient = reg.W.grad.numpy().copy()
+    W = np.log(T)
+    def total(logits):
+        P = np.exp(logits - logits.max(-1, keepdims=True)); P /= P.sum(-1, keepdims=True)
+        return numpy_objective(P, groups, x, a, h, history, mass) + lam * np.mean(1 - (P ** 2).sum(-1))
+    rng = np.random.default_rng(12)
+    for _ in range(5):
+        d = rng.normal(size=W.shape)
+        eps = 1e-6
+        numeric = (total(W + eps * d) - total(W - eps * d)) / (2 * eps)
+        np.testing.assert_allclose(np.sum(gradient * d), numeric, rtol=1e-6, atol=1e-11)
+
+
+def test_gini_weight_zero_is_the_current_implementation_and_em_rejects_it():
+    T, clones, x, a = stream()
+    common = dict(window=6, forgetting=1.0, local_updates=5, optimizer="gradcscg", gradient_learning_rate=1e-2)
+    default = train_experiment(T, clones, x, a, "long", ExperimentConfig(**common), [0, len(x)])
+    zero = train_experiment(T, clones, x, a, "long", ExperimentConfig(**common, gini_weight=0.), [0, len(x)])
+    np.testing.assert_array_equal(default["final_T"], zero["final_T"])
+    sparse = train_experiment(T, clones, x, a, "long", ExperimentConfig(**common, gini_weight=1.), [0, len(x)])
+    gini = lambda M: np.mean(1 - (M ** 2).sum(-1))
+    assert gini(sparse["final_T"]) < gini(default["final_T"])   # the regulariser sparsifies T
+    for bad in [dict(gini_weight=.1), dict(optimizer="gradcscg", gini_weight=-1.)]:
+        with pytest.raises(ValueError):
+            ExperimentConfig(**bad)

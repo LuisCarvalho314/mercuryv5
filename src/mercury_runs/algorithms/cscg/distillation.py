@@ -275,6 +275,9 @@ class ExperimentConfig:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.999
     adam_epsilon: float = 1e-7   # Keras Adam default, as used by the reference
+    # gradcscg only: Gini-impurity transition-sparsity weight lambda_s; adds
+    # lambda_s * mean_{a,i} (1 - sum_j T_aij^2) to the objective. 0 = no regulariser.
+    gini_weight: float = 0.
 
     @property
     def legacy_penalty_weight(self) -> float:
@@ -316,6 +319,10 @@ class ExperimentConfig:
             raise ValueError("gradcscg with jepa_mix requires jepa_mix > 0 (jepa_mix = 0 is short EM)")
         if not (0 <= self.adam_beta1 < 1 and 0 <= self.adam_beta2 < 1 and self.adam_epsilon > 0):
             raise ValueError("Adam requires beta1, beta2 in [0, 1) and positive epsilon")
+        if not math.isfinite(self.gini_weight) or self.gini_weight < 0:
+            raise ValueError("gini_weight must be finite and nonnegative")
+        if self.gini_weight > 0 and self.optimizer != "gradcscg":
+            raise ValueError("gini_weight regularises the gradcscg objective only")
 
 
 STUDENT_INFERENCE = ("filter", "smooth")
@@ -368,7 +375,7 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     if gradcscg:
         from .torch_gradient import GradCSCG
         gradient_arm = GradCSCG(T, n_clones, config.gradient_learning_rate,
-                                (config.adam_beta1, config.adam_beta2), config.adam_epsilon)
+                                (config.adam_beta1, config.adam_beta2), config.adam_epsilon, config.gini_weight)
     groups = clone_groups(n_clones)
     student_filter, teacher_filter = CarriedFilter(n_clones), CarriedFilter(n_clones)
     # Every arm keeps running sufficient statistics, including rho = 1.

@@ -58,8 +58,9 @@ class GradCSCG:
     follows from the gradient retained on log T. step() is one Adam step on W.
     """
 
-    def __init__(self, T, n_clones, learning_rate, betas=(0.9, 0.999), epsilon=1e-7):
+    def __init__(self, T, n_clones, learning_rate, betas=(0.9, 0.999), epsilon=1e-7, gini_weight=0.):
         torch.set_num_threads(1)   # tiny per-step tensors: avoid thread contention between arms
+        self.gini_weight = float(gini_weight)
         self.W = torch.tensor(np.log(np.asarray(T, dtype=np.float64)), requires_grad=True)
         self.adam = torch.optim.Adam([self.W], lr=learning_rate, betas=betas, eps=epsilon)
         self.state_obs = torch.from_numpy(np.repeat(np.arange(len(n_clones)), n_clones))
@@ -98,11 +99,18 @@ class GradCSCG:
         return term
 
     def evaluate(self, history, increment, mass, data_term):
-        """Objective value, data-term value and the gradient-derived new counts C at the current W."""
+        """Objective value (including any Gini term), data-term value and the gradient-derived new
+        counts C of the shared objective at the current W."""
         self.adam.zero_grad()
         log_T = torch.log_softmax(self.W, dim=-1)
         data = data_term(log_T)
         value = (-(torch.from_numpy(history) * log_T).sum() + increment * data) / mass
+        if self.gini_weight:
+            # Transition-sparsity regulariser: lambda_s * mean_{a,i} (1 - sum_j T_aij^2), on T = softmax(W).
+            # Its own softmax branch: the gradient reaches W, not log_T, so the counts C below
+            # remain the expected counts of the shared objective.
+            T = torch.softmax(self.W, dim=-1)
+            value = value + self.gini_weight * (1 - (T ** 2).sum(dim=-1)).mean()
         if not torch.isfinite(value):
             raise NumericalInstabilityError(f"Nonfinite objective {value.item()}")
         log_T.retain_grad()
