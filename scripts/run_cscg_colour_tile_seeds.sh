@@ -24,6 +24,9 @@ EVAL_WALKS=${EVAL_WALKS:-10}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-500}
 CLONE_ALLOCATION=${CLONE_ALLOCATION:-ground_truth}   # or uniform: CLONES clones per observed colour
 CLONES=${CLONES:-10}
+HALF_LIFE=${HALF_LIFE:-40}   # EMA teacher half-life (observations); != 40 suffixes teacher arms with _hl<N>
+ARMS=${ARMS:-"em_baselines jepa_mix1 gradcscg gradcscg_jepa"}
+HL_SUFFIX=$([[ "$HALF_LIFE" == 40 ]] && echo "" || echo "_hl$HALF_LIFE")
 if [[ "$CLONE_ALLOCATION" == uniform ]]; then
   OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_uniform${CLONES}_3seed_20k}
 else
@@ -32,7 +35,7 @@ fi
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation "$CLONE_ALLOCATION" --clones "$CLONES"
         --student-inference smooth --student-context 1 --forgetting 1.0 --pseudocount 0.002
-        --window 40 --teacher-window 40 --half-life 40 --rand-prob "$RAND_PROB"
+        --window 40 --teacher-window 40 --half-life "$HALF_LIFE" --rand-prob "$RAND_PROB"
         --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --workers "$WORKERS")
 
 for level in $LEVELS; do for seed in $SEEDS; do
@@ -49,14 +52,23 @@ run() {
   echo "$name train exit=$?" | tee -a "$OUT/status.txt"
 }
 
-run em_baselines --methods short long --local-updates 5 &
-run jepa_mix1 --methods predictive --jepa-mix 1 --local-updates 5 &
-run gradcscg_lr0.01_adam10 --methods long --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 &
-run gradcscg_jepa_mix1_lr0.01_adam10 --methods predictive --jepa-mix 1 --optimizer gradcscg \
-  --gradient-learning-rate 0.01 --local-updates 10 &
+RAN=()
+for arm in $ARMS; do
+  case $arm in
+    em_baselines) name=em_baselines; run $name --methods short long --local-updates 5 & ;;
+    jepa_mix1) name=jepa_mix1$HL_SUFFIX; run $name --methods predictive --jepa-mix 1 --local-updates 5 & ;;
+    gradcscg) name=gradcscg_lr0.01_adam10
+      run $name --methods long --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 & ;;
+    gradcscg_jepa) name=gradcscg_jepa_mix1_lr0.01_adam10$HL_SUFFIX
+      run $name --methods predictive --jepa-mix 1 --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 & ;;
+    *) echo "unknown arm $arm" >&2; exit 2 ;;
+  esac
+  RAN+=("$name")
+done
 wait
 
-for dir in "$OUT"/*/; do
+for name in "${RAN[@]}"; do
+  dir="$OUT/$name/"
   ls "$dir"level=*/seed=*/*/rows.json > /dev/null 2>&1 || { echo "skip evaluation of $dir (no completed case)"; continue; }
   "${PY[@]}" scripts/analysis/cscg_distillation_matched_eval.py evaluate --run "$dir" --steps all --workers "$WORKERS" \
     --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --rand-prob "$EVAL_RAND_PROB" \
