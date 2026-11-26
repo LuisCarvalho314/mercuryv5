@@ -22,9 +22,15 @@ RAND_PROB=${RAND_PROB:-0.3}
 EVAL_RAND_PROB=${EVAL_RAND_PROB:-0.1}
 EVAL_WALKS=${EVAL_WALKS:-10}
 EVAL_WALK_LENGTH=${EVAL_WALK_LENGTH:-500}
-OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_3seed_20k}
+CLONE_ALLOCATION=${CLONE_ALLOCATION:-ground_truth}   # or uniform: CLONES clones per observed colour
+CLONES=${CLONES:-10}
+if [[ "$CLONE_ALLOCATION" == uniform ]]; then
+  OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_uniform${CLONES}_3seed_20k}
+else
+  OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_3seed_20k}
+fi
 PY=(env PYTHONPATH=.:src .venv/bin/python)
-COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation ground_truth
+COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation "$CLONE_ALLOCATION" --clones "$CLONES"
         --student-inference smooth --student-context 1 --forgetting 1.0 --pseudocount 0.002
         --window 40 --teacher-window 40 --half-life 40 --rand-prob "$RAND_PROB"
         --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --workers "$WORKERS")
