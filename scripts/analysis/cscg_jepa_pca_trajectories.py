@@ -10,7 +10,10 @@ A second figure repeats this for the no-self-loop movement distributions, using 
 conditioning as cscg_transition_phase_space.py.
 
   PYTHONPATH=.:src .venv/bin/python scripts/analysis/cscg_jepa_pca_trajectories.py \
-      --case 23:<em_baselines dir>:<jepa_mix1 dir> [--case ...] --output DIR [--method pca|umap]
+      --case 23:<em_baselines dir>:<jepa_mix1 dir>[:<second jepa dir>] [--case ...] --output DIR [--method pca|umap]
+
+A fourth case field adds a second EM-JEPA run (student and teacher), labelled with --jepa-label /
+--jepa2-label (e.g. two teacher half-lives); it shares the per-level embedding.
 """
 from __future__ import annotations
 
@@ -33,6 +36,8 @@ from scripts.analysis.cscg_distillation_matched_eval import output_name
 ARMS = [("CSCG (long EM)", "em", "long", "training_matched", "#2a78d6", "-"),
         ("EM-JEPA student", "jepa", "predictive", "training_matched", "#eb6834", "-"),
         ("EM-JEPA teacher", "jepa", "predictive", "teacher_training_matched", "#eb6834", "--")]
+SECOND_JEPA = [("EM-JEPA 2 student", "jepa2", "predictive", "training_matched", "#1baf7a", "-"),
+               ("EM-JEPA 2 teacher", "jepa2", "predictive", "teacher_training_matched", "#1baf7a", "--")]
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
@@ -50,6 +55,8 @@ def embed(matrix, gt, method, neighbors, min_dist):
 def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.1):
     rows, full, nonself, gt_full, gt_nonself = [], [], [], None, None
     for label, key, method, decoder, _, _ in ARMS:
+        if key not in runs:
+            continue
         for seed_dir in sorted(runs[key].glob(f"level={level}/seed=*")):
             seed = int(seed_dir.name.split("=")[1])
             records = sorted((seed_dir / method / evaluation / decoder).glob("step=*.json"))
@@ -92,6 +99,8 @@ def panel(ax, frame, name):
     lines = []
     for label, _, _, _, colour, ls in ARMS:
         part = frame[frame.arm == label]
+        if part.empty:
+            continue
         for _, seed in part.groupby("seed"):
             seed = seed.sort_values("step")
             if variance is not None:   # PCA: faint seeds under the mean
@@ -137,7 +146,9 @@ def figure(frames, name, title, path):
         panel(ax, frame, name)
     for ax in axes[len(frames):]:
         ax.axis("off")
-    handles = [Line2D([0], [0], color=c, ls=ls, lw=2.4, label=label) for label, _, _, _, c, ls in ARMS]
+    present = set().union(*(set(f.arm) for f in frames))
+    handles = [Line2D([0], [0], color=c, ls=ls, lw=2.4, label=label) for label, _, _, _, c, ls in ARMS
+               if label in present]
     handles += [Line2D([0], [0], marker="o", color="none", markerfacecolor="white", markeredgecolor=MUTED, label="start (step 0; projection depends on each arm's decoder)"),
                 Line2D([0], [0], marker="s", color="none", markerfacecolor=MUTED, label="end (step 20,000)"),
                 Line2D([0], [0], marker="*", color="none", markerfacecolor=INK, markersize=12, label="ground truth")]
@@ -150,7 +161,9 @@ def figure(frames, name, title, path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--case", action="append", required=True, help="LEVEL:EM_BASELINES_DIR:JEPA_DIR")
+    p.add_argument("--case", action="append", required=True, help="LEVEL:EM_BASELINES_DIR:JEPA_DIR[:JEPA2_DIR]")
+    p.add_argument("--jepa-label", default="EM-JEPA", help="label of the JEPA_DIR arms")
+    p.add_argument("--jepa2-label", default="EM-JEPA 2", help="label of the JEPA2_DIR arms")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--walks", type=int, default=10)
     p.add_argument("--walk-length", type=int, default=500)
@@ -160,11 +173,18 @@ def main():
     p.add_argument("--min-dist", type=float, default=.1, help="UMAP min_dist")
     args = p.parse_args()
     evaluation = output_name(args.walks, args.walk_length, args.rand_prob)
+    global ARMS
+    second = any(len(case.split(":")) == 4 for case in args.case)
+    ARMS = [(label.replace("EM-JEPA", args.jepa_label, 1), *rest) for label, *rest in ARMS]
+    if second:
+        ARMS += [(label.replace("EM-JEPA 2", args.jepa2_label, 1), *rest) for label, *rest in SECOND_JEPA]
     frames = []
     for case in args.case:
-        level, em, jepa = case.split(":")
-        frames.append(load_case(int(level), {"em": Path(em), "jepa": Path(jepa)}, evaluation,
-                                args.method, args.neighbors, args.min_dist))
+        level, em, jepa, *extra = case.split(":")
+        runs = {"em": Path(em), "jepa": Path(jepa)}
+        if extra:
+            runs["jepa2"] = Path(extra[0])
+        frames.append(load_case(int(level), runs, evaluation, args.method, args.neighbors, args.min_dist))
     args.output.mkdir(parents=True, exist_ok=True)
     coordinates = []
     for frame in frames:   # attrs hold per-level arrays (GT coordinates); pandas cannot concat them
