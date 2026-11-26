@@ -1,14 +1,16 @@
-"""PCA trajectories of projected transition tensors: CSCG (long EM) vs EM-JEPA (student and EMA teacher).
+"""PCA or UMAP trajectories of projected transition tensors: CSCG (long EM) vs EM-JEPA (student and EMA teacher).
 
 Reads the training-matched evaluation records written by cscg_distillation_matched_eval.py. Each
 checkpoint's ``P_hat_full`` (learned transitions projected into ground-truth state space with the
-record's canonical alignment, plus the unmatched sink) is one point; one PCA is fitted per level to
-all arms, seeds and checkpoints, and the record's ``P_true_full`` is projected as the GT reference.
+record's canonical alignment, plus the unmatched sink) is one point; one embedding (PCA, or UMAP with
+``--method umap``) is fitted per level to all arms, seeds and checkpoints, and the record's
+``P_true_full`` is placed as the GT reference (PCA projection / UMAP ``transform``). UMAP is
+non-linear, so its figures show every seed's trajectory and no cross-seed mean.
 A second figure repeats this for the no-self-loop movement distributions, using the same
 conditioning as cscg_transition_phase_space.py.
 
   PYTHONPATH=.:src .venv/bin/python scripts/analysis/cscg_jepa_pca_trajectories.py \
-      --case 23:<em_baselines dir>:<jepa_mix1 dir> [--case ...] --output DIR [--walks 10 --walk-length 500]
+      --case 23:<em_baselines dir>:<jepa_mix1 dir> [--case ...] --output DIR [--method pca|umap]
 """
 from __future__ import annotations
 
@@ -34,7 +36,18 @@ ARMS = [("CSCG (long EM)", "em", "long", "training_matched", "#2a78d6", "-"),
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
-def load_case(level, runs, evaluation):
+def embed(matrix, gt, method, neighbors, min_dist):
+    """2-D coordinates of the learned vectors and of GT, plus PCA explained variance (None for UMAP)."""
+    if method == "pca":
+        pca = PCA(n_components=2, svd_solver="full")
+        return pca.fit_transform(matrix), pca.transform(gt.reshape(1, -1))[0], pca.explained_variance_ratio_
+    import umap
+    reducer = umap.UMAP(n_components=2, n_neighbors=neighbors, min_dist=min_dist, random_state=0,
+                        compatibility_layout=True)   # pin the current (0.5.x) layout pipeline
+    return reducer.fit_transform(matrix), reducer.transform(gt.reshape(1, -1))[0], None
+
+
+def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.1):
     rows, full, nonself, gt_full, gt_nonself = [], [], [], None, None
     for label, key, method, decoder, _, _ in ARMS:
         for seed_dir in sorted(runs[key].glob(f"level={level}/seed=*")):
@@ -66,24 +79,32 @@ def load_case(level, runs, evaluation):
     for name, matrix in (("full", np.stack(full)), ("nonself", np.stack(nonself))):
         if not np.isfinite(matrix).all():
             raise ValueError(f"Non-finite {name} features at level {level}")
-        pca = PCA(n_components=2, svd_solver="full")
-        frame[[f"pc1_{name}", f"pc2_{name}"]] = pca.fit_transform(matrix)
-        frame.attrs[f"gt_{name}"] = pca.transform(gts[name].reshape(1, -1))[0]
+        coordinates, frame.attrs[f"gt_{name}"], variance[name] = embed(matrix, gts[name], embedding, neighbors, min_dist)
+        frame[[f"c1_{name}", f"c2_{name}"]] = coordinates
         frame[f"dist_gt_{name}"] = np.linalg.norm(matrix - gts[name], axis=1)   # in the full feature space
-        variance[name] = pca.explained_variance_ratio_
     frame.attrs["variance"] = variance
     return frame
 
 
 def panel(ax, frame, name):
-    x, y = f"pc1_{name}", f"pc2_{name}"
+    x, y = f"c1_{name}", f"c2_{name}"
+    variance = frame.attrs["variance"][name]
     lines = []
     for label, _, _, _, colour, ls in ARMS:
         part = frame[frame.arm == label]
         for _, seed in part.groupby("seed"):
             seed = seed.sort_values("step")
-            ax.plot(seed[x], seed[y], color=colour, ls=ls, lw=.8, alpha=.28, zorder=1)
+            if variance is not None:   # PCA: faint seeds under the mean
+                ax.plot(seed[x], seed[y], color=colour, ls=ls, lw=.8, alpha=.28, zorder=1)
+                continue
+            # UMAP: coordinates are not linear, so each seed is drawn in full and not averaged.
+            ax.plot(seed[x], seed[y], color=colour, ls=ls, lw=1.5, alpha=.85, zorder=2)
+            ax.scatter(seed[x].iloc[0], seed[y].iloc[0], s=40, facecolor="white", edgecolor=colour, lw=1.5, zorder=4)
+            ax.scatter(seed[x].iloc[-1], seed[y].iloc[-1], s=44, marker="s", color=colour, edgecolor="white", lw=.8, zorder=5)
         mean = part.groupby("step")[[x, y, f"dist_gt_{name}"]].mean().sort_index()
+        if variance is None:
+            lines.append(f"{label}: {mean[f'dist_gt_{name}'].iloc[-1]:.2f}")
+            continue
         ax.plot(mean[x], mean[y], color=colour, ls=ls, lw=2.4, zorder=3)
         for i in range(0, len(mean) - 1, max(1, len(mean) // 6)):   # direction of travel
             ax.annotate("", xy=mean.iloc[i + 1][[x, y]], xytext=mean.iloc[i][[x, y]], zorder=3,
@@ -96,9 +117,8 @@ def panel(ax, frame, name):
     ax.annotate("GT", gt, xytext=(6, 6), textcoords="offset points", fontsize=9, weight="bold", color=INK)
     ax.text(.02, .98, "Final ‖P̂ − P_GT‖:\n" + "\n".join(lines), transform=ax.transAxes, fontsize=7, color=MUTED,
             va="top", zorder=7, bbox=dict(facecolor="white", edgecolor=GRID, alpha=.88, boxstyle="round,pad=.3"))
-    variance = frame.attrs["variance"][name]
-    ax.set_xlabel(f"PC1 ({variance[0]:.0%})", fontsize=8, color=MUTED)
-    ax.set_ylabel(f"PC2 ({variance[1]:.0%})", fontsize=8, color=MUTED)
+    ax.set_xlabel("UMAP 1" if variance is None else f"PC1 ({variance[0]:.0%})", fontsize=8, color=MUTED)
+    ax.set_ylabel("UMAP 2" if variance is None else f"PC2 ({variance[1]:.0%})", fontsize=8, color=MUTED)
     ax.set_title(f"Level {int(frame.level.iloc[0])}", fontsize=10, color=INK, loc="left")
     ax.tick_params(labelsize=7, colors=MUTED, length=0)
     ax.grid(color=GRID, lw=.8); ax.set_axisbelow(True)
@@ -135,24 +155,31 @@ def main():
     p.add_argument("--walks", type=int, default=10)
     p.add_argument("--walk-length", type=int, default=500)
     p.add_argument("--rand-prob", type=float, default=.1)
+    p.add_argument("--method", choices=("pca", "umap"), default="pca")
+    p.add_argument("--neighbors", type=int, default=15, help="UMAP n_neighbors")
+    p.add_argument("--min-dist", type=float, default=.1, help="UMAP min_dist")
     args = p.parse_args()
     evaluation = output_name(args.walks, args.walk_length, args.rand_prob)
     frames = []
     for case in args.case:
         level, em, jepa = case.split(":")
-        frames.append(load_case(int(level), {"em": Path(em), "jepa": Path(jepa)}, evaluation))
+        frames.append(load_case(int(level), {"em": Path(em), "jepa": Path(jepa)}, evaluation,
+                                args.method, args.neighbors, args.min_dist))
     args.output.mkdir(parents=True, exist_ok=True)
     coordinates = []
     for frame in frames:   # attrs hold per-level arrays (GT coordinates); pandas cannot concat them
         plain = frame.copy()
         plain.attrs = {}
         coordinates.append(plain)
-    pd.concat(coordinates, ignore_index=True).to_csv(args.output / "pca_trajectory_coordinates.csv", index=False)
-    common = "3 seeds, 20,000 steps; thin = seeds, thick = mean over seeds; one PCA per level"
-    figure(frames, "full", f"Projected transition tensors, PCA trajectories: CSCG vs EM-JEPA ({common})",
-           args.output / "pca_trajectories_full.png")
-    figure(frames, "nonself", f"No-self-loop movement distributions, PCA trajectories: CSCG vs EM-JEPA ({common})",
-           args.output / "pca_trajectories_nonself.png")
+    m = args.method
+    pd.concat(coordinates, ignore_index=True).to_csv(args.output / f"{m}_trajectory_coordinates.csv", index=False)
+    common = ("3 seeds, 20,000 steps; thin = seeds, thick = mean over seeds; one PCA per level" if m == "pca" else
+              f"3 seeds, 20,000 steps; one line per seed; one UMAP per level, n_neighbors={args.neighbors}, "
+              f"min_dist={args.min_dist:g}, seed 0")
+    figure(frames, "full", f"Projected transition tensors, {m.upper()} trajectories: CSCG vs EM-JEPA ({common})",
+           args.output / f"{m}_trajectories_full.png")
+    figure(frames, "nonself", f"No-self-loop movement distributions, {m.upper()} trajectories: CSCG vs EM-JEPA ({common})",
+           args.output / f"{m}_trajectories_nonself.png")
     print(f"Wrote {args.output}")
 
 
