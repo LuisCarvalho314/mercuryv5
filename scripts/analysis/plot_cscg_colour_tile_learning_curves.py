@@ -40,6 +40,9 @@ def load(sweep: Path) -> pd.DataFrame:
     frames = []
     for folder, method, label, *_ in ARMS:
         path = sweep / folder / "evaluation_v5_training_matched_walks10x500" / "canonical_metrics_all.csv"
+        if not path.exists():
+            print(f"skip {label}: no {path}")
+            continue
         frame = pd.read_csv(path)
         frame = frame[(frame.method == method) & (frame.decoder == "training_matched")].copy()
         frame["arm"] = label
@@ -59,7 +62,15 @@ def style(ax, title, xlabel):
     ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v / 1000:g}k"))
 
 
-def figure(data: pd.DataFrame, per_seed: bool, path: Path) -> None:
+def clone_label(sweep: Path) -> str:
+    import json
+    manifest = json.loads(next(sweep.glob("*/experiment.json")).read_text())
+    if manifest["clone_allocation"] == "uniform":
+        return f"uniform {manifest['clones_per_observation']} clones per colour"
+    return "ground-truth clones"
+
+
+def figure(data: pd.DataFrame, per_seed: bool, path: Path, clones: str) -> None:
     levels = sorted(data.level.unique())
     fig, axes = plt.subplots(len(levels), len(METRICS), figsize=(4.1 * len(METRICS), 3.6 * len(levels)),
                              squeeze=False, constrained_layout=True)
@@ -69,6 +80,8 @@ def figure(data: pd.DataFrame, per_seed: bool, path: Path) -> None:
             ends = []
             for _, _, label, colour, dash in ARMS:
                 part = data[(data.level == level) & (data.arm == label)]
+                if part.empty:
+                    continue
                 if per_seed:
                     for _, seed in part.groupby("seed"):
                         seed = seed.sort_values("step")
@@ -95,10 +108,11 @@ def figure(data: pd.DataFrame, per_seed: bool, path: Path) -> None:
             style(ax, title if row == 0 else title, "Training observations")
             if col == 0:
                 ax.set_ylabel(LEVELS.get(level, f"Level {level}"), fontsize=9, color=INK)
-    handles = [matplotlib.lines.Line2D([], [], color=c, ls=d, lw=2, label=l) for _, _, l, c, d in ARMS]
-    fig.legend(handles=handles, loc="outside lower center", ncol=len(ARMS), frameon=False, fontsize=9)
+    handles = [matplotlib.lines.Line2D([], [], color=c, ls=d, lw=2, label=l) for _, _, l, c, d in ARMS
+               if l in set(data.arm)]
+    fig.legend(handles=handles, loc="outside lower center", ncol=len(handles), frameon=False, fontsize=9)
     kind = "each seed (3 seeds)" if per_seed else "mean ± sd over 3 seeds"
-    fig.suptitle(f"Colour-tile CSCG learning curves — {kind}; training-matched decoder, 10 × 500 held-out walks",
+    fig.suptitle(f"Colour-tile CSCG learning curves ({clones}) — {kind}; training-matched decoder, 10 × 500 held-out walks",
                  fontsize=11, color=INK)
     fig.savefig(path, dpi=150, facecolor="#fcfcfb")
     plt.close(fig)
@@ -111,8 +125,9 @@ def main():
     args = parser.parse_args()
     data = load(args.sweep)
     data.to_csv(args.sweep / "learning_curves.csv", index=False)
-    figure(data, per_seed=False, path=args.sweep / "learning_curves_mean_sd.png")
-    figure(data, per_seed=True, path=args.sweep / "learning_curves_per_seed.png")
+    clones = clone_label(args.sweep)
+    figure(data, per_seed=False, path=args.sweep / "learning_curves_mean_sd.png", clones=clones)
+    figure(data, per_seed=True, path=args.sweep / "learning_curves_per_seed.png", clones=clones)
 
 
 if __name__ == "__main__":
