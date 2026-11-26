@@ -10,10 +10,10 @@ A second figure repeats this for the no-self-loop movement distributions, using 
 conditioning as cscg_transition_phase_space.py.
 
   PYTHONPATH=.:src .venv/bin/python scripts/analysis/cscg_jepa_pca_trajectories.py \
-      --case 23:<em_baselines dir>:<jepa_mix1 dir>[:<second jepa dir>] [--case ...] --output DIR [--method pca|umap]
+      --case 23:<em_baselines dir>:<jepa_mix1 dir>[:<jepa dir 2>...] [--case ...] --output DIR [--method pca|umap]
 
-A fourth case field adds a second EM-JEPA run (student and teacher), labelled with --jepa-label /
---jepa2-label (e.g. two teacher half-lives); it shares the per-level embedding.
+Further case fields add more EM-JEPA runs (student and teacher each), labelled with --jepa-labels
+(or --jepa-label / --jepa2-label), e.g. several teacher half-lives; all share the per-level embedding.
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ from scripts.analysis.cscg_distillation_matched_eval import output_name
 ARMS = [("CSCG (long EM)", "em", "long", "training_matched", "#2a78d6", "-"),
         ("EM-JEPA student", "jepa", "predictive", "training_matched", "#eb6834", "-"),
         ("EM-JEPA teacher", "jepa", "predictive", "teacher_training_matched", "#eb6834", "--")]
-SECOND_JEPA = [("EM-JEPA 2 student", "jepa2", "predictive", "training_matched", "#1baf7a", "-"),
-               ("EM-JEPA 2 teacher", "jepa2", "predictive", "teacher_training_matched", "#1baf7a", "--")]
+# Colours of the 2nd, 3rd, ... EM-JEPA run: next validated categorical slots, fixed order.
+EXTRA_JEPA_COLOURS = ["#1baf7a", "#eda100", "#e87ba4"]
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
@@ -163,7 +163,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--case", action="append", required=True, help="LEVEL:EM_BASELINES_DIR:JEPA_DIR[:JEPA2_DIR]")
     p.add_argument("--jepa-label", default="EM-JEPA", help="label of the JEPA_DIR arms")
-    p.add_argument("--jepa2-label", default="EM-JEPA 2", help="label of the JEPA2_DIR arms")
+    p.add_argument("--jepa2-label", default="EM-JEPA 2", help="label of the second JEPA dir's arms")
+    p.add_argument("--jepa-labels", nargs="+", help="labels of every JEPA dir, in case-field order "
+                                                   "(overrides --jepa-label/--jepa2-label)")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--walks", type=int, default=10)
     p.add_argument("--walk-length", type=int, default=500)
@@ -174,16 +176,22 @@ def main():
     args = p.parse_args()
     evaluation = output_name(args.walks, args.walk_length, args.rand_prob)
     global ARMS
-    second = any(len(case.split(":")) == 4 for case in args.case)
-    ARMS = [(label.replace("EM-JEPA", args.jepa_label, 1), *rest) for label, *rest in ARMS]
-    if second:
-        ARMS += [(label.replace("EM-JEPA 2", args.jepa2_label, 1), *rest) for label, *rest in SECOND_JEPA]
+    n_jepa = max(len(case.split(":")) - 2 for case in args.case)
+    if n_jepa - 1 > len(EXTRA_JEPA_COLOURS):
+        raise ValueError(f"At most {len(EXTRA_JEPA_COLOURS) + 1} EM-JEPA runs per case")
+    labels = args.jepa_labels or [args.jepa_label, args.jepa2_label] + [f"EM-JEPA {i}" for i in range(3, n_jepa + 1)]
+    if len(labels) < n_jepa:
+        raise ValueError(f"--jepa-labels needs {n_jepa} labels")
+    ARMS = [(label.replace("EM-JEPA", labels[0], 1), *rest) for label, *rest in ARMS]
+    for i in range(1, n_jepa):
+        ARMS += [(f"{labels[i]} student", f"jepa{i + 1}", "predictive", "training_matched", EXTRA_JEPA_COLOURS[i - 1], "-"),
+                 (f"{labels[i]} teacher", f"jepa{i + 1}", "predictive", "teacher_training_matched",
+                  EXTRA_JEPA_COLOURS[i - 1], "--")]
     frames = []
     for case in args.case:
         level, em, jepa, *extra = case.split(":")
         runs = {"em": Path(em), "jepa": Path(jepa)}
-        if extra:
-            runs["jepa2"] = Path(extra[0])
+        runs.update({f"jepa{i + 2}": Path(path) for i, path in enumerate(extra)})
         frames.append(load_case(int(level), runs, evaluation, args.method, args.neighbors, args.min_dist))
     args.output.mkdir(parents=True, exist_ok=True)
     coordinates = []
