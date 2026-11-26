@@ -43,6 +43,7 @@ from mercury_runs.infrastructure.paper_precision import (
 )
 from scripts.analysis.cscg_distillation_canonical_report import LABELS, METRICS, canonical_metrics
 from scripts.analysis.evaluate_v5 import EvaluationV5Protocol, _evaluate_metrics
+from src.maze_environment.LEVEL import level_sensor
 
 ROOT = Path(__file__).resolve().parents[2]
 SHORT_LAG = ("short", "nll_control", "predictive", "posterior")
@@ -79,8 +80,9 @@ def protocol_for(level, lag, walks=CANONICAL_BUDGET[0], walk_length=CANONICAL_BU
                  rand_prob=CANONICAL_BUDGET[2]):
     # Canonical study walk set (main_study / cscg_batch_sweep evaluation-v5); a non-canonical
     # setting keeps the seed, metrics and decoder and changes only walk count/length/rand_prob.
+    sensor, sensor_range = level_sensor(level)
     return TrainingMatchedOnlineProtocol(
-        sensor="cardinal distance", sensor_range=1, rand_prob=float(rand_prob), evaluation_seed=0,
+        sensor=sensor, sensor_range=sensor_range, rand_prob=float(rand_prob), evaluation_seed=0,
         number_of_walks=int(walks), walk_length=int(walk_length), edge_thresholds=[1e-6], decoder_lag=int(lag))
 
 

@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Sequence
 import numpy as np
 
 from src.maze_environment.LEVEL import levels
+from src.maze_environment.colour_tile_levels import is_colour_tile_level
 from src.maze_environment.agent import Agent
 from src.maze_environment.maze_environment_v3 import MazeEnvironment
 from src.utils.metrics import compute_cooccurrence_matrix, compute_precision
@@ -94,6 +95,8 @@ class EvaluationWalk:
 def _open_positions(level_index: int) -> list[tuple[int, int]]:
     level = levels[int(level_index)]
     positions: list[tuple[int, int]] = []
+    if is_colour_tile_level(level):
+        return [tuple(map(int, p)) for p in np.argwhere(level.walls == 0)]
     for row_index, row in enumerate(level):
         for col_index, value in enumerate(row):
             if value != "X":

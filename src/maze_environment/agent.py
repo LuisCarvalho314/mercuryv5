@@ -8,7 +8,9 @@ class Agent:
     Contains information on agents location and impact of actions that is not available to the agent control scripts.
     """
 
-    def __init__(self, initial_position,maze, sensors=None):
+    def __init__(self, initial_position, maze, sensors=None, floor_colours=None):
+        # Colour-tile mazes: the floor sensor reads this grid; `maze` stays the wall mask.
+        self.floor_colours = floor_colours
         if sensors is None:
             sensors = {"sensor": "cartesian"}
         self.position = initial_position
@@ -62,9 +64,9 @@ class Agent:
         return self.unlimited_range_sensor(maze=maze)
 
     def floor(self, maze):
-
-        return np.array([maze[self.position[0], self.position[1]],
-                maze[self.position[0], self.position[1]]])
+        grid = maze if self.floor_colours is None else self.floor_colours
+        colour = grid[self.position[0], self.position[1]]
+        return np.array([colour, colour])
 
     def limited_range_sensor(self, sensor_range, maze):
         distances = {"north": sensor_range, "east": sensor_range, "south": sensor_range, "west": sensor_range}

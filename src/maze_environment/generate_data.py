@@ -375,6 +375,7 @@ def generate_data(
     random_start: bool = True,
     output_root: str | Path = "../../datasets",
     reuse_existing: bool = True,
+    agent_sensors_list: Optional[list[dict]] = None,
 ) -> dict[str, str]:
     """
     Returns a mapping {sensor_key: run_id} for each generated/reused dataset.
@@ -382,10 +383,11 @@ def generate_data(
       - "cartesian"
       - "cardinal distance:range=1"
     """
-    agent_sensors_list = [
-        {"sensor": "cardinal distance", "range": 1},
-        {"sensor": "cartesian"},
-    ]
+    if agent_sensors_list is None:
+        agent_sensors_list = [
+            {"sensor": "cardinal distance", "range": 1},
+            {"sensor": "cartesian"},
+        ]
 
     output_root_path = Path(output_root)
     run_ids: dict[str, str] = {}

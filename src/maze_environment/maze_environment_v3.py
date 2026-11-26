@@ -6,6 +6,7 @@ import gymnasium as gym
 import numpy as np
 
 from .agent import Agent
+from .colour_tile_levels import ColourTileLevel, is_colour_tile_level
 from .plots import MazeEnvironmentVisualization
 from utils.setup_logging import setup_logging
 
@@ -22,13 +23,18 @@ class MazeEnvironment(gym.Env):
         setup_logging()
         self.logger = logging.getLogger(self.__class__.__name__)
 
-        if colour_tile_levels:
-            self.maze, self.initial_agent_position = self._read_colour_level(level)
+        if colour_tile_levels and not is_colour_tile_level(level):
+            level = ColourTileLevel(tuple(tuple(row) for row in level))
+        self.floor_colours = None
+        if is_colour_tile_level(level):
+            self.maze, self.floor_colours = level.walls, level.colours
+            self.initial_agent_position = (1, 1)
         else:
             self.maze, self.initial_agent_position = self._read_level(level)
 
         self.agent_position = self.initial_agent_position
-        self.agent = Agent(initial_position=self.agent_position, sensors=agent_sensors, maze=self.maze)
+        self.agent = Agent(initial_position=self.agent_position, sensors=agent_sensors, maze=self.maze,
+                           floor_colours=self.floor_colours)
 
         self.action_keys = list(self.agent.action_dict.keys())
         self.rng = random.Random(seed)
@@ -50,12 +56,6 @@ class MazeEnvironment(gym.Env):
                 elif element == "P":
                     initial_agent_position = (row_index, col_index)
 
-        return maze, initial_agent_position
-
-    @staticmethod
-    def _read_colour_level(level: Any) -> tuple[np.ndarray, tuple[int, int]]:
-        maze = np.array(level)
-        initial_agent_position = (1, 1)
         return maze, initial_agent_position
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):

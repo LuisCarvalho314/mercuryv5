@@ -1,3 +1,5 @@
+from .colour_tile_levels import FLOOR_SENSOR, colour_tile_levels, is_colour_tile_level
+
 level_0 = []
 level_1 = [
     "XXXXXXXXXXX",
@@ -245,5 +247,14 @@ levels = [
     level_20,
     level_21,
     level_22,
-    level_23
+    level_23,
+    # Colour-tile mazes (floor-colour sensor): level 24 = colour level0, 25 = colour level1.
+    *colour_tile_levels,
 ]
+
+
+def level_sensor(level_index: int) -> tuple[str, int | None]:
+    """Default (sensor, range) the CSCG experiments use for a level."""
+    if is_colour_tile_level(levels[int(level_index)]):
+        return FLOOR_SENSOR, None
+    return "cardinal distance", 1

@@ -29,6 +29,8 @@ from mercury_runs.infrastructure.paper_precision import (
     exact_valid_sensorimotor_transitions, infer_num_actions_from_valid_transitions,
 )
 
+from src.maze_environment.LEVEL import level_sensor
+
 ROOT = Path(__file__).resolve().parents[1]
 LABELS = {"short": "Short EM", "long": "Long EM", "predictive": "EMA predictive KL",
           "posterior": "EMA posterior KL", "nll_control": "Replay NLL control"}
@@ -41,9 +43,15 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
+def training_directory(level):
+    sensor, sensor_range = level_sensor(level)
+    directory = ROOT / f"datasets/level={level}/sensor={sensor}"
+    return directory / f"range={sensor_range}" if sensor == "cardinal distance" else directory
+
+
 def load_training(level, seed, rand_prob, steps):
     import polars as pl
-    directory = ROOT / f"datasets/level={level}/sensor=cardinal distance/range=1"
+    directory = training_directory(level)
     candidates = sorted(directory.glob(f"*_seed{seed}_p{rand_prob}_steps{max(2000, steps)}_allsteps_randomstart_*.parquet"))
     if len(candidates) != 1:
         raise ValueError(f"Expected one existing paired trajectory: {candidates}")
@@ -69,7 +77,8 @@ def ground_truth_clone_allocation(level, vocabulary):
     from mercury_runs.algorithms.cscg.structural_init import ground_truth_capacity
     from mercury_runs.infrastructure.paper_precision import _init_env, _set_start_position
     positions = exact_cartesian_reference_positions(level)
-    environment = _init_env(level_index=level, sensor="cardinal distance", sensor_range=1, seed=0)
+    sensor, sensor_range = level_sensor(level)
+    environment = _init_env(level_index=level, sensor=sensor, sensor_range=sensor_range, seed=0)
     observations = []
     for position in positions:
         _set_start_position(environment, tuple(map(int, position)))
@@ -577,8 +586,9 @@ def main():
     write_json(manifest_path, manifest)
     rows, tasks = [], []
     for level in args.levels:
+        sensor, sensor_range = level_sensor(level)
         protocol = default_canonical_v4_protocol(
-            level=level, sensor="cardinal distance", sensor_range=1, rand_prob=args.rand_prob,
+            level=level, sensor=sensor, sensor_range=sensor_range, rand_prob=args.rand_prob,
             evaluation_seed=10000, number_of_walks=args.walks, walk_length=args.walk_length,
             valid_trajectories_only=False, edge_thresholds=[1e-6])
         protocol.decoder = "causal_clone_filter_argmax"
