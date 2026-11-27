@@ -42,14 +42,14 @@ INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
 def embed(matrix, gt, method, neighbors, min_dist):
-    """2-D coordinates of the learned vectors and of GT, plus PCA explained variance (None for UMAP)."""
+    """2-D coordinates of the learned vectors and of GT, PCA explained variance (None for UMAP), fitted model."""
     if method == "pca":
         pca = PCA(n_components=2, svd_solver="full")
-        return pca.fit_transform(matrix), pca.transform(gt.reshape(1, -1))[0], pca.explained_variance_ratio_
+        return pca.fit_transform(matrix), pca.transform(gt.reshape(1, -1))[0], pca.explained_variance_ratio_, pca
     import umap
     reducer = umap.UMAP(n_components=2, n_neighbors=neighbors, min_dist=min_dist, random_state=0,
                         compatibility_layout=True)   # pin the current (0.5.x) layout pipeline
-    return reducer.fit_transform(matrix), reducer.transform(gt.reshape(1, -1))[0], None
+    return reducer.fit_transform(matrix), reducer.transform(gt.reshape(1, -1))[0], None, reducer
 
 
 def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.1):
@@ -71,13 +71,21 @@ def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.
                 q_ns, gt_ns, move = condition_non_selfloop_action_distributions(q, gt, valid)
                 if gt_full is None:
                     gt_full, gt_nonself, move_rows = gt, gt_ns[move], move
+                    frame_context = dict(gt=gt, valid_rows=valid, source_action_counts=np.asarray(
+                        action["source_action_counts"], dtype=np.float64))
                 elif not (np.array_equal(gt, gt_full) and np.array_equal(move, move_rows)):
                     raise ValueError(f"Ground truth differs across records: {path}")
+                elif not np.array_equal(action["source_action_counts"], frame_context["source_action_counts"]):
+                    raise ValueError(f"Evaluation occupancy counts differ across records: {path}")
                 full.append(q.ravel())
                 nonself.append(q_ns[move].ravel())
                 rows.append(dict(level=level, arm=label, seed=seed, step=int(record["snapshot_step"]),
                                  tv_similarity=float(action["tv_similarity_occupancy"]),
-                                 tv_similarity_nonself=float(action["tv_non_self_loop_similarity_occupancy"])))
+                                 tv_similarity_nonself=float(action["tv_non_self_loop_similarity_occupancy"]),
+                                 **{f"recorded_edge_{k.rsplit('_', 1)[1]}": float(v) for k, v in
+                                    action["edge_metrics_by_threshold"]["1e-06"].items()},
+                                 recorded_collapsed_tv_similarity=float(
+                                     record["policy_collapsed"]["tv_similarity_occupancy"])))
     frame = pd.DataFrame(rows)
     if frame.duplicated(["arm", "seed", "step"]).any():
         raise ValueError(f"Duplicate checkpoint records at level {level}")
@@ -86,10 +94,13 @@ def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.
     for name, matrix in (("full", np.stack(full)), ("nonself", np.stack(nonself))):
         if not np.isfinite(matrix).all():
             raise ValueError(f"Non-finite {name} features at level {level}")
-        coordinates, frame.attrs[f"gt_{name}"], variance[name] = embed(matrix, gts[name], embedding, neighbors, min_dist)
+        coordinates, frame.attrs[f"gt_{name}"], variance[name], frame.attrs[f"model_{name}"] = embed(
+            matrix, gts[name], embedding, neighbors, min_dist)
+        frame.attrs[f"features_{name}"] = matrix
         frame[[f"c1_{name}", f"c2_{name}"]] = coordinates
         frame[f"dist_gt_{name}"] = np.linalg.norm(matrix - gts[name], axis=1)   # in the full feature space
     frame.attrs["variance"] = variance
+    frame.attrs["context"] = frame_context   # GT tensor, valid rows and N_ai shared by every record
     return frame
 
 
