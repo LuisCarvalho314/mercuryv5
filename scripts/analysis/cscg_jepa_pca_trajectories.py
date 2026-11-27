@@ -85,7 +85,8 @@ def load_case(level, runs, evaluation, embedding="pca", neighbors=15, min_dist=.
                                  **{f"recorded_edge_{k.rsplit('_', 1)[1]}": float(v) for k, v in
                                     action["edge_metrics_by_threshold"]["1e-06"].items()},
                                  recorded_collapsed_tv_similarity=float(
-                                     record["policy_collapsed"]["tv_similarity_occupancy"])))
+                                     record["policy_collapsed"]["tv_similarity_occupancy"]),
+                                 eval_nll_bps=float(record["model_fit"]["bits_per_symbol"])))
     frame = pd.DataFrame(rows)
     if frame.duplicated(["arm", "seed", "step"]).any():
         raise ValueError(f"Duplicate checkpoint records at level {level}")

@@ -63,6 +63,10 @@ METRICS = [("frobenius", "Frobenius distance ‖P̂ − P_GT‖_F", False),
            ("action_edge_f1_auc", "Action edge F1, threshold AUC (with self-loops)", True),
            ("action_no_self_loop_edge_f1_auc", "Action edge F1, threshold AUC (no self-loops)", True),
            ("collapsed_tv_similarity", "Policy-collapsed TV similarity", True)]
+# Recorded per checkpoint but not a function of the projected tensor (held-out decoding with the
+# checkpoint's own clone model): empirical landscape only.
+EMPIRICAL_ONLY = [("eval_nll_bps", "Held-out NLL (bits per symbol)", False)]
+ALL_METRICS = METRICS + EMPIRICAL_ONLY
 # Measured score columns written into the record by the evaluator, checked against our recomputation.
 RECORDED = dict(action_tv_similarity="tv_similarity", action_no_self_loop_tv_similarity="tv_similarity_nonself",
                 action_edge_precision="recorded_edge_precision", action_edge_recall="recorded_edge_recall",
@@ -140,7 +144,7 @@ def project_rows_to_simplex(tensors, valid_rows):
 
 def mean_paths(frame):
     """Per arm: step-wise means of seed coordinates (the existing thick lines) and of measured scores."""
-    cols = ["c1_full", "c2_full"] + [f"full_{k}" for k, _, _ in METRICS]
+    cols = ["c1_full", "c2_full"] + [f"full_{k}" for k, _, _ in ALL_METRICS]
     return {arm: part.groupby("step")[cols].mean().sort_index() for arm, part in frame.groupby("arm")}
 
 
@@ -236,7 +240,8 @@ def analyse(frame, grid_size, margin, workers=1, radius_fraction=.02, sample_sca
 
     # Empirical surfaces from individual-seed checkpoints; LinearNDInterpolator is NaN outside the hull.
     empirical, loso = {}, {}
-    for key, _, _ in METRICS:
+    frame["full_eval_nll_bps"] = frame["eval_nll_bps"]
+    for key, _, _ in ALL_METRICS:
         values = frame[f"full_{key}"].to_numpy()
         empirical[key] = LinearNDInterpolator(coords, values)(gx, gy)
         held = np.full(len(frame), np.nan)
@@ -249,7 +254,7 @@ def analyse(frame, grid_size, margin, workers=1, radius_fraction=.02, sample_sca
                  min_entry=inverse.min_entry.to_numpy().reshape(gx.shape), frobenius_c=c,
                  explained_variance_ratio=pca.explained_variance_ratio_,
                  **{f"inverse_{k}": inverse[k].to_numpy().reshape(gx.shape) for k, _, _ in METRICS},
-                 **{f"empirical_{k}": empirical[k] for k, _, _ in METRICS},
+                 **{f"empirical_{k}": empirical[k] for k, _, _ in ALL_METRICS},
                  sample_xy=sample_xy, sample_scale=sample_scale, sample_valid_before=valid_before,
                  corrected_xy=corrected_xy, displacement=displacement, tensor_correction=correction,
                  **{f"corrected_samples_{k}": corrected[k].to_numpy() for k, _, _ in METRICS},
@@ -259,13 +264,15 @@ def analyse(frame, grid_size, margin, workers=1, radius_fraction=.02, sample_sca
 
 def validation_summary(frame):
     rows = []
-    for key, _, _ in METRICS:
+    for key, _, _ in ALL_METRICS:
         truth = pd.Series(frame[f"full_{key}"].to_numpy())   # plain Series: frame.attrs hold arrays
         spread = float(truth.max() - truth.min())
         for name, column in (("two_component_reconstruction", "pca2"),
                              ("two_component_reconstruction_simplex_corrected", "pca2corr"),
                              ("corrected_landscape_at_checkpoint", "corrected"),
                              ("empirical_leave_one_seed_out", "loso")):
+            if f"{column}_{key}" not in frame:   # empirical-only metrics have no tensor-based estimate
+                continue
             estimate = pd.Series(frame[f"{column}_{key}"].to_numpy())
             error = (estimate - truth).abs()
             rows.append(dict(metric=key, estimator=name, checkpoints=len(truth),
@@ -288,8 +295,7 @@ def local_consistency(coords, values, tensors, radius, arms=None, max_pairs=200_
     plane = np.linalg.norm(coords[i] - coords[j], axis=1)
     tensor = np.linalg.norm(tensors[i] - tensors[j], axis=1)
     rows = []
-    for key, _, _ in METRICS:
-        v = values[key]
+    for key, v in values.items():
         spread = np.nanpercentile(v, 95) - np.nanpercentile(v, 5)
         d = np.abs(v[i] - v[j])
         d = d[np.isfinite(d)]
@@ -335,6 +341,8 @@ def overlay_3d(ax, frame, means, heights, mean_heights, gt_height):
                    depthshade=False)
         ax.scatter(mean.c1_full.iloc[-1], mean.c2_full.iloc[-1], z[-1], s=50, marker="s", color=colour,
                    edgecolor="white", lw=.8, depthshade=False)
+    if gt_height is None:   # metric undefined for the GT tensor
+        return
     gx, gy = frame.attrs["gt_full"]
     ax.scatter(gx, gy, gt_height, marker="*", s=220, color=INK, edgecolor="white", lw=1, depthshade=False)
 
@@ -362,16 +370,20 @@ def plot_metric(frame, grids, key, label, higher, path, dataset):
     variance = frame.attrs["variance"]["full"]
     xs, ys = grids["xs"], grids["ys"]
     gx, gy = np.meshgrid(xs, ys)
-    inv, cor, emp = grids[f"inverse_{key}"], grids[f"corrected_{key}"], grids[f"empirical_{key}"]
+    empirical_only = f"inverse_{key}" not in grids
+    emp = grids[f"empirical_{key}"]
+    surfaces = [emp] if empirical_only else [grids[f"inverse_{key}"], grids[f"corrected_{key}"], emp]
     observed = frame[f"full_{key}"]
-    values = np.concatenate([g[np.isfinite(g)] for g in (inv, cor, emp)] + [observed, frame[f"pca2_{key}"].dropna()])
+    extra = [] if empirical_only else [frame[f"pca2_{key}"].dropna()]
+    values = np.concatenate([g[np.isfinite(g)] for g in surfaces] + [observed] + extra)
     norm = Normalize(values.min(), values.max() if values.max() > values.min() else values.min() + 1e-9)
     levels = np.linspace(norm.vmin, norm.vmax, 16)
     means = mean_paths(frame)
     direction = "higher is better" if higher else "lower is better"
     context, pca = frame.attrs["context"], frame.attrs["model_full"]
-    gt_height = structural_metrics(context["gt"], context)[key]
-    z_lo, z_hi = min(norm.vmin, gt_height), max(norm.vmax, gt_height)   # z-range also shows GT's own score
+    gt_height = None if empirical_only else structural_metrics(context["gt"], context)[key]
+    z_lo, z_hi = ((norm.vmin, norm.vmax) if gt_height is None   # z-range also shows GT's own score
+                  else (min(norm.vmin, gt_height), max(norm.vmax, gt_height)))
     zlim = (z_lo - .03 * (z_hi - z_lo), z_hi + .03 * (z_hi - z_lo))
     masked_share = 0 if key == "frobenius" else 1 - grids["valid"].mean()
 
@@ -379,8 +391,16 @@ def plot_metric(frame, grids, key, label, higher, path, dataset):
     # Corrected: the corrected surface read at the checkpoint coordinates (lies on that surface).
     # Empirical: the measured checkpoint scores themselves.
     mean_xy = {arm: m[["c1_full", "c2_full"]].to_numpy() for arm, m in means.items()}
-    corrected_at = LinearNDInterpolator(grids["corrected_xy"], grids[f"corrected_samples_{key}"])
-    panels = [
+    empirical_panel = (emp, f"Empirical: measured checkpoint scores, linear triangular interpolation\n"
+                            f"blank = outside the checkpoints' convex hull ({1 - np.isfinite(emp).mean():.0%})",
+                       observed, {a: m[f"full_{key}"].to_numpy() for a, m in means.items()},
+                       "height = measured checkpoint score")
+    if empirical_only:
+        panels = [empirical_panel]
+    else:
+        inv, cor = surfaces[:2]
+        corrected_at = LinearNDInterpolator(grids["corrected_xy"], grids[f"corrected_samples_{key}"])
+        panels = [
         (inv, f"Inverse-PCA (masked): metric of the 2-PC reconstruction\n"
               f"hatched = not a probability tensor ({masked_share:.0%} of grid)",
          frame[f"pca2_{key}"], {a: score_tensors(pca.inverse_transform(xy).reshape(-1, *context["gt"].shape),
@@ -390,15 +410,13 @@ def plot_metric(frame, grids, key, label, higher, path, dataset):
               f"Delaunay over corrected coordinates; blank = outside their hull ({1 - np.isfinite(cor).mean():.0%})",
          pd.Series(frame[f"corrected_{key}"].to_numpy(), index=frame.index),
          {a: corrected_at(xy) for a, xy in mean_xy.items()}, "height = corrected surface at checkpoint"),
-        (emp, f"Empirical: measured checkpoint scores, linear triangular interpolation\n"
-              f"blank = outside the checkpoints' convex hull ({1 - np.isfinite(emp).mean():.0%})",
-         observed, {a: m[f"full_{key}"].to_numpy() for a, m in means.items()}, "height = measured checkpoint score"),
-    ]
-    fig = plt.figure(figsize=(19.5, 11.5))
+        empirical_panel]
+    ncol = len(panels)
+    fig = plt.figure(figsize=(6.5 * ncol + (1.5 if ncol == 1 else 0), 11.5))
     for col, (surface, title, heights, mean_heights, height_note) in enumerate(panels):
-        ax = fig.add_subplot(2, 3, col + 1)
+        ax = fig.add_subplot(2, ncol, col + 1)
         filled = ax.contourf(gx, gy, np.ma.masked_invalid(surface), levels=levels, cmap=SURFACE_CMAP, norm=norm, zorder=1)
-        if col == 0 and key != "frobenius":
+        if col == 0 and key != "frobenius" and not empirical_only:
             ax.contourf(gx, gy, (~grids["valid"]).astype(float), levels=[.5, 1.5], colors="none", hatches=["////"],
                         zorder=2)
             ax.contour(gx, gy, grids["valid"].astype(float), levels=[.5], colors=[MUTED], linewidths=.7, zorder=2)
@@ -408,7 +426,7 @@ def plot_metric(frame, grids, key, label, higher, path, dataset):
         bar = fig.colorbar(filled, ax=ax, shrink=.85, pad=.02)
         bar.set_label(direction, fontsize=7, color=MUTED)
         bar.ax.tick_params(labelsize=6, colors=MUTED)
-        ax = fig.add_subplot(2, 3, col + 4, projection="3d")
+        ax = fig.add_subplot(2, ncol, col + 1 + ncol, projection="3d")
         ax.plot_surface(gx, gy, np.ma.masked_invalid(surface), cmap=SURFACE_CMAP, norm=norm, alpha=.75, lw=0,
                         rstride=2, cstride=2, antialiased=False)
         overlay_3d(ax, frame, means, heights, mean_heights, gt_height)
@@ -421,12 +439,15 @@ def plot_metric(frame, grids, key, label, higher, path, dataset):
                 Line2D([0], [0], marker="o", color="none", markerfacecolor="white", markeredgecolor=MUTED, label="start (step 0)"),
                 Line2D([0], [0], marker="s", color="none", markerfacecolor=MUTED, label="end (step 20,000)"),
                 Line2D([0], [0], marker="*", color="none", markerfacecolor=INK, markersize=12,
-                       label="ground truth (3-D height = GT's own score)")]
-    fig.legend(handles=handles, loc="lower center", ncol=7, frameon=False, fontsize=8)
-    fig.suptitle(f"Level {int(frame.level.iloc[0])} — {label} ({direction}). {dataset}.\nStructural evaluation "
-                 f"landscape over the joint projected-transition PCA plane; not a training-objective landscape.",
+                       label="ground truth (2-D only: NLL undefined for the GT tensor)" if empirical_only
+                       else "ground truth (3-D height = GT's own score)")]
+    fig.legend(handles=handles, loc="lower center", ncol=2 if empirical_only else 7, frameon=False, fontsize=8)
+    kind = ("Empirical held-out NLL landscape (each checkpoint's own decoding; no inverse-PCA version)\n"
+            if empirical_only else "Structural evaluation landscape ")
+    fig.suptitle(f"Level {int(frame.level.iloc[0])} — {label} ({direction}). {dataset}.\n{kind}"
+                 f"over the joint projected-transition PCA plane; not a training-objective landscape.",
                  fontsize=10, color=INK, x=.01, ha="left")
-    fig.tight_layout(rect=(0, .03, 1, .97))
+    fig.tight_layout(rect=(0, .07 if empirical_only else .03, 1, .95 if empirical_only else .97))
     fig.savefig(path, dpi=130)
     plt.close(fig)
 
@@ -502,7 +523,7 @@ def main():
         grids, decomposition, correction, corrected_consistency = analyse(
             frame, args.grid, args.margin, args.workers, args.radius, tuple(args.sample_scales))
         np.savez_compressed(args.output / f"level{level}_landscape_grids.npz", **grids)
-        for key, label, higher in METRICS:
+        for key, label, higher in ALL_METRICS:
             plot_metric(frame, grids, key, label, higher, args.output / f"level{level}_{key}.png", args.dataset_label)
         plot_correction(frame, grids, correction, args.output / f"level{level}_grid_correction.png", args.dataset_label)
         plain = frame.copy(); plain.attrs = {}
@@ -510,7 +531,7 @@ def main():
         summaries.append(validation_summary(frame).assign(level=int(level)))
         radius = args.radius * np.hypot(grids["xs"][-1] - grids["xs"][0], grids["ys"][-1] - grids["ys"][0])
         consistency.append(local_consistency(
-            frame[["c1_full", "c2_full"]].to_numpy(), {k: frame[f"full_{k}"].to_numpy() for k, _, _ in METRICS},
+            frame[["c1_full", "c2_full"]].to_numpy(), {k: frame[f"full_{k}"].to_numpy() for k, _, _ in ALL_METRICS},
             frame.attrs["features_full"], radius, frame.arm.to_numpy()).assign(level=int(level), samples="checkpoints"))
         consistency.append(corrected_consistency.assign(level=int(level), samples="corrected_grid"))
         corrections += [dict(level=int(level), **row) for row in correction]
