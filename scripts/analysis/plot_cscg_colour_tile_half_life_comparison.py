@@ -48,6 +48,7 @@ METRICS = [
 ]
 LEVELS = {24: "Level 24 — colour level0 (4 colours, Latin square)", 25: "Level 25 — colour level1 (10 colours)"}
 INK, MUTED, GRID = "#2b2b29", "#6b6a64", "#e4e3de"
+METHOD_LABELS = {"predictive": "EM-JEPA student", "short": "Short EM", "long": "Long EM"}
 
 
 def folder(half_life: int) -> str:
@@ -92,7 +93,7 @@ def load(variants, expected_half_life=None) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def curves(data: pd.DataFrame, level: int, half_lives, name: str) -> None:
+def curves(data: pd.DataFrame, level: int, half_lives, name: str, subject: str = "EM-JEPA student") -> None:
     colours = dict(zip(half_lives, COLOURS))
     ncol = 5
     nrow = int(np.ceil(len(METRICS) / ncol))
@@ -120,7 +121,7 @@ def curves(data: pd.DataFrame, level: int, half_lives, name: str) -> None:
     handles = ([Line([], [], color=colours[hl], lw=2, label=hl) for hl in half_lives] +
                [Line([], [], color=INK, ls=d, lw=2, label=a) for a, d in ALLOC_STYLE.items()])
     fig.legend(handles=handles, loc="outside lower center", ncol=len(handles), frameon=False, fontsize=9)
-    fig.suptitle(f"{LEVELS[level]}: EM-JEPA student, "
+    fig.suptitle(f"{LEVELS[level]}: {subject}, "
                  f"{' vs '.join(map(str, half_lives))} — mean ± sd over 3 seeds, training-matched decoder, "
                  "10 × 500 held-out walks", fontsize=11, color=INK)
     path = OUT / f"{name}_level{level}.png"
@@ -144,8 +145,10 @@ def main():
         expected = {f"Teacher half-life {hl}": hl for hl in args.half_lives}
     labels = [label for label, _ in variants]
     data = load(variants, expected)
+    methods = {spec.partition(":")[2] or "predictive" for _, spec in variants}
+    subject = " / ".join(METHOD_LABELS.get(m, m) for m in sorted(methods))
     for level in sorted(data.level.unique()):
-        curves(data, level, labels, args.name)
+        curves(data, level, labels, args.name, subject)
     last = data[data.step == data.step.max()]
     columns = [m for m, *_ in METRICS]
     last[["level", "allocation", "half_life", "model", "seed"] + columns].to_csv(
