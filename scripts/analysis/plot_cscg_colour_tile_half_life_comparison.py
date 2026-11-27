@@ -3,6 +3,8 @@
 PYTHONPATH=.:src .venv/bin/python scripts/analysis/plot_cscg_colour_tile_half_life_comparison.py --half-lives 40 80
     or, for any EM-JEPA run folders (e.g. teacher contexts):
     ... --runs "Teacher context 40=jepa_mix1" "Teacher context 80=jepa_mix1_tw80" --name teacher_context_comparison
+    and for any method, LABEL=FOLDER:METHOD (default method predictive; the teacher is read for predictive only):
+    ... --runs "5 updates=em_baselines:long" "20 updates=em_baselines_lu20:long" --name local_updates_long
 
 Half-life H lives in <sweep>/jepa_mix1 (H = 40) or <sweep>/jepa_mix1_hl<H>. Metrics come from
 the training-matched evaluation (canonical_metrics_all.csv); concentration = latent recall and
@@ -53,16 +55,19 @@ def folder(half_life: int) -> str:
 
 
 def load(variants, expected_half_life=None) -> pd.DataFrame:
-    """variants: [(label, run folder name)]; expected_half_life: {label: half-life} to verify, if given."""
+    """variants: [(label, run folder name[:method])]; expected_half_life: {label: half-life} to verify, if given."""
     frames = []
     for alloc, sweep in SWEEPS.items():
-        for hl, name in variants:
+        for hl, spec in variants:
+            name, _, method = spec.partition(":")
+            method = method or "predictive"
+            models = MODELS if method == "predictive" else {"student": (method, "training_matched", "T")}
             run = sweep / name
             manifest = json.loads((run / "experiment.json").read_text())
             if expected_half_life and float(manifest["experiment"]["teacher_half_life"]) != float(expected_half_life[hl]):
                 raise ValueError(f"{run} has half-life {manifest['experiment']['teacher_half_life']}, expected {hl}")
             metrics = pd.read_csv(run / EVAL / "canonical_metrics_all.csv")
-            for model, (method_folder, decoder, key) in MODELS.items():
+            for model, (method_folder, decoder, key) in models.items():
                 part = metrics[(metrics.method == ("teacher" if model == "teacher" else method_folder)) &
                                (metrics.decoder == "training_matched")].copy()
                 extra = []
