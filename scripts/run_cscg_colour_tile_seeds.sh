@@ -26,7 +26,9 @@ CLONE_ALLOCATION=${CLONE_ALLOCATION:-ground_truth}   # or uniform: CLONES clones
 CLONES=${CLONES:-10}
 HALF_LIFE=${HALF_LIFE:-40}   # EMA teacher half-life (observations); != 40 suffixes teacher arms with _hl<N>
 ARMS=${ARMS:-"em_baselines jepa_mix1 gradcscg gradcscg_jepa"}
-HL_SUFFIX=$([[ "$HALF_LIFE" == 40 ]] && echo "" || echo "_hl$HALF_LIFE")
+TEACHER_WINDOW=${TEACHER_WINDOW:-40}   # EMA teacher context; the replay window (and long-EM context) is tied to it
+TW_SUFFIX=$([[ "$TEACHER_WINDOW" == 40 ]] && echo "" || echo "_tw$TEACHER_WINDOW")   # every arm: the window changes long EM too
+HL_SUFFIX=$([[ "$HALF_LIFE" == 40 ]] && echo "" || echo "_hl$HALF_LIFE")$TW_SUFFIX
 if [[ "$CLONE_ALLOCATION" == uniform ]]; then
   OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_uniform${CLONES}_3seed_20k}
 else
@@ -35,7 +37,7 @@ fi
 PY=(env PYTHONPATH=.:src .venv/bin/python)
 COMMON=(--levels $LEVELS --seeds $SEEDS --steps "$STEPS" --clone-allocation "$CLONE_ALLOCATION" --clones "$CLONES"
         --student-inference smooth --student-context 1 --forgetting 1.0 --pseudocount 0.002
-        --window 40 --teacher-window 40 --half-life "$HALF_LIFE" --rand-prob "$RAND_PROB"
+        --window "$TEACHER_WINDOW" --teacher-window "$TEACHER_WINDOW" --half-life "$HALF_LIFE" --rand-prob "$RAND_PROB"
         --walks "$EVAL_WALKS" --walk-length "$EVAL_WALK_LENGTH" --workers "$WORKERS")
 
 for level in $LEVELS; do for seed in $SEEDS; do
@@ -55,9 +57,9 @@ run() {
 RAN=()
 for arm in $ARMS; do
   case $arm in
-    em_baselines) name=em_baselines; run $name --methods short long --local-updates 5 & ;;
+    em_baselines) name=em_baselines$TW_SUFFIX; run $name --methods short long --local-updates 5 & ;;
     jepa_mix1) name=jepa_mix1$HL_SUFFIX; run $name --methods predictive --jepa-mix 1 --local-updates 5 & ;;
-    gradcscg) name=gradcscg_lr0.01_adam10
+    gradcscg) name=gradcscg_lr0.01_adam10$TW_SUFFIX
       run $name --methods long --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 & ;;
     gradcscg_jepa) name=gradcscg_jepa_mix1_lr0.01_adam10$HL_SUFFIX
       run $name --methods predictive --jepa-mix 1 --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 & ;;

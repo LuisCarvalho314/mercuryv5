@@ -1,6 +1,8 @@
 """EM-JEPA teacher half-life comparison on the colour-tile mazes, every metric, both clone allocations.
 
 PYTHONPATH=.:src .venv/bin/python scripts/analysis/plot_cscg_colour_tile_half_life_comparison.py --half-lives 40 80
+    or, for any EM-JEPA run folders (e.g. teacher contexts):
+    ... --runs "Teacher context 40=jepa_mix1" "Teacher context 80=jepa_mix1_tw80" --name teacher_context_comparison
 
 Half-life H lives in <sweep>/jepa_mix1 (H = 40) or <sweep>/jepa_mix1_hl<H>. Metrics come from
 the training-matched evaluation (canonical_metrics_all.csv); concentration = latent recall and
@@ -50,13 +52,14 @@ def folder(half_life: int) -> str:
     return "jepa_mix1" if half_life == 40 else f"jepa_mix1_hl{half_life}"
 
 
-def load(half_lives) -> pd.DataFrame:
+def load(variants, expected_half_life=None) -> pd.DataFrame:
+    """variants: [(label, run folder name)]; expected_half_life: {label: half-life} to verify, if given."""
     frames = []
     for alloc, sweep in SWEEPS.items():
-        for hl in half_lives:
-            run = sweep / folder(hl)
+        for hl, name in variants:
+            run = sweep / name
             manifest = json.loads((run / "experiment.json").read_text())
-            if float(manifest["experiment"]["teacher_half_life"]) != float(hl):
+            if expected_half_life and float(manifest["experiment"]["teacher_half_life"]) != float(expected_half_life[hl]):
                 raise ValueError(f"{run} has half-life {manifest['experiment']['teacher_half_life']}, expected {hl}")
             metrics = pd.read_csv(run / EVAL / "canonical_metrics_all.csv")
             for model, (method_folder, decoder, key) in MODELS.items():
@@ -84,7 +87,7 @@ def load(half_lives) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def curves(data: pd.DataFrame, level: int, half_lives) -> None:
+def curves(data: pd.DataFrame, level: int, half_lives, name: str) -> None:
     colours = dict(zip(half_lives, COLOURS))
     ncol = 5
     nrow = int(np.ceil(len(METRICS) / ncol))
@@ -109,13 +112,13 @@ def curves(data: pd.DataFrame, level: int, half_lives) -> None:
         ax.set_xlim(0, part.step.max())
         ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v / 1000:g}k"))
     Line = matplotlib.lines.Line2D
-    handles = ([Line([], [], color=colours[hl], lw=2, label=f"Teacher half-life {hl}") for hl in half_lives] +
+    handles = ([Line([], [], color=colours[hl], lw=2, label=hl) for hl in half_lives] +
                [Line([], [], color=INK, ls=d, lw=2, label=a) for a, d in ALLOC_STYLE.items()])
     fig.legend(handles=handles, loc="outside lower center", ncol=len(handles), frameon=False, fontsize=9)
-    fig.suptitle(f"{LEVELS[level]}: EM-JEPA student, teacher half-life "
+    fig.suptitle(f"{LEVELS[level]}: EM-JEPA student, "
                  f"{' vs '.join(map(str, half_lives))} — mean ± sd over 3 seeds, training-matched decoder, "
                  "10 × 500 held-out walks", fontsize=11, color=INK)
-    path = OUT / f"half_life_comparison_level{level}.png"
+    path = OUT / f"{name}_level{level}.png"
     fig.savefig(path, dpi=150, facecolor="#fcfcfb")
     plt.close(fig)
     print(f"Wrote {path}")
@@ -124,15 +127,25 @@ def curves(data: pd.DataFrame, level: int, half_lives) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--half-lives", type=int, nargs="+", default=[40, 80])
+    parser.add_argument("--runs", nargs="+", metavar="LABEL=FOLDER",
+                        help="compare these EM-JEPA run folders instead of --half-lives")
+    parser.add_argument("--name", default="half_life_comparison", help="output file prefix")
     args = parser.parse_args()
-    data = load(args.half_lives)
+    if args.runs:
+        variants = [tuple(item.split("=", 1)) for item in args.runs]
+        expected = None
+    else:
+        variants = [(f"Teacher half-life {hl}", folder(hl)) for hl in args.half_lives]
+        expected = {f"Teacher half-life {hl}": hl for hl in args.half_lives}
+    labels = [label for label, _ in variants]
+    data = load(variants, expected)
     for level in sorted(data.level.unique()):
-        curves(data, level, args.half_lives)
+        curves(data, level, labels, args.name)
     last = data[data.step == data.step.max()]
     columns = [m for m, *_ in METRICS]
     last[["level", "allocation", "half_life", "model", "seed"] + columns].to_csv(
-        OUT / "half_life_comparison_final.csv", index=False)
-    summary = last.groupby(["level", "allocation", "model", "half_life"])[columns].mean().round(3)
+        OUT / f"{args.name}_final.csv", index=False)
+    summary = last.groupby(["level", "allocation", "model", "half_life"], sort=False)[columns].mean().round(3)
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 20)
     print(summary.to_string())
