@@ -265,6 +265,13 @@ class ExperimentConfig:
     # 0 = short EM, 1 = teacher-derived evidence only (statistics, forgetting and
     # pseudocount retained). None = legacy penalty parameterisation via penalty_weight.
     jepa_mix: float | None = None
+    # jepa_mix only: source of the (1 - rho) observation-derived counts xi.
+    # "student": the student's own one-transition E-step under its current T (rho = 0 is short EM).
+    # "teacher": the same E-step under the frozen EMA teacher tensor and the teacher's carried
+    # filter belief, xi_T = pair_counts(teacher, h_{t-1}, a, x_t); fixed within an arrival, so
+    # both sources of new evidence are teacher-derived (the (1 - rho) term is the cross-entropy
+    # -<xi_T, log T>). EM optimiser only.
+    em_counts: str = "student"
     # Optimiser of the per-arrival objective. "em": T <- rowNorm(B) (or its jepa_mix analogue) at
     # every local iteration. "gradcscg" (method "long", or "predictive" with jepa_mix > 0): the same
     # objective, normalised by its constant count mass, minimised by reference gradCSCG -- logits,
@@ -311,6 +318,10 @@ class ExperimentConfig:
         if self.teacher_window is not None and (isinstance(self.teacher_window, bool) or not isinstance(self.teacher_window, int)
                                                 or self.teacher_window < self.window):
             raise ValueError("teacher_window must be an integer no smaller than window")
+        if self.em_counts not in EM_COUNTS:
+            raise ValueError(f"em_counts must be one of {EM_COUNTS}")
+        if self.em_counts == "teacher" and (self.jepa_mix is None or self.optimizer != "em"):
+            raise ValueError("em_counts='teacher' requires jepa_mix and the EM optimiser")
         if self.optimizer not in OPTIMIZERS:
             raise ValueError(f"optimizer must be one of {OPTIMIZERS}")
         if not math.isfinite(self.gradient_learning_rate) or self.gradient_learning_rate <= 0:
@@ -327,6 +338,7 @@ class ExperimentConfig:
 
 STUDENT_INFERENCE = ("filter", "smooth")
 OPTIMIZERS = ("em", "gradcscg")
+EM_COUNTS = ("student", "teacher")
 
 
 METHODS = ("short", "long", "predictive", "posterior", "nll_control")
@@ -365,11 +377,14 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
     if mixed:
         rho = float(config.jepa_mix)
         # em_active: the observation-derived counts xi are formed (rho < 1).
-        em_active, jepa_active, teacher_active = rho < 1, rho > 0, rho > 0
+        teacher_em = config.em_counts == "teacher"
+        # The teacher runs whenever its targets (rho > 0) or its E-step counts are used.
+        em_active, jepa_active, teacher_active = rho < 1, rho > 0, rho > 0 or (teacher_em and rho < 1)
     else:
         eta = config.legacy_penalty_weight
         # Historical behaviour: the teacher runs for every extra arm, even at eta = 0.
         em_active, jepa_active, teacher_active = True, extra and eta > 0, extra
+        teacher_em = False
     T = np.asarray(initial_T, dtype=float).copy()
     teacher = T.copy()
     if gradcscg:
@@ -446,7 +461,9 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
             gradient_jepa = gradcscg and mixed
             numpy_counts = not gradient_jepa or (t + 1) in checkpoints
             if em_active and numpy_counts:
-                fast = pair_counts(T, previous, incoming, groups[int(x)])
+                # em_counts='teacher': E-step under the frozen teacher and its filter belief at t-1.
+                fast = (pair_counts(teacher, cached_teacher[t - 1], incoming, groups[int(x)]) if teacher_em
+                        else pair_counts(T, previous, incoming, groups[int(x)]))
             if smoothed_sources:
                 # Source node u = t-1, smoothed with lag one (newest observation x_t,
                 # never beyond t) over the historical context x_{u-H_S+1:t}, from the
@@ -509,7 +526,8 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                         _, X = smooth_window(T, groups, xs, aa, cached_student[s])
                         work["smoothing_block_entries"] += 3 * window_entries
                     elif numpy_counts:
-                        X = fast if local_iteration == 0 else pair_counts(T, previous, incoming, groups[int(x)])
+                        X = (fast if local_iteration == 0 or teacher_em
+                             else pair_counts(T, previous, incoming, groups[int(x)]))
                 final_iteration = local_iteration + 1 == config.local_updates
                 # jepa_mix: teacher counts at every iteration. Legacy: the coupled
                 # flag, or else only the final iteration (EM warm-up first).
@@ -544,7 +562,12 @@ def train_experiment(initial_T, n_clones, observations, actions, method, config,
                         # rowNorm(B^(k)) minimises its MM majoriser at T^(k).
                         def arrival_terms(tensor, jepa):
                             prior_term = -float(np.sum((prior_counts + config.pseudocount) * np.log(tensor)))
-                            nll = data_nll(tensor, previous, incoming, groups[int(x)]) if em_active else None
+                            if not em_active:
+                                nll = None
+                            elif teacher_em:   # cross-entropy to the teacher's one-step counts
+                                nll = -float(np.sum(X[X > 0] * np.log(tensor[X > 0])))
+                            else:
+                                nll = data_nll(tensor, previous, incoming, groups[int(x)])
                             value = prior_term + increment * ((1 - rho) * (nll or 0.) + rho * jepa)
                             return dict(objective=value, prior_term=prior_term, data_nll=nll, jepa_term=float(jepa))
                         terms_before = arrival_terms(T, before[0])

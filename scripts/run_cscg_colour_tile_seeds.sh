@@ -29,7 +29,8 @@ ARMS=${ARMS:-"em_baselines jepa_mix1 gradcscg gradcscg_jepa"}
 TEACHER_WINDOW=${TEACHER_WINDOW:-40}   # EMA teacher context; the replay window (and long-EM context) is tied to it
 TW_SUFFIX=$([[ "$TEACHER_WINDOW" == 40 ]] && echo "" || echo "_tw$TEACHER_WINDOW")   # every arm: the window changes long EM too
 JEPA_MIX=${JEPA_MIX:-1}   # accumulated-JEPA mix rho: new counts (1 - rho) xi + rho D
-HL_SUFFIX=$([[ "$HALF_LIFE" == 40 ]] && echo "" || echo "_hl$HALF_LIFE")$TW_SUFFIX
+EM_COUNTS=${EM_COUNTS:-student}   # source of xi: student (own E-step) or teacher (E-step under the EMA teacher)
+HL_SUFFIX=$([[ "$HALF_LIFE" == 40 ]] && echo "" || echo "_hl$HALF_LIFE")$TW_SUFFIX$([[ "$EM_COUNTS" == student ]] && echo "" || echo "_${EM_COUNTS}em")
 if [[ "$CLONE_ALLOCATION" == uniform ]]; then
   OUT=${OUT:-results/diagnostics/cscg_vs_jepa_colour_tiles_uniform${CLONES}_3seed_20k}
 else
@@ -59,7 +60,7 @@ RAN=()
 for arm in $ARMS; do
   case $arm in
     em_baselines) name=em_baselines$TW_SUFFIX; run $name --methods short long --local-updates 5 & ;;
-    jepa_mix1) name=jepa_mix$JEPA_MIX$HL_SUFFIX; run $name --methods predictive --jepa-mix "$JEPA_MIX" --local-updates 5 & ;;
+    jepa_mix1) name=jepa_mix$JEPA_MIX$HL_SUFFIX; run $name --methods predictive --jepa-mix "$JEPA_MIX" --em-counts "$EM_COUNTS" --local-updates 5 & ;;
     gradcscg) name=gradcscg_lr0.01_adam10$TW_SUFFIX
       run $name --methods long --optimizer gradcscg --gradient-learning-rate 0.01 --local-updates 10 & ;;
     gradcscg_jepa) name=gradcscg_jepa_mix${JEPA_MIX}_lr0.01_adam10$HL_SUFFIX

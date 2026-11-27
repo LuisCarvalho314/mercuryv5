@@ -543,6 +543,23 @@ Three regimes follow.
 | $0 < \rho < 1$ | mixed | $(1-\rho)\,\xi_t + \rho\, D_t$ |
 | $\rho = 1$ | teacher-derived only | $D_t$ |
 
+**Variant: teacher E-step counts (`em_counts = "teacher"`).** By default $\xi_t$ is the
+student's own one-transition E-step, $\xi_t(T)$ with the student's carried filter $f_{t-1}$, so
+$\rho = 0$ is short EM. With `em_counts = "teacher"` the $(1-\rho)$ share is instead the same
+E-step under the frozen EMA teacher and its carried filter $h_{t-1}$,
+
+$$
+\xi^{\mathrm{T}}_t = \operatorname{pairCounts}\big(\bar T_t,\ h_{t-1},\ a_{t-1},\ x_t\big),
+\qquad
+C_t = (1-\rho)\,\xi^{\mathrm{T}}_t + \rho\, D_t ,
+$$
+
+which still has unit mass. $\xi^{\mathrm{T}}_t$ does not depend on the student iterate, so it is
+fixed across an arrival's local iterations, and its $(1-\rho)$ term in $F_{\rho,t}$ is the
+cross-entropy $-\langle \xi^{\mathrm{T}}_t, \log T\rangle$ (exact, not a majoriser). Both sources
+of new evidence are then teacher-derived; the teacher runs whenever $\rho > 0$ or $\rho < 1$.
+At $\rho = 1$ the two variants coincide. Implemented for the EM optimiser only.
+
 At $\rho = 1$ the statistics, forgetting and pseudocount are all retained; only the
 observation-derived contribution is removed. The objective is then
 $-\langle \lambda S_t + \kappa\mathbf 1, \log T\rangle + \gamma_\lambda \mathcal L^t(T)$:

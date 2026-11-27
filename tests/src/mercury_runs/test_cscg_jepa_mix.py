@@ -44,6 +44,8 @@ def direct_reference(T0, clones, x, a, rho, config):
     D is accumulated entry by entry from r^u_ij q_{u+1}(j) / n, not via replay_terms.
     """
     groups = clone_groups(clones)
+    teacher_em = config.em_counts == "teacher"
+    teacher_on = rho > 0 or (teacher_em and rho < 1)
     T, teacher, S = T0.copy(), T0.copy(), np.zeros_like(T0)
     lam, kappa = config.forgetting, config.pseudocount
     tau = 2 ** (-1 / config.teacher_half_life)
@@ -52,7 +54,7 @@ def direct_reference(T0, clones, x, a, rho, config):
     for t, z in enumerate(x):
         previous = None if t == 0 else f.belief.copy()
         fs.append(f.step(T, z, None if t == 0 else a[t - 1])[1])
-        if rho > 0:
+        if teacher_on:
             hs.append(h.step(teacher, z, None if t == 0 else a[t - 1])[1])
         if t == 0:
             continue
@@ -64,7 +66,8 @@ def direct_reference(T0, clones, x, a, rho, config):
         for _ in range(config.local_updates):
             C = np.zeros_like(T)
             if rho < 1:
-                C += (1 - rho) * pair_counts(T, previous, a[t - 1], groups[z])
+                C += (1 - rho) * (pair_counts(teacher, hs[t - 1], a[t - 1], groups[z]) if teacher_em
+                                  else pair_counts(T, previous, a[t - 1], groups[z]))
             if rho > 0:
                 D, n = np.zeros_like(T), t - s
                 for u in range(s, t):
@@ -79,7 +82,7 @@ def direct_reference(T0, clones, x, a, rho, config):
             B = candidate + kappa
             T = B / B.sum(-1, keepdims=True)
         S = candidate
-        if rho > 0:
+        if teacher_on:
             teacher = tau * teacher + (1 - tau) * T
     return T, teacher, S
 
@@ -542,3 +545,49 @@ def test_teacher_snapshots_are_recorded_at_checkpoints_only(rho):
     dense = train_experiment(T, clones, x, a, "predictive", config, range(len(x) + 1))
     np.testing.assert_array_equal(dense["teacher_snapshots"][4], result["teacher_snapshots"][4])
     np.testing.assert_array_equal(dense["final_T"], result["final_T"])
+
+
+# --- em_counts = "teacher": the (1 - rho) E-step counts under the frozen EMA teacher -------------
+
+@pytest.mark.parametrize("rho", [0., .5, .9])
+@pytest.mark.parametrize("inference", ["filter", "smooth"])
+@pytest.mark.parametrize("forgetting", [1., .9])
+def test_teacher_em_counts_match_direct_reference(rho, inference, forgetting):
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    config = mixed(rho, student_inference=inference, forgetting=forgetting, em_counts="teacher")
+    result = train_experiment(T, clones, x, a, "predictive", config, [len(x)])
+    reference_T, reference_teacher, reference_S = direct_reference(T, clones, x, a, rho, config)
+    np.testing.assert_allclose(result["final_T"], reference_T, rtol=0, atol=1e-13)
+    np.testing.assert_allclose(result["teacher_T"], reference_teacher, rtol=0, atol=1e-13)
+    np.testing.assert_allclose(result["counts"], reference_S, rtol=0, atol=1e-13)
+
+
+@pytest.mark.parametrize("rho", [.5, .9])
+def test_teacher_em_counts_differ_from_student_counts(rho):
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    student = train_experiment(T, clones, x, a, "predictive", mixed(rho), [len(x)])
+    teacher = train_experiment(T, clones, x, a, "predictive", mixed(rho, em_counts="teacher"), [len(x)])
+    assert np.abs(student["final_T"] - teacher["final_T"]).max() > 1e-6
+
+
+def test_teacher_em_counts_are_irrelevant_at_pure_jepa():
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    student = train_experiment(T, clones, x, a, "predictive", mixed(1.), range(len(x) + 1))
+    teacher = train_experiment(T, clones, x, a, "predictive", mixed(1., em_counts="teacher"), range(len(x) + 1))
+    for step in student["snapshots"]:
+        np.testing.assert_array_equal(teacher["snapshots"][step], student["snapshots"][step])
+
+
+def test_default_em_counts_is_the_student():
+    assert ExperimentConfig().em_counts == "student"
+    T, clones = tiny_problem(); x, a = ambiguous_stream()
+    implicit = train_experiment(T, clones, x, a, "predictive", mixed(.5), [len(x)])
+    explicit = train_experiment(T, clones, x, a, "predictive", mixed(.5, em_counts="student"), [len(x)])
+    np.testing.assert_array_equal(implicit["final_T"], explicit["final_T"])
+
+
+@pytest.mark.parametrize("kwargs", [dict(jepa_mix=.5, em_counts="ema"), dict(em_counts="teacher"),
+                                    dict(jepa_mix=.5, em_counts="teacher", optimizer="gradcscg")])
+def test_invalid_em_counts_are_rejected(kwargs):
+    with pytest.raises(ValueError):
+        ExperimentConfig(**kwargs)
